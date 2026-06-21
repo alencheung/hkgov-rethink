@@ -81,7 +81,7 @@ impl HkmaConnector {
                 self.base_url
             )),
             "daily-interbank-liquidity" => Some(format!(
-                "{}/market-data-and-statistics/daily-figures-interbank-liquidity",
+                "{}/market-data-and-statistics/daily-monetary-statistics/daily-figures-interbank-liquidity",
                 self.base_url
             )),
             _ => None,

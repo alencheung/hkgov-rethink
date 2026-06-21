@@ -27,8 +27,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/sources", get(list_sources))
-        .route("/datasets/:source/:dataset", get(dataset_meta))
-        .route("/datasets/:source/:dataset/records", get(dataset_records))
+        .route("/datasets/{source}/{dataset}", get(dataset_meta))
+        .route("/datasets/{source}/{dataset}/records", get(dataset_records))
         .route("/", get(root))
         .with_state(state)
         // The middleware stack is the heart of our path to 100k concurrency:
@@ -57,8 +57,8 @@ async fn root() -> Json<Root> {
         endpoints: &[
             "GET /health",
             "GET /sources",
-            "GET /datasets/:source/:dataset",
-            "GET /datasets/:source/:dataset/records",
+            "GET /datasets/{source}/{dataset}",
+            "GET /datasets/{source}/{dataset}/records",
         ],
     })
 }
