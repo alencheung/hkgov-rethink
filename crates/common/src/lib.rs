@@ -11,8 +11,8 @@ pub mod model;
 pub mod telemetry;
 
 pub use config::{
-    AgentSettings, ApiSettings, CacheSettings, LogSettings, Settings, StoreSettings,
-    UpstreamSettings,
+    default_scan_targets, AgentSettings, AlertSettings, ApiSettings, CacheSettings, CompanionRef,
+    LogSettings, ScanTarget, Settings, StoreSettings, UpstreamSettings,
 };
 pub use error::{Error, Result};
 pub use model::{DataSource, DatasetMeta, NormalizedRecord, RecordValue};

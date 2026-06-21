@@ -56,7 +56,7 @@ The target is fleet-level, not single-node. The design is honest about that:
 The `RecordStore` trait in `crates/store` is the contract each tier satisfies —
 swapping the backing store is a constructor change, not a refactor.
 
-## AI-agent layer (ROADMAP v2–v3)
+## AI-agent layer (ROADMAP v3 foundation, v6 made it agentic)
 
 The agent layer sits *on top of* the store, not inside connectors:
 
@@ -67,8 +67,55 @@ The agent layer sits *on top of* the store, not inside connectors:
 - Outputs (insights, alerts) are themselves stored as records and served via
   the same API, so insights get the same concurrency guarantees as raw data.
 
-Where it plugs in: a new `crates/agent` crate depending on `store` + a pluggable
-LLM client. No change to `api` routes beyond adding `/insights`.
+Where it plugs in: the `crates/agent` crate depending on `store` + a pluggable
+LLM client. v3 added `/insights`; v6 added the tool belt, the agent loop,
+`POST /v1/ask`, and proactive alerting.
+
+### The determinism guarantee (v6)
+
+The defining property of the agent layer is: **the LLM never performs
+detection**. It only *selects* which deterministic tool to call and *frames*
+the result. Every finding originates in `crates/agent/src/analysis.rs` (pure
+Rust). This means:
+
+- The heuristic baseline (`HeuristicClient`, no API key) produces the same
+  structured findings an LLM would — insights, Q&A, and alerting all work end
+  to end with zero external dependencies.
+- The LLM adds capability (richer framing, autonomous investigation, NL
+  answers) on top of a reproducible core. A re-run with the same inputs and the
+  heuristic client reproduces the same insights deterministically.
+
+### The four layers of v6 intelligence
+
+```
+analysis.rs ── deterministic detectors (pure Rust, no deps)
+   │            series_jump · outlier · seasonality · correlation · cross_source_gap
+   ▼
+tools.rs ──── ToolBelt: list_datasets · query_dataset · run_detector
+   │            (uniform Tool trait, OpenAI-compatible schemas)
+   ▼
+loop_mod.rs ─ run_agent_loop: LLM proposes tool call → execute → reason → finalize
+   │            (bounded by max_steps; heuristic client opts out via default impl)
+   ▼
+qa.rs ─────── heuristic_answer: keyword→dataset fallback when no LLM configured
+```
+
+- **`analysis.rs`** — the detectors. Adding one is a `pub fn -> Vec<Finding>`
+  plus a dispatch arm in `scheduler.rs` and `tools.rs`.
+- **`tools.rs`** — the substrate both the periodic scan and the agent loop call
+  through. Wraps store reads + detector dispatch behind a uniform interface.
+- **`loop_mod.rs`** — the provider-agnostic agent loop. `LlmClient::step` has a
+  default impl that finalizes immediately, so heuristic clients skip the loop.
+- **`qa.rs`** — keeps `POST /v1/ask` useful without an LLM key.
+
+### Proactive alerting (v6)
+
+When the supervisor produces new insights, an `AlertDispatcher` decides which
+are worth pushing (severity ≥ `[alerts] min_severity`, deduped by insight id)
+and fans them out to `AlertSink`s. The built-in `WebhookSink` (POST JSON to a
+URL, bounded retry) is behind the `alerts` feature. The dispatch log is served
+via `GET /v1/alerts` for ops visibility. Sinks that fail are logged, not fatal
+— one bad webhook can't block the others.
 
 ## Configuration & operations
 

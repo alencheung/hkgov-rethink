@@ -55,6 +55,39 @@ what remains. Each milestone is independently runnable.
 - Python API example (`examples/query_api.py`).
 - CONTRIBUTING guide with data-source verification rules and the feature matrix.
 
+## v6 — Intelligence & agentic analysis layer (✅ shipped)
+
+The v3 agent was passive and deterministic: two detectors on hardcoded targets.
+v6 makes it genuinely agentic while preserving the determinism-first principle
+— the LLM gains autonomy over *what to investigate* and *how to answer*, but
+every finding still originates from a pure-Rust detector.
+
+- **Richer intelligence** — three new detectors (`outlier` via MAD robust z-score,
+  `seasonality` via autocorrelation, `correlation` via Pearson r) and a
+  generalized `cross_source_gap`. Scan targets moved to config (`[[agent.scan]]`)
+  so coverage widens without code changes; empty list = the v3 defaults.
+- **Agent tool belt** — `list_datasets` / `query_dataset` / `run_detector`
+  wrapped behind a uniform `Tool` trait with OpenAI-compatible schemas
+  (`crates/agent/src/tools.rs`). Both the periodic scan and the agent loop call
+  through it.
+- **Agentic investigation loop** — `LlmClient::step` drives a multi-step
+  conversation (tool call → execute → reason → finalize), bounded by `max_steps`
+  so a misbehaving model can't loop. Heuristic clients opt out via the default
+  impl (`crates/agent/src/loop_mod.rs`).
+- **Natural-language Q&A** — `POST /v1/ask`. Rich mode runs the agent loop;
+  heuristic mode does keyword→dataset matching so the endpoint is useful with no
+  LLM key. Dashboard + Python example updated.
+- **Proactive alerting** — `AlertDispatcher` pushes qualifying insights
+  (severity ≥ threshold, deduped by id) to webhook sinks. `WebhookSink` is
+  behind the `alerts` feature; `GET /v1/alerts` exposes the dispatch log
+  (`crates/agent/src/alerts.rs`).
+- New `Error::Agent` variant; `InsightSeverity` now implements `Display`.
+
+Feature gating: new detectors + tool belt + agent loop + `/ask` endpoint ship
+unconditional (no new deps, heuristic baseline intact). `HttpLlmClient::step`
+extends the `llm` feature. `WebhookSink` adds the `alerts` feature
+(`alerts = ["dep:reqwest"]`).
+
 ## Remaining (future)
 
 - ISD/info.gov.hk HTML scraping + news.gov.hk RSS (press connector v2).
@@ -62,3 +95,5 @@ what remains. Each milestone is independently runnable.
 - Persisting insights to the Postgres tier (currently in-process).
 - Deploy manifests (k8s/Helm), OTLP collector config, production hardening.
 - Auth via OAuth/JWT (current is static key).
+- Generalize `ToolBelt` / `AgentSupervisor` to `Arc<dyn RecordStore>` so the
+  agent works against Redis/Postgres backends (currently `Arc<MemoryStore>`).

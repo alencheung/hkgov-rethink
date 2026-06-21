@@ -34,6 +34,9 @@ async fn main() -> anyhow::Result<()> {
         settings.cache.ttl_secs,
     ));
     let insights = Arc::new(InsightStore::new());
+    // Build the LLM client up front so both the supervisor and the /v1/ask
+    // endpoint share the same instance.
+    let llm: Arc<dyn LlmClient> = build_llm_client(&settings);
 
     // Background cache warmer. Lives for the lifetime of the process.
     let _ingest = hkgov_ingest::IngestSupervisor::spawn(registry.clone(), store.clone());
@@ -41,17 +44,33 @@ async fn main() -> anyhow::Result<()> {
     // AI-agent layer. The LLM client is the heuristic baseline by default; the
     // `llm` feature swaps in an HTTP client. The supervisor reads from the
     // warmed store, so we give it a moment to warm before the first pass.
+    // Proactive alerting is built from settings when enabled (needs the `alerts`
+    // feature for the webhook sink; the dispatcher itself is always available).
+    let alert_dispatcher: Option<Arc<hkgov_agent::AlertDispatcher>> = if settings.agent.enabled {
+        hkgov_agent::AlertDispatcher::from_settings(&settings.alerts).map(Arc::new)
+    } else {
+        None
+    };
+    let alert_log: Arc<hkgov_agent::AlertLog> = alert_dispatcher
+        .as_ref()
+        .map(|d| d.log())
+        .unwrap_or_else(|| Arc::new(hkgov_agent::AlertLog::new(200)));
+
     let _agent = if settings.agent.enabled {
-        let llm: Arc<dyn LlmClient> = build_llm_client(&settings);
         let store_for_agent = store.clone();
         let insights_for_agent = insights.clone();
+        let llm_for_agent = llm.clone();
+        let settings_for_agent = Arc::new(settings.clone());
+        let alerts_for_agent = alert_dispatcher.clone();
         // Delay the first pass so the cache has something to analyze.
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(20)).await;
             let sup = AgentSupervisor::spawn(
                 store_for_agent,
                 insights_for_agent,
-                llm,
+                llm_for_agent,
+                settings_for_agent,
+                alerts_for_agent,
                 Duration::from_secs(settings.agent.run_interval_secs.max(300)),
             );
             // Keep the supervisor alive for the process lifetime.
@@ -70,6 +89,8 @@ async fn main() -> anyhow::Result<()> {
         registry,
         store,
         insights,
+        llm,
+        alert_log,
         settings: Arc::new(settings.clone()),
     };
 

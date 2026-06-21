@@ -69,6 +69,17 @@
       <table><thead><tr><th>sev</th><th>kind</th><th>title</th><th>producer</th><th>conf.</th><th>evidence</th></tr></thead>
         <tbody id="insights"><tr><td class="empty" colspan="6">loading…</td></tr></tbody></table>
     </section>
+
+    <section class="panel full">
+      <h2>Ask the agent <span class="muted">(natural-language questions over the data)</span></h2>
+      <div style="display:flex; gap:8px; margin-bottom:12px;">
+        <input id="askInput" placeholder="e.g. what is the interbank liquidity doing?" size="60"
+               style="flex:1; background:var(--bg); color:var(--fg); border:1px solid var(--border); padding:8px; border-radius:4px;" />
+        <button id="askBtn" onclick="askAgent()"
+                style="background:var(--accent); color:var(--bg); border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:600;">Ask</button>
+      </div>
+      <div id="askAnswer" class="empty">type a question and press Ask</div>
+    </section>
   </main>
 
   <script>
@@ -127,6 +138,42 @@
       return String(s || '').replace(/[&<>"]/g, c =>
         ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
     }
+
+    async function askAgent() {
+      const question = document.getElementById('askInput').value.trim();
+      const box = document.getElementById('askAnswer');
+      if (!question) { box.className = 'empty'; box.textContent = 'type a question first'; return; }
+      box.className = 'muted'; box.textContent = 'thinking…';
+      const { base, headers } = api();
+      try {
+        const r = await fetch(base + '/v1/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...headers },
+          body: JSON.stringify({ question })
+        });
+        if (!r.ok) {
+          box.className = 'empty';
+          box.textContent = 'error: ' + r.status + ' ' + (await r.text());
+          return;
+        }
+        const a = await r.json();
+        const conf = a.confidence !== undefined ? ` <span class="muted">(${(a.confidence * 100).toFixed(0)}%)</span>` : '';
+        const trace = (a.trace && a.trace.length)
+          ? '<details class="muted"><summary>' + a.trace.length + ' tool call(s)</summary><pre>' +
+            escapeHtml(JSON.stringify(a.trace, null, 2)) + '</pre></details>'
+          : '';
+        box.className = '';
+        box.innerHTML = '<b>' + escapeHtml(a.text) + '</b>' + conf + trace;
+      } catch (e) {
+        box.className = 'empty';
+        box.textContent = 'request failed: ' + e;
+      }
+    }
+
+    // Enter key in the ask box triggers Ask.
+    document.getElementById('askInput').addEventListener('keydown', e => {
+      if (e.key === 'Enter') askAgent();
+    });
 
     // Auto-fill base URL from this server if served from one.
     if (location.protocol.startsWith('http') && location.port) {

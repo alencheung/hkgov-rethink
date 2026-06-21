@@ -44,6 +44,69 @@ llm_base_url = ""
 # HKGOV_AGENT__LLM_API_KEY
 llm_api_key = ""
 llm_model = "gpt-4o-mini"
+# What the periodic scan pass runs. OMITTING this block (or leaving it empty)
+# runs the built-in defaults shown below — so you only need to edit this if you
+# want to widen or change coverage.
+#
+# Each [[agent.scan]] entry is one detector invocation. Available detectors:
+#   series_jump     — flags a numeric field that moved > threshold % between
+#                     consecutive periods.      Needs: field, threshold (%).
+#   outlier         — flags a point beyond `threshold` robust-z (MAD). Default
+#                     threshold 3.5.            Needs: field.
+#   seasonality     — flags strong autocorrelation at monthly (lag 12) or
+#                     quarterly (lag 4) periods, above `threshold` (default 0.6).
+#                                                Needs: field.
+#   correlation     — flags when two fields DECOUPLE (|r| < threshold, default
+#                     0.3).                      Needs: field, field_b.
+#   cross_source_gap — flags dates present in this dataset but absent in
+#                      `companion`.             Needs: field (the date column),
+#                                                companion.
+#
+# Uncomment to override the defaults:
+# [[agent.scan]]
+# source = "hkma"
+# dataset = "daily-interbank-liquidity"
+# detector = "series_jump"
+# field = "hibor_overnight"
+# threshold = 25.0
+#
+# [[agent.scan]]
+# source = "hkma"
+# dataset = "daily-interbank-liquidity"
+# detector = "outlier"
+# field = "hibor_overnight"
+# threshold = 3.5
+#
+# [[agent.scan]]
+# source = "hkma"
+# dataset = "capital-market-statistics"
+# detector = "correlation"
+# field = "eq_mkt_hs_index"
+# field_b = "eq_mkt_total_turnover"
+# threshold = 0.3
+#
+# [[agent.scan]]
+# source = "press"
+# dataset = "hkma-press-releases"
+# detector = "cross_source_gap"
+# field = "date"
+# companion = { source = "hkma", dataset = "daily-interbank-liquidity" }
+
+[alerts]
+# Proactive webhook alerting (v6). Push insights at or above min_severity to
+# every webhook. Needs `--features alerts` for the webhook sink to actually
+# POST; without the feature the dispatcher logs a warning instead.
+enabled = false
+# info | warning | critical. `warning` is the default so info-level insights
+# don't spam. Insights are deduped by id — a re-scan that reproduces the same
+# finding will NOT re-alert.
+min_severity = "warning"
+# Webhook URLs. Each qualifying insight is POSTed as:
+#   { "event": "insight", "insight": { ...Insight... } }
+# with Authorization: Bearer <webhook_token> when set.
+webhooks = []
+# HKGOV_ALERTS__WEBHOOK_TOKEN
+webhook_token = ""
 
 [log]
 format = "plain"

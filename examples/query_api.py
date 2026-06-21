@@ -28,6 +28,17 @@ def get(path):
     return r.json()
 
 
+def post(path, body):
+    r = requests.post(
+        f"{BASE}{path}",
+        headers={"Content-Type": "application/json", **HEADERS},
+        json=body,
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 def main():
     print(f"=== {BASE}{PREFIX}/sources ===")
     for s in get(f"{PREFIX}/sources"):
@@ -48,6 +59,14 @@ def main():
         print(f"  [{i['severity']}] {i['title']}")
         print(f"      {i['summary']}")
         print(f"      producer={i['producer']} confidence={i['confidence']:.0%}")
+
+    print(f"\n=== POST {PREFIX}/ask ===")
+    answer = post(f"{PREFIX}/ask", {"question": "what is the interbank liquidity?"})
+    print(f"  Q: what is the interbank liquidity?")
+    print(f"  A: {answer['text']}")
+    print(f"  confidence={answer.get('confidence', 0):.0%}")
+    if answer.get("trace"):
+        print(f"  reasoning trace: {len(answer['trace'])} tool call(s)")
 
 
 if __name__ == "__main__":

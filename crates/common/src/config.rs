@@ -17,6 +17,7 @@ pub struct Settings {
     pub cache: CacheSettings,
     pub store: StoreSettings,
     pub agent: AgentSettings,
+    pub alerts: AlertSettings,
     pub log: LogSettings,
 }
 
@@ -153,6 +154,10 @@ pub struct AgentSettings {
     pub llm_api_key: Option<String>,
     /// Model id to request.
     pub llm_model: String,
+    /// What the periodic scan pass should run. Each entry maps to one detector
+    /// call against one (source, dataset, field). An empty list means "run the
+    /// [`default_scan_targets`] set" so out-of-the-box behavior is unchanged.
+    pub scan: Vec<ScanTarget>,
 }
 
 impl Default for AgentSettings {
@@ -163,6 +168,121 @@ impl Default for AgentSettings {
             llm_base_url: String::new(),
             llm_api_key: None,
             llm_model: "gpt-4o-mini".to_string(),
+            scan: default_scan_targets(),
+        }
+    }
+}
+
+/// One detector invocation in the periodic scan. Replaces the hardcoded
+/// `run_pass` targets in v3 — the same targets now live in config so operators
+/// can widen coverage without code changes.
+///
+/// `detector` is one of: `series_jump`, `outlier`, `seasonality`,
+/// `correlation`, `cross_source_gap`. Field/threshold semantics depend on the
+/// detector (see `crates/agent/src/analysis.rs`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScanTarget {
+    /// Source slug, e.g. `hkma`, `datagovhk`, `press`, `landsd`.
+    pub source: String,
+    /// Dataset id within the source.
+    pub dataset: String,
+    /// Detector name. See the module doc on `crates/agent/src/analysis.rs`.
+    pub detector: String,
+    /// Numeric field the detector reads. Required for `series_jump`/`outlier`/
+    /// `seasonality`/`correlation`; ignored by `cross_source_gap`.
+    #[serde(default)]
+    pub field: Option<String>,
+    /// Detector-specific threshold (e.g. % move for `series_jump`, |z| for
+    /// `outlier`). When `None`, each detector applies its own documented default.
+    #[serde(default)]
+    pub threshold: Option<f64>,
+    /// For `correlation`: the second field to correlate against `field`.
+    /// Ignored by other detectors.
+    #[serde(default)]
+    pub field_b: Option<String>,
+    /// For `cross_source_gap`: the companion (source, dataset) whose record_ids
+    /// form the "data" side of the comparison. Ignored by other detectors.
+    #[serde(default)]
+    pub companion: Option<CompanionRef>,
+}
+
+/// The "other side" of a `cross_source_gap` comparison.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompanionRef {
+    pub source: String,
+    pub dataset: String,
+}
+
+/// The out-of-the-box scan set. Kept as a fn (not a `const`) because it allocates;
+/// this is exactly the set the old hardcoded `run_pass` ran.
+pub fn default_scan_targets() -> Vec<ScanTarget> {
+    vec![
+        ScanTarget {
+            source: "hkma".into(),
+            dataset: "daily-interbank-liquidity".into(),
+            detector: "series_jump".into(),
+            field: Some("hibor_overnight".into()),
+            threshold: Some(25.0),
+            field_b: None,
+            companion: None,
+        },
+        ScanTarget {
+            source: "hkma".into(),
+            dataset: "daily-interbank-liquidity".into(),
+            detector: "series_jump".into(),
+            field: Some("closing_balance".into()),
+            threshold: Some(15.0),
+            field_b: None,
+            companion: None,
+        },
+        ScanTarget {
+            source: "hkma".into(),
+            dataset: "capital-market-statistics".into(),
+            detector: "series_jump".into(),
+            field: Some("eq_mkt_hs_index".into()),
+            threshold: Some(10.0),
+            field_b: None,
+            companion: None,
+        },
+        ScanTarget {
+            source: "press".into(),
+            dataset: "hkma-press-releases".into(),
+            detector: "cross_source_gap".into(),
+            field: Some("date".into()),
+            threshold: None,
+            field_b: None,
+            companion: Some(CompanionRef {
+                source: "hkma".into(),
+                dataset: "daily-interbank-liquidity".into(),
+            }),
+        },
+    ]
+}
+
+/// Proactive alerting knobs (v6). Off by default — enabling requires the
+/// `alerts` cargo feature at build time. When on, the agent supervisor pushes
+/// insights at or above `min_severity` to every configured webhook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AlertSettings {
+    /// Whether alert dispatch is active. Off by default.
+    pub enabled: bool,
+    /// Minimum severity that triggers a dispatch: `info`, `warning`, or
+    /// `critical`. Default `warning` (so info-level insights don't spam).
+    pub min_severity: String,
+    /// Webhook URLs to POST each qualifying insight to (JSON body).
+    pub webhooks: Vec<String>,
+    /// Bearer token sent as `Authorization` on each webhook POST, if set.
+    pub webhook_token: Option<String>,
+}
+
+impl Default for AlertSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_severity: "warning".into(),
+            webhooks: Vec::new(),
+            webhook_token: None,
         }
     }
 }

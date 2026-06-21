@@ -12,6 +12,10 @@ default = []
 # Enables the HTTP LLM client (OpenAI-compatible). Off by default so dev/CI
 # runs in pure-heuristic mode with no API key.
 llm = ["dep:reqwest"]
+# Enables proactive webhook alerting. Off by default; needs reqwest to POST to
+# webhooks. The AlertSink trait + AlertDispatcher are available regardless, so
+# in-process/test sinks work without this feature.
+alerts = ["dep:reqwest"]
 
 [dependencies]
 hkgov-common.workspace = true

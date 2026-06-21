@@ -17,13 +17,25 @@
 //! surfaces the same structured findings an LLM would, so insights work end to
 //! end without external dependencies.
 
+pub mod alerts;
+#[cfg(feature = "alerts")]
+pub mod alerts_webhook_deps;
 pub mod analysis;
 pub mod insight;
 pub mod llm;
+pub mod loop_mod;
+pub mod qa;
 pub mod scheduler;
+pub mod tools;
 
+#[cfg(feature = "alerts")]
+pub use alerts::WebhookSink;
+pub use alerts::{AlertDispatcher, AlertLog, AlertLogEntry, AlertSink};
 pub use insight::{Insight, InsightSeverity, InsightStore};
 #[cfg(feature = "llm")]
 pub use llm::HttpLlmClient;
-pub use llm::{HeuristicClient, LlmClient};
+pub use llm::{AgentStep, HeuristicClient, LlmClient, LlmFraming, Message, ToolCall};
+pub use loop_mod::{run_agent_loop, AgentOutcome, Answer, TraceStep};
+pub use qa::heuristic_answer;
 pub use scheduler::AgentSupervisor;
+pub use tools::{FindingDto, Tool, ToolBelt};

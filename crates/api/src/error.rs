@@ -13,6 +13,12 @@ use serde_json::json;
 
 pub struct ApiError(pub Error);
 
+impl std::fmt::Debug for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ApiError").field(&self.0).finish()
+    }
+}
+
 impl From<Error> for ApiError {
     fn from(e: Error) -> Self {
         Self(e)
@@ -39,6 +45,7 @@ fn kind_for(e: &Error) -> &'static str {
         Error::Decode { .. } => "decode",
         Error::UnknownSource(_) => "not_found",
         Error::Store(_) => "store",
+        Error::Agent(_) => "agent",
         Error::Config(_) => "config",
         Error::Io(_) => "io",
         Error::Internal(_) => "internal",

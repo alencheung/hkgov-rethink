@@ -33,6 +33,11 @@ pub enum Error {
     #[error("store error: {0}")]
     Store(String),
 
+    /// The AI-agent layer failed (loop exhaustion, framing failure, etc.).
+    /// Mapped to 502 because the agent depends on upstream (LLM) availability.
+    #[error("agent error: {0}")]
+    Agent(String),
+
     #[error("configuration error: {0}")]
     Config(String),
 
@@ -49,6 +54,7 @@ impl Error {
         match self {
             Error::UnknownSource(_) => 404,
             Error::Upstream { .. } | Error::Store(_) => 502,
+            Error::Agent(_) => 502,
             Error::Decode { .. } => 502,
             Error::Config(_) => 500,
             Error::Io(_) | Error::Internal(_) => 500,
