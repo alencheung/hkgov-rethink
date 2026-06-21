@@ -18,7 +18,7 @@ pub mod registry;
 pub mod resilience;
 
 use async_trait::async_trait;
-use hkgov_common::{DataSource, NormalizedRecord, Result};
+use hkgov_common::{Cadence, Category, DataSource, NormalizedRecord, Result};
 
 /// What every connector must do. Implementations are constructed once at startup
 /// and shared (via `Arc`) across the ingestion scheduler and reload fan-out.
@@ -42,6 +42,14 @@ pub struct DatasetSpec {
     pub id: &'static str,
     pub title: &'static str,
     pub description: Option<&'static str>,
+    /// Domain category — the primary browse dimension. Required (no default) so
+    /// every dataset is categorized at compile time. See `hkgov_common::Category`.
+    pub category: Category,
+    /// Free-form cross-cutting tags. Empty slice when none apply.
+    pub tags: &'static [&'static str],
+    /// Declared update cadence — drives cadence-aware detectors (v7) and is
+    /// surfaced as a filter on `/sources`. `Unknown` when not declared.
+    pub cadence: Cadence,
     /// How often the ingest scheduler should refresh this dataset, seconds.
     pub refresh_interval_secs: u64,
 }

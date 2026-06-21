@@ -25,7 +25,7 @@ use crate::analysis::{
     DEFAULT_SEASONALITY_R,
 };
 use async_trait::async_trait;
-use hkgov_common::{Cadence, DataSource, NormalizedRecord, RecordValue, Result};
+use hkgov_common::{Cadence, Category, DataSource, NormalizedRecord, RecordValue, Result};
 use hkgov_store::{DatasetId, MemoryStore, RecordStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -110,7 +110,8 @@ impl ToolBelt {
 // ListDatasetsTool
 // ---------------------------------------------------------------------------
 
-/// List the datasets currently held in the store, optionally filtered by source.
+/// List the datasets currently held in the store, filterable by source,
+/// category, tag, cadence, and free text — mirrors `GET /v1/sources`.
 pub struct ListDatasetsTool {
     store: Arc<MemoryStore>,
 }
@@ -127,9 +128,10 @@ impl Tool for ListDatasetsTool {
         "list_datasets"
     }
     fn description(&self) -> &'static str {
-        "List the datasets currently ingested in the store, with record counts \
-         and last-refresh time. Optional `source` filters to one source \
-         (hkma | datagovhk | press | landsd)."
+        "List the datasets currently ingested in the store, with category, tags, \
+         cadence, record counts, and last-refresh time. All filters are optional \
+         and compose with AND; `tag` matches if the dataset has ANY listed tag. \
+         Use this to scope a query to one domain (e.g. category=monetary)."
     }
     fn schema(&self) -> Value {
         json!({
@@ -139,6 +141,25 @@ impl Tool for ListDatasetsTool {
                     "type": "string",
                     "enum": ["hkma", "datagovhk", "press", "landsd"],
                     "description": "Optional source filter."
+                },
+                "category": {
+                    "type": "string",
+                    "enum": ["monetary", "fiscal", "property", "trade", "population", "livability", "government", "other"],
+                    "description": "Optional domain-category filter."
+                },
+                "tag": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional tag filter; matches if the dataset has ANY listed tag."
+                },
+                "cadence": {
+                    "type": "string",
+                    "enum": ["daily", "weekly", "monthly", "quarterly", "biannual", "annual", "unknown"],
+                    "description": "Optional cadence filter."
+                },
+                "q": {
+                    "type": "string",
+                    "description": "Optional case-insensitive substring over title + description + dataset id."
                 }
             },
             "required": []
@@ -149,7 +170,57 @@ impl Tool for ListDatasetsTool {
             .get("source")
             .and_then(Value::as_str)
             .and_then(DataSource::parse);
-        let metas = self.store.list(source).await?;
+        let category = args
+            .get("category")
+            .and_then(Value::as_str)
+            .and_then(Category::parse);
+        let cadence = args
+            .get("cadence")
+            .and_then(Value::as_str)
+            .and_then(Cadence::parse);
+        let tags: Vec<String> = args
+            .get("tag")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let q = args.get("q").and_then(Value::as_str).map(String::from);
+
+        let mut metas = self.store.list(source).await?;
+        metas.retain(|m| {
+            if let Some(c) = category {
+                if m.category != c {
+                    return false;
+                }
+            }
+            if let Some(cd) = cadence {
+                if m.cadence != cd {
+                    return false;
+                }
+            }
+            if !tags.is_empty() && !tags.iter().any(|t| m.tags.iter().any(|mt| mt == t)) {
+                return false;
+            }
+            if let Some(ref needle) = q {
+                let n = needle.to_ascii_lowercase();
+                let hay = format!(
+                    "{} {} {}",
+                    m.title,
+                    m.description.as_deref().unwrap_or(""),
+                    m.dataset
+                )
+                .to_ascii_lowercase();
+                if !hay.contains(&n) {
+                    return false;
+                }
+            }
+            true
+        });
+
         let out: Vec<Value> = metas
             .iter()
             .map(|m| {
@@ -157,6 +228,9 @@ impl Tool for ListDatasetsTool {
                     "source": m.source.as_str(),
                     "dataset": m.dataset,
                     "title": m.title,
+                    "category": m.category.as_str(),
+                    "tags": m.tags,
+                    "cadence": m.cadence,
                     "record_count": m.record_count,
                     "last_refreshed_at": m.last_refreshed_at,
                 })
@@ -686,7 +760,15 @@ mod tests {
             // `list()` reads from the registry, so we must register metadata
             // (mirroring what IngestSupervisor does) for list_datasets to see it.
             store
-                .register(id.clone(), dataset.to_string(), None, 3600)
+                .register(
+                    id.clone(),
+                    dataset.to_string(),
+                    None,
+                    3600,
+                    hkgov_common::Category::Other,
+                    Vec::new(),
+                    hkgov_common::Cadence::Unknown,
+                )
                 .await;
             store.put_dataset(&id, records).await.unwrap();
         });

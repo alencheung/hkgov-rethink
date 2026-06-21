@@ -206,6 +206,20 @@ impl Cadence {
             Cadence::Unknown => 1.0,
         }
     }
+
+    /// Parse a cadence slug (case-insensitive). Mirrors `DataSource::parse`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "daily" => Some(Self::Daily),
+            "weekly" => Some(Self::Weekly),
+            "monthly" => Some(Self::Monthly),
+            "quarterly" => Some(Self::Quarterly),
+            "biannual" | "semiannual" => Some(Self::Biannual),
+            "annual" | "yearly" => Some(Self::Annual),
+            "unknown" | "" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
 }
 
 /// What a cadence-aware detector compares each period against. The choice

@@ -11,7 +11,9 @@
 use crate::{Connector, DatasetSpec};
 use async_trait::async_trait;
 use chrono::Utc;
-use hkgov_common::{DataSource, Error, NormalizedRecord, RecordValue, Result, UpstreamSettings};
+use hkgov_common::{
+    Cadence, Category, DataSource, Error, NormalizedRecord, RecordValue, Result, UpstreamSettings,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -23,6 +25,9 @@ const DATASETS: &[DatasetSpec] = &[DatasetSpec {
         "Catalog of open LandsD/CSDI geospatial datasets published via the \
          data.gov.hk historical archive. Each record is one available file.",
     ),
+    category: Category::Property,
+    tags: &["geospatial", "landsd", "csdi", "catalog"],
+    cadence: Cadence::Daily,
     refresh_interval_secs: 24 * 3600,
 }];
 

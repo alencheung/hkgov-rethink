@@ -13,7 +13,9 @@
 use crate::{Connector, DatasetSpec};
 use async_trait::async_trait;
 use chrono::Utc;
-use hkgov_common::{DataSource, Error, NormalizedRecord, RecordValue, Result, UpstreamSettings};
+use hkgov_common::{
+    Cadence, Category, DataSource, Error, NormalizedRecord, RecordValue, Result, UpstreamSettings,
+};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -47,6 +49,9 @@ fn specs() -> &'static [DatasetSpec] {
         id: "money-lenders-licensees",
         title: "Money Lenders Licensees (Companies Registry)",
         description: Some("List of licensed money lenders, published by the Companies Registry."),
+        category: Category::Fiscal,
+        tags: &["money-lenders", "licensing", "companies-registry"],
+        cadence: Cadence::Daily,
         refresh_interval_secs: 24 * 3600,
     }]
 }

@@ -159,6 +159,9 @@ mod tests {
                 "Daily Interbank Liquidity Figures".into(),
                 None,
                 3600,
+                hkgov_common::Category::Monetary,
+                vec!["hibor".into()],
+                hkgov_common::Cadence::Daily,
             )
             .await;
         store

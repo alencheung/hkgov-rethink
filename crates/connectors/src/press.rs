@@ -13,7 +13,9 @@
 use crate::{Connector, DatasetSpec};
 use async_trait::async_trait;
 use chrono::Utc;
-use hkgov_common::{DataSource, Error, NormalizedRecord, RecordValue, Result, UpstreamSettings};
+use hkgov_common::{
+    Cadence, Category, DataSource, Error, NormalizedRecord, RecordValue, Result, UpstreamSettings,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -25,6 +27,9 @@ const DATASETS: &[DatasetSpec] = &[DatasetSpec {
         "Press releases issued by the Hong Kong Monetary Authority — the \
          narrative the agent layer cross-references against HKMA statistics.",
     ),
+    category: Category::Government,
+    tags: &["hkma", "press-release", "monetary-policy"],
+    cadence: Cadence::Daily,
     refresh_interval_secs: 30 * 60,
 }];
 

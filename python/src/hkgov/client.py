@@ -9,6 +9,7 @@ import requests
 from .models import (
     AlertLogEntry,
     Answer,
+    CategoryGroup,
     DatasetMeta,
     EvidenceRef,
     Health,
@@ -107,9 +108,46 @@ class HkGov:
         d = self._get("/health/sources")
         return [SourceHealth(source=x["source"], circuit=x["circuit"]) for x in d]
 
-    def sources(self) -> list[DatasetMeta]:
-        d = self._get("/sources")
+    def sources(
+        self,
+        *,
+        source: Optional[str] = None,
+        category: Optional[str] = None,
+        tag: Optional[list[str] | str] = None,
+        cadence: Optional[str] = None,
+        q: Optional[str] = None,
+    ) -> list[DatasetMeta]:
+        """List ingested datasets. All filters optional; compose with AND.
+
+        - ``category`` — one of monetary/fiscal/property/trade/population/
+          livability/government/other.
+        - ``tag`` — a single tag or a list; matches if the dataset has ANY.
+        - ``cadence`` — daily/weekly/monthly/quarterly/biannual/annual/unknown.
+        - ``q`` — case-insensitive substring over title+description+id.
+        """
+        params: dict[str, Any] = {}
+        if source:
+            params["source"] = source
+        if category:
+            params["category"] = category
+        if cadence:
+            params["cadence"] = cadence
+        if q:
+            params["q"] = q
+        if tag:
+            # Allow either a single string or a list; the API takes repeated params.
+            tags = [tag] if isinstance(tag, str) else list(tag)
+            params["tag"] = tags
+        d = self._get("/sources", params=params or None)
         return [self._meta(x) for x in d]
+
+    def categories(self) -> list[CategoryGroup]:
+        """The browse entry point: every domain category with its dataset count."""
+        d = self._get("/categories")
+        return [
+            CategoryGroup(category=x["category"], count=x["count"], datasets=x["datasets"])
+            for x in d
+        ]
 
     def dataset(self, source: str, dataset: str) -> Optional[DatasetMeta]:
         d = self._get(f"/datasets/{source}/{dataset}")
@@ -169,6 +207,9 @@ class HkGov:
             dataset=x["dataset"],
             title=x.get("title", ""),
             description=x.get("description"),
+            category=x.get("category", "other"),
+            tags=x.get("tags", []),
+            cadence=x.get("cadence", "unknown"),
             refresh_interval_secs=x.get("refresh_interval_secs", 0),
             last_refreshed_at=x.get("last_refreshed_at"),
             record_count=x.get("record_count", 0),
