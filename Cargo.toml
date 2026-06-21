@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/common",
+    "crates/connectors",
+    "crates/store",
+    "crates/ingest",
+    "crates/api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96"
+license = "MIT"
+repository = "https://github.com/alencheung/hkgov-rethink"
+authors = ["alencheung"]
+description = "Consolidated, AI-infused insights from Hong Kong Government public data sources."
+
+[workspace.dependencies]
+# Async runtime + HTTP
+tokio = { version = "1.45", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "stream"] }
+tower = { version = "0.5", features = ["limit", "timeout", "retry", "util"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip", "timeout"] }
+hyper = { version = "1.6", features = ["full"] }
+axum = { version = "0.8", features = ["macros"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Caching / concurrency
+moka = { version = "0.12", features = ["future"] }
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Config / errors / misc
+figment = { version = "0.10", features = ["toml", "env"] }
+thiserror = "2"
+anyhow = "1"
+url = "2"
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+
+# Internal crates
+hkgov-common = { path = "crates/common" }
+hkgov-connectors = { path = "crates/connectors" }
+hkgov-store = { path = "crates/store" }
+hkgov-ingest = { path = "crates/ingest" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

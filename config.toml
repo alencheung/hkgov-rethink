@@ -1,0 +1,30 @@
+# hkgov-rethink default configuration.
+# Any value here can be overridden by an environment variable using the
+# HKGOV_ prefix and __ as the nested separator, e.g.
+#   HKGOV_API__BIND=0.0.0.0:9090
+#   HKGOV_LOG__FORMAT=json
+
+[api]
+bind = "0.0.0.0:8080"
+# Single-node v1 ceiling. Scale horizontally (see docs/ARCHITECTURE.md) for the
+# 100k-concurrency target.
+max_concurrency = 50000
+request_timeout_ms = 15000
+
+[upstream]
+hkma_base_url = "https://api.hkma.gov.hk/public"
+# Set HKGOV_UPSTREAM__HKMA_API_KEY if/when HKMA issues you a key for higher quota.
+hkma_api_key = ""
+hkma_timeout_ms = 10000
+hkma_max_retries = 3
+hkma_rate_per_sec = 5
+data_gov_hk_filter_url = "https://api.data.gov.hk/v2/filter"
+data_gov_hk_archive_url = "https://app.data.gov.hk/v1/historical-archive/list-files"
+
+[cache]
+max_entries = 200000
+ttl_secs = 600
+
+[log]
+format = "plain"
+filter = "info,hkgov=debug"

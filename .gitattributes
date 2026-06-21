@@ -1,0 +1,7 @@
+# Normalize line endings; Rust source is LF.
+* text=auto eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.lock text eol=lf
