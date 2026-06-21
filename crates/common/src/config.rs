@@ -375,9 +375,10 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
     ]
 }
 
-/// Proactive alerting knobs (v6). Off by default — enabling requires the
-/// `alerts` cargo feature at build time. When on, the agent supervisor pushes
-/// insights at or above `min_severity` to every configured webhook.
+/// Proactive alerting knobs (v6, email added v9). Off by default — enabling
+/// requires the `alerts` cargo feature at build time. When on, the agent
+/// supervisor pushes insights at or above `min_severity` to every configured
+/// sink (webhooks + optional email).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AlertSettings {
@@ -390,6 +391,12 @@ pub struct AlertSettings {
     pub webhooks: Vec<String>,
     /// Bearer token sent as `Authorization` on each webhook POST, if set.
     pub webhook_token: Option<String>,
+    /// Email gateway config — the universal push channel. All fields required
+    /// when any is set; the dispatcher builds one EmailSink from them.
+    pub email_api_url: Option<String>,
+    pub email_api_token: Option<String>,
+    pub email_to: Option<String>,
+    pub email_from: Option<String>,
 }
 
 impl Default for AlertSettings {
@@ -399,6 +406,10 @@ impl Default for AlertSettings {
             min_severity: "warning".into(),
             webhooks: Vec::new(),
             webhook_token: None,
+            email_api_url: None,
+            email_api_token: None,
+            email_to: None,
+            email_from: None,
         }
     }
 }

@@ -104,7 +104,9 @@ async fn run_pass(
     tracing::info!(producer = llm.name(), "agent: analysis pass starting");
 
     let scan = effective_scan(settings);
-    let mut all_findings: Vec<Finding> = Vec::new();
+    // Pair each finding with its source-target's `experimental` flag so the
+    // promoted Insight can carry it (user-visible honesty).
+    let mut all_findings: Vec<(Finding, bool)> = Vec::new();
 
     for target in &scan {
         let Some(source) = DataSource::parse(&target.source) else {
@@ -124,15 +126,22 @@ async fn run_pass(
             );
         }
         let findings = run_one_target(store, source, target).await;
-        all_findings.extend(findings);
+        for f in findings {
+            all_findings.push((f, target.experimental));
+        }
     }
 
     // Frame each finding and store as an Insight.
     let mut stored_insights: Vec<Insight> = Vec::new();
-    for finding in all_findings {
+    for (finding, experimental) in all_findings {
         match llm.frame(&finding).await {
             Ok(framing) => {
-                let insight = finding.into_insight(framing.summary, framing.confidence, llm.name());
+                let insight = finding.into_insight_experimental(
+                    framing.summary,
+                    framing.confidence,
+                    llm.name(),
+                    experimental,
+                );
                 insights.upsert(insight.clone()).await;
                 stored_insights.push(insight);
             }
