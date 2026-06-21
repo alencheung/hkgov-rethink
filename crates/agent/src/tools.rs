@@ -18,11 +18,14 @@
 //! - [`RunDetectorTool`] — wraps any `analysis::*` detector by name.
 
 use crate::analysis::{
-    detect_correlation, detect_cross_source_gaps, detect_outliers, detect_seasonality,
-    detect_series_jumps, Finding, DEFAULT_CORRELATION_R, DEFAULT_OUTLIER_Z, DEFAULT_SEASONALITY_R,
+    detect_benchmark_deviation, detect_correlation, detect_cross_source_gaps, detect_outliers,
+    detect_proxy_divergence, detect_seasonality, detect_series_jumps_cadenced,
+    detect_year_over_year, Finding, DEFAULT_BENCHMARK_PCT, DEFAULT_CORRELATION_R,
+    DEFAULT_OUTLIER_Z, DEFAULT_PCT_THRESHOLD, DEFAULT_PROXY_DELTA_PCT, DEFAULT_PROXY_R,
+    DEFAULT_SEASONALITY_R,
 };
 use async_trait::async_trait;
-use hkgov_common::{DataSource, NormalizedRecord, RecordValue, Result};
+use hkgov_common::{Cadence, DataSource, NormalizedRecord, RecordValue, Result};
 use hkgov_store::{DatasetId, MemoryStore, RecordStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -328,13 +331,13 @@ impl Tool for RunDetectorTool {
             "properties": {
                 "detector": {
                     "type": "string",
-                    "enum": ["series_jump", "outlier", "seasonality", "correlation", "cross_source_gap"]
+                    "enum": ["series_jump", "year_over_year", "outlier", "seasonality", "correlation", "cross_source_gap", "proxy_divergence", "benchmark_deviation"]
                 },
                 "source": { "type": "string", "enum": ["hkma", "datagovhk", "press", "landsd"] },
                 "dataset": { "type": "string" },
                 "field": {
                     "type": "string",
-                    "description": "Numeric field for series_jump/outlier/seasonality, or the date column for cross_source_gap."
+                    "description": "Numeric field for series_jump/year_over_year/outlier/seasonality/correlation/proxy_divergence/benchmark_deviation, or the date column for cross_source_gap."
                 },
                 "field_b": {
                     "type": "string",
@@ -344,14 +347,27 @@ impl Tool for RunDetectorTool {
                     "type": "number",
                     "description": "Detector-specific threshold; omit for the documented default."
                 },
+                "cadence": {
+                    "type": "string",
+                    "enum": ["daily", "weekly", "monthly", "quarterly", "biannual", "annual", "unknown"],
+                    "description": "Update cadence. series_jump scales its threshold by cadence; year_over_year uses periods_per_year. Default unknown (no scaling)."
+                },
                 "companion_source": {
                     "type": "string",
                     "enum": ["hkma", "datagovhk", "press", "landsd"],
-                    "description": "For cross_source_gap: the data-side source."
+                    "description": "For cross_source_gap/proxy_divergence/benchmark_deviation: the second dataset's source."
                 },
                 "companion_dataset": {
                     "type": "string",
-                    "description": "For cross_source_gap: the data-side dataset whose record_ids are compared against `field`."
+                    "description": "For cross_source_gap/proxy_divergence/benchmark_deviation: the second dataset."
+                },
+                "companion_field": {
+                    "type": "string",
+                    "description": "For proxy_divergence/benchmark_deviation: the value field to read on the companion dataset."
+                },
+                "join_field": {
+                    "type": "string",
+                    "description": "For proxy_divergence/benchmark_deviation: the key shared by both datasets (default record_id)."
                 }
             },
             "required": ["detector", "source", "dataset"]
@@ -379,8 +395,21 @@ impl Tool for RunDetectorTool {
         let threshold = args.get("threshold").and_then(Value::as_f64);
         let companion_source = args.get("companion_source").and_then(Value::as_str);
         let companion_dataset = args.get("companion_dataset").and_then(Value::as_str);
+        let companion_field = args
+            .get("companion_field")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let join_field = args
+            .get("join_field")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let cadence = args
+            .get("cadence")
+            .and_then(Value::as_str)
+            .and_then(|s| serde_json::from_value::<Cadence>(Value::String(s.into())).ok())
+            .unwrap_or_default();
 
-        // cross_source_gap needs two datasets; handle separately.
+        // Detectors needing a companion dataset.
         if detector == "cross_source_gap" {
             return run_gap_via_tool(
                 &self.store,
@@ -392,6 +421,21 @@ impl Tool for RunDetectorTool {
             )
             .await;
         }
+        if detector == "proxy_divergence" || detector == "benchmark_deviation" {
+            return run_two_dataset_detector(
+                &self.store,
+                source,
+                &dataset,
+                &detector,
+                field.as_deref(),
+                companion_source,
+                companion_dataset,
+                companion_field.as_deref(),
+                join_field.as_deref(),
+                threshold,
+            )
+            .await;
+        }
 
         let id = DatasetId::new(source, dataset.clone());
         let page = self.store.get_page(&id, 0, 500).await?;
@@ -400,13 +444,25 @@ impl Tool for RunDetectorTool {
         })?;
 
         let findings: Vec<Finding> = match detector.as_str() {
-            "series_jump" => detect_series_jumps(
+            "series_jump" => detect_series_jumps_cadenced(
                 source,
                 &dataset,
                 &page.records,
                 field,
                 threshold.unwrap_or(25.0),
+                cadence,
             ),
+            "year_over_year" => {
+                let ppy = cadence.periods_per_year().round() as usize;
+                detect_year_over_year(
+                    source,
+                    &dataset,
+                    &page.records,
+                    field,
+                    threshold.unwrap_or(DEFAULT_PCT_THRESHOLD),
+                    ppy.max(1),
+                )
+            }
             "outlier" => detect_outliers(
                 source,
                 &dataset,
@@ -505,6 +561,84 @@ async fn run_gap_via_tool(
 
     let findings = detect_cross_source_gaps(source, dataset, &press_dates, &data_dates);
     Ok(json!({ "detector": "cross_source_gap", "findings": findings }))
+}
+
+/// Run a two-dataset detector (`proxy_divergence` or `benchmark_deviation`)
+/// via the tool interface: load both datasets from the store and delegate.
+#[allow(clippy::too_many_arguments)] // internal dispatcher; args mirror the tool's schema
+async fn run_two_dataset_detector(
+    store: &Arc<MemoryStore>,
+    source: DataSource,
+    dataset: &str,
+    detector: &str,
+    field: Option<&str>,
+    companion_source: Option<&str>,
+    companion_dataset: Option<&str>,
+    companion_field: Option<&str>,
+    join_field: Option<&str>,
+    threshold: Option<f64>,
+) -> Result<Value> {
+    let field = field.ok_or_else(|| {
+        hkgov_common::Error::Internal(format!("run_detector/{detector}: `field` required"))
+    })?;
+    let companion_field = companion_field.ok_or_else(|| {
+        hkgov_common::Error::Internal(format!(
+            "run_detector/{detector}: `companion_field` required"
+        ))
+    })?;
+    let comp_source = companion_source
+        .and_then(DataSource::parse)
+        .ok_or_else(|| {
+            hkgov_common::Error::Internal(format!(
+                "run_detector/{detector}: `companion_source` required/invalid"
+            ))
+        })?;
+    let comp_dataset = companion_dataset.ok_or_else(|| {
+        hkgov_common::Error::Internal(format!(
+            "run_detector/{detector}: `companion_dataset` required"
+        ))
+    })?;
+
+    let primary = store
+        .get_page(&DatasetId::new(source, dataset), 0, 500)
+        .await?
+        .records;
+    let companion_recs = store
+        .get_page(&DatasetId::new(comp_source, comp_dataset), 0, 500)
+        .await?
+        .records;
+
+    let findings = match detector {
+        "proxy_divergence" => detect_proxy_divergence(
+            source,
+            dataset,
+            field,
+            comp_source,
+            comp_dataset,
+            companion_field,
+            &primary,
+            &companion_recs,
+            join_field,
+            threshold.unwrap_or(DEFAULT_PROXY_DELTA_PCT),
+            DEFAULT_PROXY_R,
+        ),
+        "benchmark_deviation" => detect_benchmark_deviation(
+            source,
+            dataset,
+            field,
+            companion_field,
+            &primary,
+            &companion_recs,
+            join_field,
+            threshold.unwrap_or(DEFAULT_BENCHMARK_PCT),
+        ),
+        other => {
+            return Err(hkgov_common::Error::Internal(format!(
+                "run_two_dataset_detector: unknown detector `{other}`"
+            )))
+        }
+    };
+    Ok(json!({ "detector": detector, "findings": findings }))
 }
 
 /// Serialization shape a tool result uses for a single finding. Re-exported so

@@ -173,14 +173,64 @@ impl Default for AgentSettings {
     }
 }
 
+/// The update frequency of a series. Determines what "a normal move" means —
+/// a 5% monthly move is large; a 5% annual move is noise. Detectors use this to
+/// scale thresholds cadence-relatively instead of applying a flat % everywhere.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Cadence {
+    Daily,
+    Weekly,
+    Monthly,
+    Quarterly,
+    Biannual,
+    Annual,
+    /// Cadence unknown / not declared. Detectors treat this as "no scaling" —
+    /// i.e. use the raw threshold. The safe default for backwards compat.
+    #[default]
+    Unknown,
+}
+
+impl Cadence {
+    /// Typical number of reporting periods per year for this cadence. Used to
+    /// convert a flat % threshold into a per-period threshold. `Unknown` → 1
+    /// (no scaling). Daily/weekly are capped to avoid pathological scaling.
+    pub fn periods_per_year(&self) -> f64 {
+        match self {
+            Cadence::Daily => 252.0,
+            Cadence::Weekly => 52.0,
+            Cadence::Monthly => 12.0,
+            Cadence::Quarterly => 4.0,
+            Cadence::Biannual => 2.0,
+            Cadence::Annual => 1.0,
+            Cadence::Unknown => 1.0,
+        }
+    }
+}
+
+/// What a cadence-aware detector compares each period against. The choice
+/// determines which kinds of lie/misalignment a scan catches.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Comparison {
+    /// Consecutive periods (N vs N-1). The original `series_jump` semantics.
+    /// Right for daily/monthly; misleading for seasonal quarterly/annual series.
+    #[default]
+    PeriodOverPeriod,
+    /// Same period a year ago (N vs N-from-a-year-ago). Removes seasonality —
+    /// the correct comparison for quarterly retail, tourism, fiscal lines.
+    YearOverYear,
+}
+
 /// One detector invocation in the periodic scan. Replaces the hardcoded
 /// `run_pass` targets in v3 — the same targets now live in config so operators
 /// can widen coverage without code changes.
 ///
-/// `detector` is one of: `series_jump`, `outlier`, `seasonality`,
-/// `correlation`, `cross_source_gap`. Field/threshold semantics depend on the
-/// detector (see `crates/agent/src/analysis.rs`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// `detector` is one of: `series_jump`, `year_over_year`, `outlier`,
+/// `seasonality`, `correlation`, `cross_source_gap`, `proxy_divergence`,
+/// `benchmark_deviation`. Field/threshold semantics depend on the detector
+/// (see `crates/agent/src/analysis.rs`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ScanTarget {
     /// Source slug, e.g. `hkma`, `datagovhk`, `press`, `landsd`.
     pub source: String,
@@ -200,10 +250,30 @@ pub struct ScanTarget {
     /// Ignored by other detectors.
     #[serde(default)]
     pub field_b: Option<String>,
-    /// For `cross_source_gap`: the companion (source, dataset) whose record_ids
-    /// form the "data" side of the comparison. Ignored by other detectors.
+    /// For `cross_source_gap`/`proxy_divergence`/`benchmark_deviation`: the
+    /// companion (source, dataset) forming the second side of the comparison.
+    /// Ignored by other detectors.
     #[serde(default)]
     pub companion: Option<CompanionRef>,
+    /// Update cadence of this series. When set (not `unknown`), cadence-aware
+    /// detectors (`series_jump`, `year_over_year`) scale their thresholds so a
+    /// normal-sized move for the cadence isn't flagged.
+    #[serde(default)]
+    pub cadence: Cadence,
+    /// For `series_jump`/`year_over_year`: what each period is compared against.
+    /// Defaults to `period_over_period` (the v3 behavior). Use `year_over_year`
+    /// for seasonal quarterly/annual series to remove seasonality from the delta.
+    #[serde(default)]
+    pub comparison: Comparison,
+    /// For `proxy_divergence`: the field to read on the companion dataset.
+    /// Required for `proxy_divergence`; ignored otherwise.
+    #[serde(default)]
+    pub companion_field: Option<String>,
+    /// For `proxy_divergence`: the key field shared by both datasets (e.g.
+    /// `date`, `district`, `quarter`). The two series are joined on it.
+    /// Defaults to `record_id`.
+    #[serde(default)]
+    pub join_field: Option<String>,
     /// Mark this target as experimental. Experimental detectors (`seasonality`,
     /// `correlation`) are correct by construction but haven't yet produced a
     /// standout finding on real HKGOV data — see EXAMPLES.md. Setting this only
@@ -237,6 +307,10 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
             threshold: Some(25.0),
             field_b: None,
             companion: None,
+            cadence: Cadence::Daily,
+            comparison: Comparison::PeriodOverPeriod,
+            companion_field: None,
+            join_field: None,
             experimental: false,
         },
         ScanTarget {
@@ -247,6 +321,10 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
             threshold: Some(15.0),
             field_b: None,
             companion: None,
+            cadence: Cadence::Daily,
+            comparison: Comparison::PeriodOverPeriod,
+            companion_field: None,
+            join_field: None,
             experimental: false,
         },
         ScanTarget {
@@ -257,6 +335,10 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
             threshold: Some(10.0),
             field_b: None,
             companion: None,
+            cadence: Cadence::Monthly,
+            comparison: Comparison::PeriodOverPeriod,
+            companion_field: None,
+            join_field: None,
             experimental: false,
         },
         ScanTarget {
@@ -270,6 +352,10 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
                 source: "hkma".into(),
                 dataset: "daily-interbank-liquidity".into(),
             }),
+            cadence: Cadence::Unknown,
+            comparison: Comparison::PeriodOverPeriod,
+            companion_field: None,
+            join_field: None,
             experimental: false,
         },
     ]

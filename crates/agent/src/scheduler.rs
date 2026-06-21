@@ -15,12 +15,16 @@
 
 use crate::alerts::AlertDispatcher;
 use crate::analysis::{
-    detect_correlation, detect_cross_source_gaps, detect_outliers, detect_seasonality,
-    detect_series_jumps, Finding, DEFAULT_CORRELATION_R, DEFAULT_OUTLIER_Z, DEFAULT_SEASONALITY_R,
+    detect_benchmark_deviation, detect_correlation, detect_cross_source_gaps, detect_outliers,
+    detect_proxy_divergence, detect_seasonality, detect_series_jumps_cadenced,
+    detect_year_over_year, Finding, DEFAULT_CORRELATION_R, DEFAULT_OUTLIER_Z,
+    DEFAULT_PCT_THRESHOLD, DEFAULT_PROXY_DELTA_PCT, DEFAULT_PROXY_R, DEFAULT_SEASONALITY_R,
 };
 use crate::insight::{Insight, InsightStore};
 use crate::llm::LlmClient;
-use hkgov_common::{default_scan_targets, DataSource, RecordValue, ScanTarget, Settings};
+use hkgov_common::{
+    default_scan_targets, Comparison, DataSource, RecordValue, ScanTarget, Settings,
+};
 use hkgov_store::{DatasetId, MemoryStore, RecordStore};
 use std::sync::Arc;
 use std::time::Duration;
@@ -151,8 +155,9 @@ async fn run_pass(
     );
 }
 
-/// Run one `ScanTarget`: load the (and, for cross_source_gap, the companion)
-/// dataset from the store and dispatch to the named detector.
+/// Run one `ScanTarget`: load the (and, for cross-source/proxy/benchmark
+/// detectors, the companion) dataset from the store and dispatch to the named
+/// detector.
 async fn run_one_target(
     store: &Arc<MemoryStore>,
     source: DataSource,
@@ -160,9 +165,12 @@ async fn run_one_target(
 ) -> Vec<Finding> {
     let id = DatasetId::new(source, &target.dataset);
 
-    // cross_source_gap needs two datasets; handle it specially.
-    if target.detector == "cross_source_gap" {
-        return run_cross_source_gap(store, source, target).await;
+    // Detectors that need a companion dataset.
+    match target.detector.as_str() {
+        "cross_source_gap" => return run_cross_source_gap(store, source, target).await,
+        "proxy_divergence" => return run_proxy_divergence(store, source, target).await,
+        "benchmark_deviation" => return run_benchmark_deviation(store, source, target).await,
+        _ => {}
     }
 
     let Ok(page) = store.get_page(&id, 0, 500).await else {
@@ -182,8 +190,50 @@ async fn run_one_target(
 
     match target.detector.as_str() {
         "series_jump" => {
-            let t = if threshold > 0.0 { threshold } else { 25.0 };
-            detect_series_jumps(source, &target.dataset, &page.records, field, t)
+            // v7: cadence-aware. If comparison is YoY, delegate to YoY detector.
+            if matches!(target.comparison, Comparison::YearOverYear) {
+                let ppy = target.cadence.periods_per_year().round() as usize;
+                let ppy = ppy.max(1);
+                detect_year_over_year(
+                    source,
+                    &target.dataset,
+                    &page.records,
+                    field,
+                    if threshold > 0.0 {
+                        threshold
+                    } else {
+                        DEFAULT_PCT_THRESHOLD
+                    },
+                    ppy,
+                )
+            } else {
+                // Cadence-scaled PoP (Unknown cadence → unchanged v3 behavior).
+                let t = if threshold > 0.0 { threshold } else { 25.0 };
+                detect_series_jumps_cadenced(
+                    source,
+                    &target.dataset,
+                    &page.records,
+                    field,
+                    t,
+                    target.cadence,
+                )
+            }
+        }
+        "year_over_year" => {
+            let ppy = target.cadence.periods_per_year().round() as usize;
+            let ppy = ppy.max(1);
+            detect_year_over_year(
+                source,
+                &target.dataset,
+                &page.records,
+                field,
+                if threshold > 0.0 {
+                    threshold
+                } else {
+                    DEFAULT_PCT_THRESHOLD
+                },
+                ppy,
+            )
         }
         "outlier" => detect_outliers(
             source,
@@ -287,6 +337,136 @@ async fn run_cross_source_gap(
     detect_cross_source_gaps(source, &target.dataset, &press_dates, &data_dates)
 }
 
+/// Load the primary + companion datasets and run `detect_proxy_divergence`.
+/// Requires `target.field`, `target.companion`, `target.companion_field`.
+async fn run_proxy_divergence(
+    store: &Arc<MemoryStore>,
+    source: DataSource,
+    target: &ScanTarget,
+) -> Vec<Finding> {
+    let Some(field) = target.field.as_deref() else {
+        tracing::warn!(
+            detector = "proxy_divergence",
+            "agent: needs `field`, skipping"
+        );
+        return Vec::new();
+    };
+    let Some(companion_field) = target.companion_field.as_deref() else {
+        tracing::warn!(
+            detector = "proxy_divergence",
+            "agent: needs `companion_field`, skipping"
+        );
+        return Vec::new();
+    };
+    let Some(companion) = &target.companion else {
+        tracing::warn!(
+            detector = "proxy_divergence",
+            "agent: needs `companion`, skipping"
+        );
+        return Vec::new();
+    };
+    let Some(comp_source) = DataSource::parse(&companion.source) else {
+        tracing::warn!(source = %companion.source, "agent: unknown companion source, skipping");
+        return Vec::new();
+    };
+
+    let primary = match store
+        .get_page(&DatasetId::new(source, &target.dataset), 0, 500)
+        .await
+    {
+        Ok(p) => p.records,
+        Err(_) => return Vec::new(),
+    };
+    let companion_recs = match store
+        .get_page(&DatasetId::new(comp_source, &companion.dataset), 0, 500)
+        .await
+    {
+        Ok(p) => p.records,
+        Err(_) => return Vec::new(),
+    };
+
+    let threshold = target.threshold.unwrap_or(0.0);
+    detect_proxy_divergence(
+        source,
+        &target.dataset,
+        field,
+        comp_source,
+        &companion.dataset,
+        companion_field,
+        &primary,
+        &companion_recs,
+        target.join_field.as_deref(),
+        if threshold > 0.0 {
+            threshold
+        } else {
+            DEFAULT_PROXY_DELTA_PCT
+        },
+        DEFAULT_PROXY_R,
+    )
+}
+
+/// Load the actual + benchmark datasets and run `detect_benchmark_deviation`.
+/// Requires `target.field`, `target.companion` (the benchmark dataset), and
+/// `target.companion_field` (the benchmark value field).
+async fn run_benchmark_deviation(
+    store: &Arc<MemoryStore>,
+    source: DataSource,
+    target: &ScanTarget,
+) -> Vec<Finding> {
+    let Some(field) = target.field.as_deref() else {
+        tracing::warn!(
+            detector = "benchmark_deviation",
+            "agent: needs `field`, skipping"
+        );
+        return Vec::new();
+    };
+    let Some(benchmark_field) = target.companion_field.as_deref() else {
+        tracing::warn!(
+            detector = "benchmark_deviation",
+            "agent: needs `companion_field` (benchmark value), skipping"
+        );
+        return Vec::new();
+    };
+    let Some(bench_ref) = &target.companion else {
+        tracing::warn!(
+            detector = "benchmark_deviation",
+            "agent: needs `companion`, skipping"
+        );
+        return Vec::new();
+    };
+    let Some(bench_source) = DataSource::parse(&bench_ref.source) else {
+        tracing::warn!(source = %bench_ref.source, "agent: unknown benchmark source, skipping");
+        return Vec::new();
+    };
+
+    let actual = match store
+        .get_page(&DatasetId::new(source, &target.dataset), 0, 500)
+        .await
+    {
+        Ok(p) => p.records,
+        Err(_) => return Vec::new(),
+    };
+    let benchmarks = match store
+        .get_page(&DatasetId::new(bench_source, &bench_ref.dataset), 0, 500)
+        .await
+    {
+        Ok(p) => p.records,
+        Err(_) => return Vec::new(),
+    };
+
+    let threshold = target.threshold.unwrap_or(0.0);
+    detect_benchmark_deviation(
+        source,
+        &target.dataset,
+        field,
+        benchmark_field,
+        &actual,
+        &benchmarks,
+        target.join_field.as_deref(),
+        if threshold > 0.0 { threshold } else { 10.0 },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,9 +532,7 @@ mod tests {
             detector: "series_jump".into(),
             field: Some("hibor_overnight".into()),
             threshold: Some(50.0),
-            field_b: None,
-            companion: None,
-            experimental: false,
+            ..Default::default()
         }];
         let settings = settings_with_scan(scan);
 
@@ -387,9 +565,7 @@ mod tests {
             detector: "outlier".into(),
             field: Some("v".into()),
             threshold: Some(3.5),
-            field_b: None,
-            companion: None,
-            experimental: false,
+            ..Default::default()
         }];
         let settings = settings_with_scan(scan);
 
@@ -421,10 +597,7 @@ mod tests {
             dataset: "daily-interbank-liquidity".into(),
             detector: "no_such_detector".into(),
             field: Some("v".into()),
-            threshold: None,
-            field_b: None,
-            companion: None,
-            experimental: false,
+            ..Default::default()
         }];
         let settings = settings_with_scan(scan);
 
@@ -445,9 +618,7 @@ mod tests {
             detector: "series_jump".into(),
             field: Some("v".into()),
             threshold: Some(50.0),
-            field_b: None,
-            companion: None,
-            experimental: false,
+            ..Default::default()
         }];
         let settings = settings_with_scan(scan);
 
@@ -466,13 +637,11 @@ mod tests {
             dataset: "hkma-press-releases".into(),
             detector: "cross_source_gap".into(),
             field: Some("date".into()),
-            threshold: None,
-            field_b: None,
             companion: Some(CompanionRef {
                 source: "hkma".into(),
                 dataset: "daily-interbank-liquidity".into(),
             }),
-            experimental: false,
+            ..Default::default()
         }];
         let settings = settings_with_scan(scan);
 
