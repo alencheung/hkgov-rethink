@@ -84,6 +84,14 @@ llm_model = "gpt-4o-mini"
 # field = "eq_mkt_hs_index"
 # field_b = "eq_mkt_total_turnover"
 # threshold = 0.3
+# experimental = true   # validated by construction, not yet by a real finding
+#
+# [[agent.scan]]
+# source = "hkma"
+# dataset = "capital-market-statistics"
+# detector = "seasonality"
+# field = "eq_mkt_hs_index"
+# experimental = true   # validated by construction, not yet by a real finding
 #
 # [[agent.scan]]
 # source = "press"

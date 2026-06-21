@@ -1,26 +1,87 @@
 # hkgov-rethink
 
-> Consolidated, AI-infused insights from Hong Kong Government public data —
-> not just a chat over data, but agentic monitoring that surfaces what the HKGOV
-> press room leaves unsaid.
+> **Agentic monitoring that surfaces what the HKGOV press room leaves unsaid.**
+> A Rust platform that ingests Hong Kong Government open data, runs deterministic
+> anomaly detection across sources, and tells you when the official narrative and
+> the published data disagree — with evidence you can verify.
 
-`hkgov-rethink` is a Rust platform that ingests Hong Kong Government open data
-(monetary, statistical, geospatial, and press), normalizes it onto one model,
-serves it through a high-concurrency cache-first API, and runs an AI agent layer
-that cross-references sources to detect anomalies, gaps, and narratives the
-official press releases don't spell out.
+## What it actually finds (on real data, captured 2026-06-21)
 
-**Target:** 100k concurrent users served from AI-agent-generated insights over
-consolidated HKGOV data. v1–v5 are shipped; the remaining work is deployment +
-wider source coverage (see [Roadmap status](#roadmap-status)).
+These are **not synthetic** — they were produced by this project's own detectors
+against live HKGOV open data. Full verbatim output + evidence pointers:
+[EXAMPLES.md](EXAMPLES.md).
+
+> ⚠️ **`series_jump` (critical):** HIBOR overnight **doubled in one settlement
+> window** — +99.3% from 2026-02-13 (1.47) to 2026-02-16 (2.93). HKMA issued no
+> press release attributing the move on those dates.
+
+> 📉 **`outlier`:** A sustained sub-1.3% HIBOR cluster across **8 days in March
+> 2026** (robust-z down to −4.7), invisible to a single-day spike detector but
+> flagged by the MAD outlier scan as a regime, not a blip.
+
+> 🔎 **`cross_source_gap`:** Dates where HKMA issued a press release but published
+> no matching statistical data row (or vice versa) — the literal "press room
+> leaves it untold" signal, with the specific dates as evidence.
+
+**The determinism guarantee:** every number above is reproducible. Same data in,
+same findings out, **no API key required**. The LLM only frames results; detection
+is pure Rust. See [Architecture → The determinism guarantee](docs/ARCHITECTURE.md).
+
+## Why this exists
+
+HKGOV publishes rich open data (HKMA monetary stats, data.gov.hk, press releases,
+geospatial) but the press releases rarely spell out *why a number moved* or *when
+the narrative and the data diverge*. `hkgov-rethink` cross-references those
+sources automatically and surfaces the gaps — anomalies, outliers, and
+missing-data days — as structured `Insight` records with pointers back to the
+source rows so a human can verify the claim.
+
+## Try it in 60 seconds
+
+```bash
+./scripts/demo.sh        # one-shot: boots, warms, prints 3 real insights, exits
+```
+
+Or run the server and explore:
+
+```bash
+cargo run --release -p hkgov-api     # boots on :8080, warms cache from HKGOV
+curl 'http://localhost:8080/v1/insights?limit=5'
+curl -X POST http://localhost:8080/v1/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"what is the interbank liquidity doing?"}'
+```
+
+Prefer Docker? `docker run ghcr.io/alencheung/hkgov-rethink` (see
+[Docker](#docker)). Prefer Python? `pip install hkgov-py` (see
+[Python client](#python-client)).
+
+## What makes it different
+
+- **Deterministic-first AI.** Detection is pure Rust; the LLM only frames. The
+  whole agent layer — insights, Q&A, alerting — works end to end with zero
+  external dependencies. Reproducible in CI.
+- **Cross-source, not single-source.** The interesting findings come from
+  *comparing* sources (press vs. data, one series vs. another), which a
+  per-source dashboard can't do.
+- **Evidence, not assertions.** Every `Insight` carries `EvidenceRef`s pointing
+  back into the store, so a reader can verify the claim against the source data.
+- **Built for scale from day one.** One-way pipeline, cache-first serving, the
+  `RecordStore` trait as the scaling contract. Single node → 100k-concurrency
+  fleet is a config change, not a refactor ([docs/CAPACITY.md](docs/CAPACITY.md)).
 
 ---
 
 ## Table of contents
 
+- [What it actually finds](#what-it-actually-finds-on-real-data-captured-2026-06-21) — real captured insights
+- [Try it in 60 seconds](#try-it-in-60-seconds)
+- [What makes it different](#what-makes-it-different)
 - [Architecture](#architecture) — design, data flow, the why behind each crate
 - [Features](#features) — what exists today, what's planned
-- [Quick start](#quick-start) — boot the API + dashboard in <2 minutes
+- [Quick start](#quick-start) — boot the API + dashboard
+- [Docker](#docker) — zero-friction container path
+- [Python client](#python-client) — `pip install hkgov-py`
 - [API reference](#api-reference) — every endpoint, with examples
 - [The AI agent layer](#the-ai-agent-layer) — how insights are produced
 - [Configuration](#configuration) — `config.toml` + env overrides
@@ -28,6 +89,7 @@ wider source coverage (see [Roadmap status](#roadmap-status)).
 - [Testing](#testing)
 - [Repository layout](#repository-layout)
 - [Roadmap status](#roadmap-status) — shipped vs. future, milestone by milestone
+- [Contributing](#contributing) — good first issues, feature matrix
 - [Deeper docs](#deeper-docs) — breadcrumbs for collaborators
 
 ---
@@ -231,6 +293,51 @@ Then open [dashboard/index.html](dashboard/index.html) in a browser (point it at
 
 ---
 
+## Docker
+
+A container image is the fastest way to try the project without a Rust toolchain.
+
+```bash
+# Build locally
+docker build -t hkgov-rethink .
+
+# Run with the agent enabled (heuristic mode, no API key needed)
+docker run --rm -p 8080:8080 -e HKGOV_AGENT__ENABLED=true hkgov-rethink
+
+# Then:
+curl 'http://localhost:8080/v1/insights?limit=5'
+```
+
+The image is multi-stage and distroless-slim; the final image is ~30MB. See
+[`Dockerfile`](Dockerfile). (CI publishes to `ghcr.io/alencheung/hkgov-rethink`
+on tags — see [`.github/workflows/release.yml`](.github/workflows/release.yml).)
+
+---
+
+## Python client
+
+For data work without writing Rust, install the typed Python client:
+
+```bash
+pip install hkgov-py
+```
+
+```python
+from hkgov import HkGov
+
+client = HkGov("http://localhost:8080")           # API key optional
+for s in client.sources():
+    print(s.source, s.dataset, s.record_count)
+
+answer = client.ask("what is the interbank liquidity doing?")
+print(answer.text, f"{answer.confidence:.0%}")
+```
+
+Source and packaging live in [`python/`](python/). The client is a thin wrapper
+over the HTTP API, so anything the API can do, Python can do.
+
+---
+
 ## API reference
 
 All data endpoints are under `/v1` (configurable via `api.api_prefix`).
@@ -406,6 +513,28 @@ examples/      Python API client
 
 Full detail, including the remaining/future work, in
 [docs/ROADMAP.md](docs/ROADMAP.md).
+
+---
+
+## Contributing
+
+Contributions are welcome — the project is structured to make first PRs easy.
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) (feature matrix, architecture
+invariants, step-by-step guides for adding a connector or a detector).
+
+**Good first issues** are labeled [`good first issue`](https://github.com/alencheung/hkgov-rethink/labels/good%20first%20issue)
+on GitHub — each is bounded, self-contained, and points at the file to change.
+A few representative ones:
+
+- Add a `detect_trend_break` detector (follows the existing detector pattern)
+- Wire `store.backend` config selection into `main.rs` (currently dead config)
+- Add a `news.gov.hk` RSS connector (press connector v2)
+- Promote `seasonality`/`correlation` from experimental once they catch a real finding
+- Frontend: a richer dashboard with a chat UI for `/ask`
+
+See [CHANGELOG.md](CHANGELOG.md) for what shipped in each milestone. Please open
+an issue before large changes so we can align on direction. By contributing you
+agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ---
 

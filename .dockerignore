@@ -1,0 +1,25 @@
+# Build artifacts
+target/
+**/target/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+**/.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Python
+python/
+**/__pycache__/
+**/*.egg-info/
+.venv/
+
+# Temp / data
+.tmp_*
+*.tmp
+loadtest/*.log
