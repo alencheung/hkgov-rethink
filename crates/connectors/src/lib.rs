@@ -4,13 +4,18 @@
 //! its raw payloads into [`NormalizedRecord`]s. The ingest pipeline orchestrates
 //! them; the serving API never calls a connector directly.
 //!
-//! v1 ships the **HKMA** connector (verified live against
-//! `api.hkma.gov.hk`). The others are defined as traits/stubs so the ingest
-//! layer can reference them now and the implementations land in later milestones
-//! (see docs/ROADMAP.md).
+//! Implemented connectors (all verified live — see docs/DATA_SOURCES.md):
+//! - **HKMA** (`api.hkma.gov.hk`) — monetary & market statistics, press.
+//! - **data.gov.hk** (`api.data.gov.hk/v2/filter`) — cross-departmental data.
+//! - **Press** (`api.hkma.gov.hk/public/press-releases`) — HKMA press releases.
+//! - **LandsD/CSDI** (data.gov.hk historical archive) — geospatial catalog.
 
+pub mod datagovhk;
 pub mod hkma;
+pub mod landsd;
+pub mod press;
 pub mod registry;
+pub mod resilience;
 
 use async_trait::async_trait;
 use hkgov_common::{DataSource, NormalizedRecord, Result};

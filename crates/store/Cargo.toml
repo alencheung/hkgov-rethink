@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+# Enables the Redis-backed RecordStore (ROADMAP v2 multi-node tier). Off by
+# default so the build and CI need no Redis server.
+redis = ["dep:redis"]
+
 [dependencies]
 hkgov-common.workspace = true
 async-trait.workspace = true
@@ -17,3 +23,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
+redis = { version = "0.27", default-features = false, features = [
+    "tokio-comp",
+    "connection-manager",
+], optional = true }

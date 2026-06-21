@@ -7,8 +7,12 @@
 //! docs/ARCHITECTURE.md §"Scaling path".
 
 pub mod memory;
+#[cfg(feature = "redis")]
+pub mod redis_store;
 
 pub use memory::MemoryStore;
+#[cfg(feature = "redis")]
+pub use redis_store::RedisStore;
 
 use async_trait::async_trait;
 use hkgov_common::{DataSource, DatasetMeta, NormalizedRecord, Result};
