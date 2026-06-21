@@ -61,6 +61,21 @@ llm_model = "gpt-4o-mini"
 #   cross_source_gap — flags dates present in this dataset but absent in
 #                      `companion`.             Needs: field (the date column),
 #                                                companion.
+#   year_over_year  — flags period vs same-period-a-year-ago moves, removing
+#                     seasonality. `threshold` is the % YoY watch (default 15).
+#                     `cadence` sets periods/year (quarterly=4, monthly=12).
+#                                                Needs: field, cadence.
+#   proxy_divergence — THE hero detector for "non-obvious lies": flags when two
+#                      proxies that should measure the same fact diverge in value
+#                      (latest period) or decouple over history (Pearson r).
+#                      `threshold` is the value-divergence % (default 5).
+#                                                Needs: field, companion,
+#                                                companion_field, [join_field].
+#   benchmark_deviation — flags actual vs assumed/projected/peer value.
+#                      `threshold` is the deviation % (default 10).
+#                                                Needs: field, companion (the
+#                                                benchmark dataset),
+#                                                companion_field, [join_field].
 #
 # Uncomment to override the defaults:
 # [[agent.scan]]
@@ -92,6 +107,43 @@ llm_model = "gpt-4o-mini"
 # detector = "seasonality"
 # field = "eq_mkt_hs_index"
 # experimental = true   # validated by construction, not yet by a real finding
+#
+# Year-over-year: compare each period to the same period a year ago. Use for
+# seasonal quarterly/annual series where PoP is dominated by calendar effects.
+# cadence sets periods-per-year (quarterly=4, monthly=12, annual=1).
+# [[agent.scan]]
+# source = "hkma"
+# dataset = "capital-market-statistics"
+# detector = "year_over_year"
+# field = "eq_mkt_hs_index"
+# threshold = 15.0
+# cadence = "monthly"
+#
+# Proxy divergence (hero): two datasets measuring the same fact disagree.
+# Example sketch — land revenue via fiscal receipts vs land transactions.
+# [[agent.scan]]
+# source = "hkma"
+# dataset = "fiscal-receipts"
+# detector = "proxy_divergence"
+# field = "land_premium"
+# companion = { source = "datagovhk", dataset = "land-transactions" }
+# companion_field = "consideration"
+# join_field = "quarter"
+# threshold = 5.0
+# experimental = true   # needs both datasets ingested to fire
+#
+# Benchmark deviation: actual vs assumed/projected. Example sketch — land
+# premium receipts vs the budget speech assumption.
+# [[agent.scan]]
+# source = "hkma"
+# dataset = "fiscal-receipts"
+# detector = "benchmark_deviation"
+# field = "land_premium_actual"
+# companion = { source = "datagovhk", dataset = "budget-assumptions" }
+# companion_field = "land_premium_assumed"
+# join_field = "fiscal_year"
+# threshold = 10.0
+# experimental = true   # needs both datasets ingested to fire
 #
 # [[agent.scan]]
 # source = "press"

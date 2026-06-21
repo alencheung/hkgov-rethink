@@ -1,18 +1,25 @@
 //! Provider-independent analysis: turns raw records into structured `Finding`s.
 //!
-//! Two detectors ship in v3:
-//! - [`detect_series_jumps`] — flags a numeric series that moved more than a
-//!   threshold between consecutive periods (e.g. HIBOR spikes, balance swings).
-//! - [`detect_cross_source_gaps`] — flags dates where HKMA published a press
-//!   release but no corresponding data row, or vice versa, surfacing gaps the
-//!   official narrative leaves unexplained.
+//! v3 detectors: [`detect_series_jumps`] (consecutive moves) and
+//! [`detect_cross_source_gaps`] (press date vs data date).
+//!
+//! v6 added [`detect_outliers`], [`detect_seasonality`], [`detect_correlation`].
+//!
+//! v7 added cadence-aware detectors that account for non-daily update frequency:
+//! - [`detect_series_jumps_cadenced`] — threshold scaled to the series' cadence.
+//! - [`detect_year_over_year`] — same-period-last-year comparison (removes
+//!   seasonality; the right choice for quarterly/annual series).
+//! - [`detect_proxy_divergence`] — the hero detector for "non-obvious lies":
+//!   flags when two proxies that *should* measure the same underlying fact
+//!   diverge in value or decouple over time.
+//! - [`detect_benchmark_deviation`] — actual vs. assumed/projected/peer value.
 //!
 //! Each detector emits `Finding`s; the LLM client (heuristic or HTTP) only
 //! *frames* them into natural language. Detection stays deterministic.
 
 use crate::insight::{EvidenceRef, Insight, InsightSeverity};
 use chrono::Utc;
-use hkgov_common::{DataSource, NormalizedRecord, RecordValue};
+use hkgov_common::{Cadence, DataSource, NormalizedRecord, RecordValue};
 use serde::{Deserialize, Serialize};
 
 /// A raw, structured finding before an LLM frames it. Serializable so the HTTP
@@ -447,6 +454,389 @@ pub fn detect_correlation(
     findings
 }
 
+// ---------------------------------------------------------------------------
+// Cadence-aware detectors (v7) + proxy_divergence + benchmark_deviation.
+//
+// The v3-v6 detectors assumed every series was a stream of adjacent periods.
+// That's wrong for quarterly/annual data: a 10% QoQ move on a seasonal series
+// is mostly noise, while 10% YoY is real. These detectors take a `Cadence` and
+// a `Comparison` so the threshold is calibrated to what "normal" means for
+// that series.
+// ---------------------------------------------------------------------------
+
+/// Default % move at a daily cadence. Higher cadences scale this up — see
+/// [`scale_threshold_for_cadence`].
+pub const DEFAULT_PCT_THRESHOLD: f64 = 15.0;
+/// Default minimum records either side of a YoY comparison before we'll opine.
+pub const MIN_YOY_SAMPLES: usize = 4;
+/// Default |delta/value| above which a proxy divergence is flagged.
+pub const DEFAULT_PROXY_DELTA_PCT: f64 = 5.0;
+/// Default correlation below which two proxies are considered "decoupled".
+pub const DEFAULT_PROXY_R: f64 = 0.6;
+/// Default |actual - benchmark| / |benchmark| above which a benchmark deviation
+/// is flagged.
+pub const DEFAULT_BENCHMARK_PCT: f64 = 10.0;
+
+/// Scale a flat % threshold for a cadence. The intuition: returns compound with
+/// the sqrt of time, so an acceptable single-period move scales *down* with the
+/// sqrt of how many periods-per-year the cadence represents, normalized to a
+/// monthly baseline (sqrt(12)). Daily → ~0.22× (smaller moves flag, since a
+/// normal daily move is tiny); annual → ~3.46× (bigger moves tolerated, since a
+/// normal annual move is large). `Unknown` → 1.0× (no scaling).
+pub fn scale_threshold_for_cadence(base_pct: f64, cadence: Cadence) -> f64 {
+    if matches!(cadence, Cadence::Unknown) {
+        return base_pct;
+    }
+    let monthly = 12.0_f64;
+    let scale = (monthly / cadence.periods_per_year()).sqrt();
+    base_pct * scale
+}
+
+/// Detect period-over-period moves, cadence-aware. Same shape as
+/// [`detect_series_jumps`] but the threshold is scaled by [`Cadence`] so a
+/// normally-sized move for the cadence isn't flagged. For seasonal series, use
+/// [`detect_year_over_year`] instead.
+pub fn detect_series_jumps_cadenced(
+    source: DataSource,
+    dataset: &str,
+    records: &[NormalizedRecord],
+    series_field: &str,
+    base_pct_threshold: f64,
+    cadence: Cadence,
+) -> Vec<Finding> {
+    let scaled = scale_threshold_for_cadence(
+        if base_pct_threshold > 0.0 {
+            base_pct_threshold
+        } else {
+            DEFAULT_PCT_THRESHOLD
+        },
+        cadence,
+    );
+    // Delegate to the original detector with the scaled threshold.
+    detect_series_jumps(source, dataset, records, series_field, scaled)
+}
+
+/// Detect year-over-year moves. Each period is compared to the period a year
+/// ago (by record_id prefix matching), removing seasonality. The right
+/// comparison for quarterly retail / tourism / fiscal lines where Q3-vs-Q2 is
+/// dominated by calendar effects.
+///
+/// `periods_per_year` is the number of records per year (4 for quarterly, 12
+/// for monthly, 1 for annual). When the offset can't be applied (too few
+/// records, or no match a year back), that period is skipped.
+pub fn detect_year_over_year(
+    source: DataSource,
+    dataset: &str,
+    records: &[NormalizedRecord],
+    series_field: &str,
+    pct_threshold: f64,
+    periods_per_year: usize,
+) -> Vec<Finding> {
+    let series = numeric_series(records, series_field);
+    if series.len() < periods_per_year + MIN_YOY_SAMPLES {
+        return Vec::new();
+    }
+    let threshold = if pct_threshold > 0.0 {
+        pct_threshold
+    } else {
+        DEFAULT_PCT_THRESHOLD
+    };
+    let mut findings = Vec::new();
+    for (curr_idx, (curr_id, curr_v)) in series.iter().enumerate() {
+        // Compare against the period a year ago.
+        let prev_idx = match curr_idx.checked_sub(periods_per_year) {
+            Some(i) => i,
+            None => continue,
+        };
+        let (prev_id, prev_v) = series[prev_idx];
+        if prev_v.abs() < f64::EPSILON {
+            continue;
+        }
+        let pct = ((curr_v - prev_v) / prev_v.abs()) * 100.0;
+        if pct.abs() >= threshold {
+            let confidence = ((pct.abs() / threshold).min(5.0) / 5.0).clamp(0.5, 1.0);
+            let severity = if pct.abs() >= threshold * 3.0 {
+                "critical"
+            } else {
+                "warning"
+            };
+            findings.push(Finding {
+                kind: "year_over_year".into(),
+                source,
+                dataset: dataset.into(),
+                title: format!("{series_field} {pct:+.1}% YoY ({prev_id} → {curr_id})"),
+                heuristic_summary: format!(
+                    "The {series_field} series changed by {pct:+.1}% year-over-year \
+                     ({prev_id}: {prev_v:.2} → {curr_id}: {curr_v:.2}). The {threshold:.0}% \
+                     YoY watch threshold was crossed — a real move after removing seasonality."
+                ),
+                severity: severity.into(),
+                confidence,
+                evidence: vec![
+                    EvidenceRef {
+                        record_id: prev_id.to_string(),
+                        field: series_field.into(),
+                        value: serde_json::json!(prev_v),
+                        context: Some("one year prior".into()),
+                    },
+                    EvidenceRef {
+                        record_id: curr_id.to_string(),
+                        field: series_field.into(),
+                        value: serde_json::json!(curr_v),
+                        context: Some("current period".into()),
+                    },
+                ],
+            });
+        }
+    }
+    findings
+}
+
+/// Detect divergence between two proxy series that *should* tell the same story.
+/// This is the hero detector for "non-obvious lies": two datasets measuring the
+/// same underlying fact (e.g. land revenue via fiscal receipts vs. land
+/// transactions) that decouple — a candidate signal that one is being
+/// misreported, mis-defined, or lags the other.
+///
+/// Two series are joined on a shared key (`join_field`, default `record_id`) and
+/// tested two ways:
+/// 1. **Value divergence:** for the most recent joined period, how far apart
+///    are the two values, as % of the larger? Above `delta_pct` → flagged.
+/// 2. **Relationship breakdown:** Pearson r over the joined history; if below
+///    `min_r`, the proxies have decoupled over time → flagged.
+///
+/// Both `primary` and `companion` are pre-extracted (key, value) pairs, so this
+/// detector is pure and testable without the store.
+#[allow(clippy::too_many_arguments)] // stable detector API; grouping into a struct would obscure the call sites
+pub fn detect_proxy_divergence(
+    source: DataSource,
+    dataset: &str,
+    series_field: &str,
+    companion_source: DataSource,
+    companion_dataset: &str,
+    companion_field: &str,
+    primary: &[NormalizedRecord],
+    companion: &[NormalizedRecord],
+    join_field: Option<&str>,
+    delta_pct: f64,
+    min_r: f64,
+) -> Vec<Finding> {
+    let jf = join_field.unwrap_or("record_id");
+    // Index the companion by join key → value.
+    let companion_map: std::collections::HashMap<String, f64> = companion
+        .iter()
+        .filter_map(|r| {
+            let key = join_key(r, jf)?;
+            let val = numeric(r, companion_field)?;
+            Some((key, val))
+        })
+        .collect();
+
+    // Build paired observations on the join key, sorted ascending.
+    let mut pairs: Vec<(String, f64, f64)> = primary
+        .iter()
+        .filter_map(|r| {
+            let key = join_key(r, jf)?;
+            let a = numeric(r, series_field)?;
+            let b = *companion_map.get(&key)?;
+            Some((key, a, b))
+        })
+        .collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    if pairs.len() < MIN_SAMPLES {
+        return Vec::new();
+    }
+    let delta_pct = if delta_pct > 0.0 {
+        delta_pct
+    } else {
+        DEFAULT_PROXY_DELTA_PCT
+    };
+    let min_r = if min_r > 0.0 { min_r } else { DEFAULT_PROXY_R };
+
+    let mut findings = Vec::new();
+
+    // (1) Value divergence on the most recent joined period.
+    let (last_key, last_a, last_b) = pairs.last().cloned().unwrap();
+    let base = last_a.abs().max(last_b.abs());
+    if base > f64::EPSILON {
+        let delta_pct_observed = ((last_a - last_b).abs() / base) * 100.0;
+        if delta_pct_observed >= delta_pct {
+            let confidence = ((delta_pct_observed / delta_pct).min(4.0) / 4.0).clamp(0.5, 1.0);
+            findings.push(Finding {
+                kind: "proxy_divergence".into(),
+                source,
+                dataset: dataset.into(),
+                title: format!(
+                    "{series_field} vs {companion_field} diverged by {delta_pct_observed:.1}% \
+                     at {last_key}"
+                ),
+                heuristic_summary: format!(
+                    "The proxies {series_field} ({source}/{dataset}) and {companion_field} \
+                     ({companion_source}/{companion_dataset}) — which should measure the same \
+                     underlying fact — disagree by {delta_pct_observed:.1}% at {last_key} \
+                     ({last_a:.2} vs {last_b:.2}). This is above the {delta_pct:.0}% watch \
+                     threshold and a candidate misalignment worth investigating."
+                ),
+                severity: "warning".into(),
+                confidence,
+                evidence: vec![
+                    EvidenceRef {
+                        record_id: last_key.clone(),
+                        field: series_field.into(),
+                        value: serde_json::json!(last_a),
+                        context: Some(format!("{source}/{dataset} (primary proxy)")),
+                    },
+                    EvidenceRef {
+                        record_id: last_key.clone(),
+                        field: companion_field.into(),
+                        value: serde_json::json!(last_b),
+                        context: Some(format!(
+                            "{companion_source}/{companion_dataset} (companion proxy)"
+                        )),
+                    },
+                ],
+            });
+        }
+    }
+
+    // (2) Relationship breakdown over history.
+    let r = pearson(&pairs.iter().map(|(_, a, b)| (*a, *b)).collect::<Vec<_>>());
+    if r.abs() < min_r {
+        let confidence = (1.0 - r.abs()).clamp(0.5, 1.0);
+        findings.push(Finding {
+            kind: "proxy_divergence".into(),
+            source,
+            dataset: dataset.into(),
+            title: format!(
+                "{series_field} and {companion_field} have decoupled (r = {r:+.2} over {} periods)",
+                pairs.len()
+            ),
+            heuristic_summary: format!(
+                "The proxies {series_field} and {companion_field} historically moved together \
+                 but now correlate at only r = {r:+.2} over {n} joined periods, below the \
+                 {min_r:.1} watch threshold. A sustained decoupling often signals one proxy has \
+                 changed definition, lagged the other, or the underlying relationship has shifted.",
+                n = pairs.len()
+            ),
+            severity: "warning".into(),
+            confidence,
+            evidence: vec![EvidenceRef {
+                record_id: "joined_history".into(),
+                field: format!("pearson_r_{series_field}_vs_{companion_field}"),
+                value: serde_json::json!(r),
+                context: Some("correlation over all joined periods".into()),
+            }],
+        });
+    }
+
+    findings
+}
+
+/// Extract the join key for a record. If `join_field` is `record_id`, use the
+/// record's id; otherwise read the named field as a string.
+fn join_key(r: &NormalizedRecord, join_field: &str) -> Option<String> {
+    if join_field == "record_id" {
+        return Some(r.record_id.clone());
+    }
+    match r.fields.get(join_field)? {
+        RecordValue::Str(s) => Some(s.clone()),
+        RecordValue::Int(i) => Some(i.to_string()),
+        RecordValue::Float(f) => Some(f.to_string()),
+        _ => None,
+    }
+}
+
+/// Detect deviation of a series from a benchmark (an assumed/projected/peer
+/// value). The "budget lie" detector: actual receipts vs. the budget speech
+/// assumption, actual GDP vs. forecast, actual vs. peer-city index.
+///
+/// `actual` is the observed series; `benchmark` carries the assumed value(s).
+/// Both are joined on `join_field`. A finding is emitted for each joined period
+/// where |actual - benchmark| / |benchmark| >= `pct_threshold`.
+#[allow(clippy::too_many_arguments)] // stable detector API
+pub fn detect_benchmark_deviation(
+    source: DataSource,
+    dataset: &str,
+    field: &str,
+    benchmark_field: &str,
+    actual: &[NormalizedRecord],
+    benchmarks: &[NormalizedRecord],
+    join_field: Option<&str>,
+    pct_threshold: f64,
+) -> Vec<Finding> {
+    let jf = join_field.unwrap_or("record_id");
+    let bench_map: std::collections::HashMap<String, f64> = benchmarks
+        .iter()
+        .filter_map(|r| {
+            let key = join_key(r, jf)?;
+            let val = numeric(r, benchmark_field)?;
+            Some((key, val))
+        })
+        .collect();
+
+    let threshold = if pct_threshold > 0.0 {
+        pct_threshold
+    } else {
+        DEFAULT_BENCHMARK_PCT
+    };
+
+    let mut findings = Vec::new();
+    for r in actual {
+        let key = match join_key(r, jf) {
+            Some(k) => k,
+            None => continue,
+        };
+        let actual_v = match numeric(r, field) {
+            Some(v) => v,
+            None => continue,
+        };
+        let bench_v = match bench_map.get(&key) {
+            Some(v) => *v,
+            None => continue,
+        };
+        if bench_v.abs() < f64::EPSILON {
+            continue;
+        }
+        let pct = ((actual_v - bench_v) / bench_v.abs()) * 100.0;
+        if pct.abs() >= threshold {
+            let confidence = ((pct.abs() / threshold).min(4.0) / 4.0).clamp(0.5, 1.0);
+            let severity = if pct.abs() >= threshold * 2.0 {
+                "critical"
+            } else {
+                "warning"
+            };
+            findings.push(Finding {
+                kind: "benchmark_deviation".into(),
+                source,
+                dataset: dataset.into(),
+                title: format!("{field} is {pct:+.1}% vs benchmark at {key}"),
+                heuristic_summary: format!(
+                    "The {field} value at {key} ({actual_v:.2}) deviates {pct:+.1}% from the \
+                     benchmark {benchmark_field} ({bench_v:.2}). Beyond the {threshold:.0}% watch \
+                     threshold — an actual-vs-assumed gap worth flagging."
+                ),
+                severity: severity.into(),
+                confidence,
+                evidence: vec![
+                    EvidenceRef {
+                        record_id: key.clone(),
+                        field: field.into(),
+                        value: serde_json::json!(actual_v),
+                        context: Some("actual".into()),
+                    },
+                    EvidenceRef {
+                        record_id: key.clone(),
+                        field: benchmark_field.into(),
+                        value: serde_json::json!(bench_v),
+                        context: Some("benchmark (assumed/projected)".into()),
+                    },
+                ],
+            });
+        }
+    }
+    findings
+}
+
 /// Look up a numeric field on one record, coercing Int → Float.
 fn numeric(r: &NormalizedRecord, field: &str) -> Option<f64> {
     match r.fields.get(field)? {
@@ -712,5 +1102,300 @@ mod tests {
             s,
             vec![("2026-01", 1.0), ("2026-02", 2.0), ("2026-03", 3.0)]
         );
+    }
+
+    // ---- v7: cadence scaling ---------------------------------------------
+
+    #[test]
+    fn cadence_scales_threshold_correctly() {
+        // Monthly is the baseline → 1.0×.
+        let base = 10.0;
+        assert!((scale_threshold_for_cadence(base, Cadence::Monthly) - 10.0).abs() < 1e-9);
+        // Daily → smaller (more sensitive).
+        assert!(scale_threshold_for_cadence(base, Cadence::Daily) < 10.0);
+        // Annual → larger (less sensitive).
+        assert!(scale_threshold_for_cadence(base, Cadence::Annual) > 10.0);
+        // Unknown → unchanged.
+        assert!((scale_threshold_for_cadence(base, Cadence::Unknown) - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cadenced_series_jump_tolerates_normal_annual_move() {
+        // A 12% move that would flag at daily (threshold ~6.7%) should NOT flag
+        // at annual (threshold ~34.6%).
+        let recs = vec![rec("2025", "v", 100.0), rec("2026", "v", 112.0)];
+        // Daily: flags.
+        assert!(!detect_series_jumps_cadenced(
+            DataSource::Hkma,
+            "x",
+            &recs,
+            "v",
+            10.0,
+            Cadence::Daily
+        )
+        .is_empty());
+        // Annual: tolerated.
+        assert!(detect_series_jumps_cadenced(
+            DataSource::Hkma,
+            "x",
+            &recs,
+            "v",
+            10.0,
+            Cadence::Annual
+        )
+        .is_empty());
+    }
+
+    // ---- v7: year_over_year ----------------------------------------------
+
+    #[test]
+    fn yoy_flags_real_move_ignoring_seasonality() {
+        // Quarterly series (4/year): a Q with a 10% YoY jump.
+        // Layout: 2025-Q1..Q4 (baseline 100), 2026-Q1..Q4 (Q1 jumps to 130).
+        let mut recs: Vec<NormalizedRecord> = Vec::new();
+        for q in 1..=4 {
+            recs.push(rec(&format!("2025-Q{q}"), "v", 100.0));
+        }
+        recs.push(rec("2026-Q1", "v", 130.0)); // +30% YoY
+        for q in 2..=4 {
+            recs.push(rec(&format!("2026-Q{q}"), "v", 100.0));
+        }
+        let f = detect_year_over_year(DataSource::Hkma, "x", &recs, "v", 25.0, 4);
+        assert!(f
+            .iter()
+            .any(|x| x.kind == "year_over_year" && x.title.contains("Q1")));
+    }
+
+    #[test]
+    fn yoy_needs_enough_history() {
+        // Fewer than periods_per_year + MIN_YOY_SAMPLES → empty.
+        let recs = vec![rec("2025-Q1", "v", 1.0), rec("2026-Q1", "v", 100.0)];
+        assert!(detect_year_over_year(DataSource::Hkma, "x", &recs, "v", 25.0, 4).is_empty());
+    }
+
+    // ---- v7: proxy_divergence --------------------------------------------
+
+    fn rec_with(id: &str, field: &str, val: f64) -> NormalizedRecord {
+        let mut f = BTreeMap::new();
+        f.insert(field.into(), RecordValue::Float(val));
+        NormalizedRecord {
+            source: DataSource::Hkma,
+            dataset: "x".into(),
+            record_id: id.into(),
+            fields: f,
+            fetched_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn proxy_divergence_flags_value_mismatch() {
+        // Two proxies measuring the "same" thing: agree for 3 periods, then
+        // diverge sharply on the last.
+        let primary = vec![
+            rec_with("p1", "a", 100.0),
+            rec_with("p2", "a", 110.0),
+            rec_with("p3", "a", 120.0),
+            rec_with("p4", "a", 200.0), // primary says 200
+        ];
+        let companion = vec![
+            rec_with("p1", "b", 100.0),
+            rec_with("p2", "b", 110.0),
+            rec_with("p3", "b", 120.0),
+            rec_with("p4", "b", 125.0), // companion says 125 → big divergence
+        ];
+        let f = detect_proxy_divergence(
+            DataSource::Hkma,
+            "x",
+            "a",
+            DataSource::DataGovHk,
+            "y",
+            "b",
+            &primary,
+            &companion,
+            None,
+            5.0,
+            0.6,
+        );
+        // Should flag the value divergence (200 vs 125 is ~46% apart).
+        assert!(f
+            .iter()
+            .any(|x| x.kind == "proxy_divergence" && x.title.contains("diverged")));
+    }
+
+    #[test]
+    fn proxy_divergence_flags_decoupling() {
+        // Proxies that tracked each other then decoupled: primary keeps rising,
+        // companion reverses and falls. r drops well below 0.6.
+        let primary = vec![
+            rec_with("p1", "a", 1.0),
+            rec_with("p2", "a", 2.0),
+            rec_with("p3", "a", 3.0),
+            rec_with("p4", "a", 4.0),
+            rec_with("p5", "a", 5.0),
+            rec_with("p6", "a", 6.0),
+            rec_with("p7", "a", 7.0),
+            rec_with("p8", "a", 8.0),
+        ];
+        // Companion tracks 1:1 for first 4, then declines — a real decoupling.
+        let companion = vec![
+            rec_with("p1", "b", 1.0),
+            rec_with("p2", "b", 2.0),
+            rec_with("p3", "b", 3.0),
+            rec_with("p4", "b", 4.0),
+            rec_with("p5", "b", 3.5),
+            rec_with("p6", "b", 3.0),
+            rec_with("p7", "b", 2.5),
+            rec_with("p8", "b", 2.0),
+        ];
+        let f = detect_proxy_divergence(
+            DataSource::Hkma,
+            "x",
+            "a",
+            DataSource::DataGovHk,
+            "y",
+            "b",
+            &primary,
+            &companion,
+            None,
+            90.0, // high delta threshold so only the decoupling fires
+            0.6,
+        );
+        assert!(f.iter().any(|x| x.title.contains("decoupled")), "got {f:?}");
+    }
+
+    #[test]
+    fn proxy_divergence_quiet_when_aligned() {
+        // Two identical proxies → no findings.
+        let recs = vec![
+            rec_with("p1", "a", 100.0),
+            rec_with("p2", "a", 110.0),
+            rec_with("p3", "a", 120.0),
+            rec_with("p4", "a", 130.0),
+        ];
+        let f = detect_proxy_divergence(
+            DataSource::Hkma,
+            "x",
+            "a",
+            DataSource::DataGovHk,
+            "y",
+            "a",
+            &recs,
+            &recs,
+            None,
+            5.0,
+            0.6,
+        );
+        assert!(f.is_empty(), "expected no divergence findings, got {f:?}");
+    }
+
+    #[test]
+    fn proxy_divergence_joins_on_named_field() {
+        // Join on a "quarter" field, not record_id. Need >= MIN_SAMPLES joined.
+        let mk = |id: &str, q: &str, field: &str, v: f64| NormalizedRecord {
+            source: DataSource::Hkma,
+            dataset: "x".into(),
+            record_id: id.into(),
+            fields: {
+                let mut m = BTreeMap::new();
+                m.insert(field.into(), RecordValue::Float(v));
+                m.insert("quarter".into(), RecordValue::Str(q.into()));
+                m
+            },
+            fetched_at: Utc::now(),
+        };
+        let primary = vec![
+            mk("r1", "2025Q4", "a", 100.0),
+            mk("r2", "2026Q1", "a", 100.0),
+            mk("r3", "2026Q2", "a", 100.0),
+            mk("r4", "2026Q3", "a", 100.0),
+            mk("r5", "2026Q4", "a", 200.0), // diverges sharply in last period
+        ];
+        let companion = vec![
+            mk("s1", "2025Q4", "b", 100.0),
+            mk("s2", "2026Q1", "b", 100.0),
+            mk("s3", "2026Q2", "b", 100.0),
+            mk("s4", "2026Q3", "b", 100.0),
+            mk("s5", "2026Q4", "b", 105.0),
+        ];
+        let f = detect_proxy_divergence(
+            DataSource::Hkma,
+            "x",
+            "a",
+            DataSource::DataGovHk,
+            "y",
+            "b",
+            &primary,
+            &companion,
+            Some("quarter"),
+            5.0,
+            0.6,
+        );
+        assert!(f.iter().any(|x| x.title.contains("diverged")), "got {f:?}");
+    }
+
+    // ---- v7: benchmark_deviation -----------------------------------------
+
+    #[test]
+    fn benchmark_deviation_flags_actual_above_assumed() {
+        // Actual receipts vs budget assumption: actual runs hot.
+        let actual = vec![
+            rec_with("2026-Q1", "receipts", 120.0), // +20% vs 100 benchmark
+            rec_with("2026-Q2", "receipts", 95.0),  // -5% vs 100, under threshold
+        ];
+        let benchmarks = vec![
+            rec_with("2026-Q1", "assumed", 100.0),
+            rec_with("2026-Q2", "assumed", 100.0),
+        ];
+        let f = detect_benchmark_deviation(
+            DataSource::Hkma,
+            "x",
+            "receipts",
+            "assumed",
+            &actual,
+            &benchmarks,
+            None,
+            10.0,
+        );
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, "benchmark_deviation");
+        assert!(f[0].title.contains("Q1"));
+    }
+
+    #[test]
+    fn benchmark_deviation_quiet_when_within_tolerance() {
+        let actual = vec![rec_with("2026-Q1", "v", 105.0)];
+        let benchmarks = vec![rec_with("2026-Q1", "b", 100.0)];
+        let f = detect_benchmark_deviation(
+            DataSource::Hkma,
+            "x",
+            "v",
+            "b",
+            &actual,
+            &benchmarks,
+            None,
+            10.0,
+        );
+        assert!(f.is_empty());
+    }
+
+    #[test]
+    fn benchmark_deviation_handles_missing_join() {
+        // Actual has a period the benchmark doesn't (and vice versa).
+        let actual = vec![
+            rec_with("2026-Q1", "v", 200.0),
+            rec_with("2026-Q2", "v", 50.0), // no benchmark → skipped
+        ];
+        let benchmarks = vec![rec_with("2026-Q1", "b", 100.0)];
+        let f = detect_benchmark_deviation(
+            DataSource::Hkma,
+            "x",
+            "v",
+            "b",
+            &actual,
+            &benchmarks,
+            None,
+            10.0,
+        );
+        assert_eq!(f.len(), 1); // only Q1
     }
 }
