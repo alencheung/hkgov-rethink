@@ -21,6 +21,7 @@ pub mod alerts;
 #[cfg(feature = "alerts")]
 pub mod alerts_webhook_deps;
 pub mod analysis;
+pub mod brief;
 pub mod insight;
 pub mod llm;
 pub mod loop_mod;
@@ -28,10 +29,11 @@ pub mod qa;
 pub mod scheduler;
 pub mod tools;
 
-#[cfg(feature = "alerts")]
-pub use alerts::WebhookSink;
 pub use alerts::{AlertDispatcher, AlertLog, AlertLogEntry, AlertSink};
-pub use insight::{Insight, InsightSeverity, InsightStore};
+#[cfg(feature = "alerts")]
+pub use alerts::{EmailSink, WebhookSink};
+pub use brief::{build_brief, Brief, BriefItem};
+pub use insight::{Feedback, FeedbackStore, Insight, InsightSeverity, InsightStore};
 #[cfg(feature = "llm")]
 pub use llm::HttpLlmClient;
 pub use llm::{AgentStep, HeuristicClient, LlmClient, LlmFraming, Message, ToolCall};

@@ -3,126 +3,355 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>hkgov-rethink — insights dashboard</title>
+  <title>HK City Pulse — hkgov-rethink</title>
   <style>
     :root {
-      --bg: #0d1117; --panel: #161b22; --border: #30363d;
+      --bg: #0d1117; --panel: #161b22; --panel2: #1c2230; --border: #30363d;
       --fg: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
-      --warn: #d29922; --crit: #f85149; --info: #58a6ff; --ok: #3fb950;
+      --warn-bg: rgba(210,153,34,0.08); --warn: #d29922;
+      --crit-bg: rgba(248,81,73,0.10);  --crit: #f85149;
+      --info-bg: rgba(88,166,255,0.08); --info: #58a6ff;
+      --ok: #3fb950;
+      --cat-monetary:#58a6ff; --cat-fiscal:#d29922; --cat-property:#a371f7;
+      --cat-trade:#3fb950; --cat-population:#f0883e; --cat-livability:#f778ba;
+      --cat-government:#8b949e; --cat-other:#8b949e;
     }
     * { box-sizing: border-box; }
-    body {
-      margin: 0; font: 14px/1.5 system-ui, -apple-system, sans-serif;
-      background: var(--bg); color: var(--fg);
-    }
-    header { padding: 16px 24px; border-bottom: 1px solid var(--border); }
-    h1 { margin: 0; font-size: 18px; }
-    h1 small { color: var(--muted); font-weight: 400; }
-    .config { float: right; }
-    .config input { background: var(--panel); color: var(--fg); border: 1px solid var(--border); padding: 4px 8px; border-radius: 4px; }
-    main { padding: 24px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 1400px; margin: 0 auto; }
-    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 16px; }
-    .panel h2 { margin: 0 0 12px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
-    .full { grid-column: 1 / -1; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
-    th { color: var(--muted); font-weight: 500; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-    .sev-info { background: rgba(88,166,255,0.15); color: var(--info); }
-    .sev-warning { background: rgba(210,153,34,0.15); color: var(--warn); }
-    .sev-critical { background: rgba(248,81,73,0.15); color: var(--crit); }
-    .circuit-closed { color: var(--ok); }
-    .circuit-open, .circuit-half-open { color: var(--crit); }
-    .muted { color: var(--muted); }
-    .refresh { cursor: pointer; color: var(--accent); }
-    pre { white-space: pre-wrap; margin: 0; font-size: 12px; }
-    .empty { color: var(--muted); font-style: italic; }
+    body { margin:0; font:14px/1.55 system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--fg); }
+
+    /* ---- header ---- */
+    header { position:sticky; top:0; z-index:10; background:var(--bg); border-bottom:1px solid var(--border); padding:12px 24px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+    header h1 { margin:0; font-size:16px; font-weight:600; white-space:nowrap; }
+    header h1 small { color:var(--muted); font-weight:400; }
+    .status-dot { width:8px; height:8px; border-radius:50%; background:var(--muted); flex-shrink:0; }
+    .status-dot.ok { background:var(--ok); } .status-dot.err { background:var(--crit); }
+    .config { margin-left:auto; display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+    .config input { background:var(--panel); color:var(--fg); border:1px solid var(--border); padding:5px 8px; border-radius:4px; font-size:13px; }
+    .config label { color:var(--muted); font-size:12px; }
+    .icon-btn { background:var(--panel); color:var(--fg); border:1px solid var(--border); padding:5px 10px; border-radius:4px; cursor:pointer; font-size:13px; }
+
+    /* ---- layout ---- */
+    main { max-width:1100px; margin:0 auto; padding:24px 16px 80px; }
+    .layout { display:grid; grid-template-columns:1fr 340px; gap:20px; align-items:start; }
+    @media (max-width:900px) { .layout { grid-template-columns:1fr; } .config { margin-left:0; width:100%; } header { position:static; } }
+
+    /* ---- sections ---- */
+    section { margin-bottom:24px; }
+    h2 { margin:0 0 12px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:0.6px; font-weight:600; }
+
+    /* ---- insight cards ---- */
+    .insights-filter { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
+    .insights-filter button { background:var(--panel); color:var(--muted); border:1px solid var(--border); padding:4px 10px; border-radius:12px; cursor:pointer; font-size:12px; }
+    .insights-filter button.active { color:var(--fg); border-color:var(--accent); }
+    .card { background:var(--panel); border:1px solid var(--border); border-left-width:4px; border-radius:8px; padding:14px 16px; margin-bottom:12px; transition:opacity .2s; }
+    .card.sev-critical { border-left-color:var(--crit); background:var(--crit-bg); }
+    .card.sev-warning { border-left-color:var(--warn); background:var(--warn-bg); }
+    .card.sev-info { border-left-color:var(--info); }
+    .card-head { display:flex; align-items:center; gap:10px; margin-bottom:6px; flex-wrap:wrap; }
+    .sev-icon { font-size:16px; line-height:1; }
+    .card-head .title { font-weight:600; flex:1; min-width:0; }
+    .card-head .time { color:var(--muted); font-size:12px; white-space:nowrap; }
+    .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.3px; }
+    .badge-crit { background:var(--crit-bg); color:var(--crit); }
+    .badge-warn { background:var(--warn-bg); color:var(--warn); }
+    .badge-info { background:var(--info-bg); color:var(--info); }
+    .badge-exp { background:rgba(248,81,73,0.08); color:var(--crit); border:1px dashed var(--crit); }
+    .card .summary { color:#c9d1d9; }
+    .card .meta { color:var(--muted); font-size:12px; margin-top:6px; display:flex; gap:12px; flex-wrap:wrap; }
+    details.evidence { margin-top:8px; }
+    details.evidence summary { cursor:pointer; color:var(--accent); font-size:12px; }
+    details.evidence pre { white-space:pre-wrap; margin:6px 0 0; font-size:11px; color:var(--muted); background:var(--bg); padding:8px; border-radius:4px; }
+    .fb { margin-top:8px; display:flex; gap:6px; align-items:center; }
+    .fb button { background:var(--panel2); border:1px solid var(--border); color:var(--muted); border-radius:4px; padding:3px 8px; cursor:pointer; font-size:12px; }
+    .fb button.voted { color:var(--fg); border-color:var(--accent); }
+    .fb .note { color:var(--muted); font-size:11px; }
+
+    /* ---- chat rail ---- */
+    .rail { position:sticky; top:80px; }
+    .chat-log { max-height:380px; overflow-y:auto; margin-bottom:10px; }
+    .chat-msg { margin-bottom:10px; }
+    .chat-msg .q { color:var(--muted); font-size:12px; }
+    .chat-msg .a { font-weight:500; }
+    .chat-msg .a .conf { color:var(--muted); font-size:11px; font-weight:400; }
+    .chat-msg details summary { color:var(--accent); font-size:11px; cursor:pointer; }
+    .chat-msg details pre { font-size:11px; color:var(--muted); white-space:pre-wrap; }
+    .chat-input { display:flex; gap:6px; }
+    .chat-input input { flex:1; background:var(--panel); color:var(--fg); border:1px solid var(--border); padding:8px; border-radius:4px; font-size:13px; }
+    .chat-input button { background:var(--accent); color:var(--bg); border:none; padding:8px 14px; border-radius:4px; cursor:pointer; font-weight:600; font-size:13px; }
+
+    /* ---- datasets + health (collapsible, secondary) ---- */
+    .collapse-toggle { cursor:pointer; color:var(--accent); font-size:12px; margin-bottom:8px; display:inline-block; }
+    .collapse-body { display:none; }
+    .collapse-body.open { display:block; }
+    .tag-chip { display:inline-block; background:var(--panel2); border:1px solid var(--border); color:var(--muted); padding:1px 7px; border-radius:8px; font-size:11px; cursor:pointer; margin:1px; }
+    .tag-chip:hover { color:var(--fg); border-color:var(--accent); }
+    .cat-badge { display:inline-block; padding:1px 7px; border-radius:8px; font-size:11px; font-weight:600; color:#fff; opacity:0.9; }
+    table { width:100%; border-collapse:collapse; }
+    th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); vertical-align:top; font-size:13px; }
+    th { color:var(--muted); font-weight:500; font-size:12px; }
+    .health-grid { display:flex; gap:12px; flex-wrap:wrap; }
+    .health-pill { background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:6px 12px; font-size:13px; }
+
+    /* ---- states ---- */
+    .empty { color:var(--muted); font-style:italic; padding:20px 0; text-align:center; }
+    .skeleton { background:linear-gradient(90deg,var(--panel) 25%,var(--panel2) 50%,var(--panel) 75%); background-size:200% 100%; animation:sk 1.5s infinite; border-radius:8px; height:60px; margin-bottom:12px; }
+    @keyframes sk { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+    .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); border:0; }
   </style>
 </head>
 <body>
   <header>
+    <span id="statusDot" class="status-dot" aria-hidden="true"></span>
+    <h1>HK City Pulse <small>— what the press room leaves untold</small></h1>
     <div class="config">
-      <label class="muted">API base: </label>
-      <input id="baseUrl" value="" placeholder="http://localhost:8080" size="28" />
-      <label class="muted">Key: </label>
-      <input id="apiKey" type="password" placeholder="(none)" size="12" />
-      <span class="refresh" onclick="refresh()">↻ refresh</span>
+      <label for="baseUrl" class="sr-only">API base URL</label>
+      <input id="baseUrl" value="" placeholder="http://localhost:8080" size="24" aria-label="API base URL" />
+      <label for="apiKey" class="sr-only">API key</label>
+      <input id="apiKey" type="password" placeholder="key" size="10" aria-label="API key" />
+      <button class="icon-btn" onclick="loadAll()" aria-label="Refresh all">↻</button>
     </div>
-    <h1>hkgov-rethink <small>— AI-infused HKGOV data insights</small></h1>
   </header>
 
   <main>
-    <section class="panel">
-      <h2>Source health</h2>
-      <table><thead><tr><th>source</th><th>circuit</th></tr></thead>
-        <tbody id="health"><tr><td class="empty" colspan="2">loading…</td></tr></tbody></table>
-    </section>
+    <div class="layout">
+      <!-- ===== LEFT: the product (insights-first) ===== -->
+      <div>
+        <!-- Daily brief hero -->
+        <section aria-live="polite" aria-atomic="false">
+          <h2>Today's brief <span id="briefCount" style="color:var(--accent)"></span></h2>
+          <div id="brief" role="region" aria-label="Daily brief">
+            <div class="skeleton"></div><div class="skeleton"></div>
+          </div>
+        </section>
 
-    <section class="panel">
-      <h2>Ingested datasets</h2>
-      <div style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
-        <select id="catFilter" onchange="loadSources()" style="background:var(--bg); color:var(--fg); border:1px solid var(--border); padding:4px 8px; border-radius:4px;">
-          <option value="">all categories</option>
-        </select>
-        <input id="srcSearch" placeholder="search datasets…" oninput="loadSources()"
-               style="background:var(--bg); color:var(--fg); border:1px solid var(--border); padding:4px 8px; border-radius:4px; flex:1; min-width:120px;" />
+        <!-- Full insights feed (filterable) -->
+        <section aria-live="polite" aria-atomic="false">
+          <h2>All insights</h2>
+          <div class="insights-filter" role="group" aria-label="Filter insights by severity">
+            <button class="active" data-sev="all" onclick="setSevFilter('all')">all</button>
+            <button data-sev="critical" onclick="setSevFilter('critical')">🔴 critical</button>
+            <button data-sev="warning" onclick="setSevFilter('warning')">🟡 warning</button>
+            <button data-sev="info" onclick="setSevFilter('info')">🔵 info</button>
+          </div>
+          <div id="insights" role="region" aria-label="Insights feed">
+            <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+          </div>
+        </section>
+
+        <!-- Collapsible secondary: data browse -->
+        <section>
+          <span class="collapse-toggle" onclick="toggleCollapse('dataBody')">▸ Browse datasets</span>
+          <div id="dataBody" class="collapse-body">
+            <div style="display:flex; gap:8px; margin:10px 0; flex-wrap:wrap;">
+              <select id="catFilter" onchange="loadSources()" aria-label="Filter by category" style="background:var(--panel); color:var(--fg); border:1px solid var(--border); padding:4px 8px; border-radius:4px;">
+                <option value="">all categories</option>
+              </select>
+              <input id="srcSearch" placeholder="search datasets…" oninput="loadSources()" aria-label="Search datasets" style="background:var(--panel); color:var(--fg); border:1px solid var(--border); padding:4px 8px; border-radius:4px; flex:1; min-width:120px;" />
+            </div>
+            <table><thead><tr><th>cat</th><th>source / dataset</th><th>tags</th><th>cadence</th><th>records</th></tr></thead>
+              <tbody id="sources"><tr><td class="empty" colspan="5">collapsed</td></tr></tbody></table>
+          </div>
+        </section>
+
+        <!-- Collapsible secondary: system health -->
+        <section>
+          <span class="collapse-toggle" onclick="toggleCollapse('healthBody')">▸ System health</span>
+          <div id="healthBody" class="collapse-body">
+            <div id="health" class="health-grid" style="margin-top:10px;"></div>
+          </div>
+        </section>
       </div>
-      <table><thead><tr><th>cat</th><th>source / dataset</th><th>tags</th><th>cadence</th><th>records</th><th>last refreshed</th></tr></thead>
-        <tbody id="sources"><tr><td class="empty" colspan="6">loading…</td></tr></tbody></table>
-    </section>
 
-    <section class="panel full">
-      <h2>Agent insights <span class="muted">(cross-source anomalies the press room leaves untold)</span></h2>
-      <table><thead><tr><th>sev</th><th>kind</th><th>title</th><th>producer</th><th>conf.</th><th>evidence</th></tr></thead>
-        <tbody id="insights"><tr><td class="empty" colspan="6">loading…</td></tr></tbody></table>
-    </section>
-
-    <section class="panel full">
-      <h2>Ask the agent <span class="muted">(natural-language questions over the data)</span></h2>
-      <div style="display:flex; gap:8px; margin-bottom:12px;">
-        <input id="askInput" placeholder="e.g. what is the interbank liquidity doing?" size="60"
-               style="flex:1; background:var(--bg); color:var(--fg); border:1px solid var(--border); padding:8px; border-radius:4px;" />
-        <button id="askBtn" onclick="askAgent()"
-                style="background:var(--accent); color:var(--bg); border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:600;">Ask</button>
+      <!-- ===== RIGHT: persistent chat rail ===== -->
+      <div>
+        <section class="rail">
+          <h2>Ask the agent</h2>
+          <div id="chatLog" class="chat-log" role="log" aria-label="Q&A history" aria-live="polite">
+            <div class="empty" id="chatEmpty">ask anything about the data</div>
+          </div>
+          <div class="chat-input">
+            <input id="askInput" placeholder="e.g. what is the interbank liquidity doing?" aria-label="Question for the agent" />
+            <button onclick="askAgent()" aria-label="Send question">Ask</button>
+          </div>
+        </section>
       </div>
-      <div id="askAnswer" class="empty">type a question and press Ask</div>
-    </section>
+    </div>
   </main>
 
   <script>
+    // ---- connection state + persistence ----
+    const LS_BASE = 'hkgov.base', LS_KEY = 'hkgov.key';
     function api() {
-      const base = document.getElementById('baseUrl').value.replace(/\/$/, '') || 'http://localhost:8080';
+      let base = document.getElementById('baseUrl').value.replace(/\/$/, '') || 'http://localhost:8080';
       const key = document.getElementById('apiKey').value;
       return { base, headers: key ? { 'X-API-Key': key } : {} };
     }
-
+    function persistConfig() {
+      try {
+        localStorage.setItem(LS_BASE, document.getElementById('baseUrl').value);
+        localStorage.setItem(LS_KEY, document.getElementById('apiKey').value);
+      } catch (e) {}
+    }
+    function restoreConfig() {
+      try {
+        const b = localStorage.getItem(LS_BASE); if (b) document.getElementById('baseUrl').value = b;
+        const k = localStorage.getItem(LS_KEY); if (k) document.getElementById('apiKey').value = k;
+      } catch (e) {}
+    }
+    function setConnection(ok) {
+      const dot = document.getElementById('statusDot');
+      dot.className = 'status-dot ' + (ok ? 'ok' : 'err');
+      dot.title = ok ? 'connected' : 'cannot reach API';
+    }
     async function get(path) {
       const { base, headers } = api();
       try {
         const r = await fetch(base + path, { headers });
+        setConnection(r.ok);
         if (!r.ok) return null;
         return await r.json();
-      } catch (e) { return null; }
+      } catch (e) { setConnection(false); return null; }
+    }
+    function escapeHtml(s) { return String(s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+    function relTime(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso), now = new Date(), ms = now - d;
+      const mins = Math.floor(ms/60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return mins + 'm ago';
+      const hrs = Math.floor(mins/60);
+      if (hrs < 24) return hrs + 'h ago';
+      return Math.floor(hrs/24) + 'd ago';
+    }
+    const SEV_ICON = { critical: '🔴', warning: '🟡', info: '🔵' };
+    const SEV_BADGE = { critical: 'badge-crit', warning: 'badge-warn', info: 'badge-info' };
+    const CAT_COLORS = ['monetary','fiscal','property','trade','population','livability','government','other'];
+
+    // ---- insight card renderer (rendered evidence, not JSON dump) ----
+    function insightCard(i, withFeedback) {
+      const ev = (i.evidence || []).map(e => {
+        const ctx = e.context ? ` <span class="muted">(${escapeHtml(e.context)})</span>` : '';
+        return `<div><b>${escapeHtml(e.field)}</b> @ ${escapeHtml(e.record_id)} = <code>${escapeHtml(JSON.stringify(e.value))}</code>${ctx}</div>`;
+      }).join('');
+      const exp = i.experimental ? ' <span class="badge badge-exp" title="Detector not yet validated on real data — see EXAMPLES.md">experimental</span>' : '';
+      const fb = withFeedback ? `
+        <div class="fb">
+          <button onclick="vote('${escapeHtml(i.id)}', true)" aria-label="Mark useful">👍 useful</button>
+          <button onclick="vote('${escapeHtml(i.id)}', false)" aria-label="Mark not useful">👎 not</button>
+          <span class="note" id="fb-${escapeHtml(i.id)}"></span>
+        </div>` : '';
+      return `<div class="card sev-${i.severity}" data-kind="${escapeHtml(i.kind)}">
+        <div class="card-head">
+          <span class="sev-icon" aria-hidden="true">${SEV_ICON[i.severity]||'ℹ️'}</span>
+          <span class="badge ${SEV_BADGE[i.severity]||'badge-info'}">${escapeHtml(i.severity)}</span>
+          ${exp}
+          <span class="title">${escapeHtml(i.title)}</span>
+          <span class="time" title="${escapeHtml(i.generated_at||'')}">${relTime(i.generated_at)}</span>
+        </div>
+        <div class="summary">${escapeHtml(i.summary)}</div>
+        <div class="meta">
+          <span>${escapeHtml(i.source)}/${escapeHtml(i.dataset)}</span>
+          <span>${escapeHtml(i.kind)}</span>
+          <span>${Math.round((i.confidence||0)*100)}% conf</span>
+          <span>by ${escapeHtml(i.producer)}</span>
+        </div>
+        ${ev ? `<details class="evidence"><summary>evidence (${(i.evidence||[]).length})</summary>${ev}</details>` : ''}
+        ${fb}
+      </div>`;
     }
 
-    // Populate the category dropdown from /v1/categories (called once per refresh).
+    // ---- brief hero ----
+    async function loadBrief() {
+      const b = await get('/v1/brief?limit=5');
+      const el = document.getElementById('brief');
+      if (!b || !b.items || !b.items.length) {
+        el.innerHTML = '<div class="empty">No brief yet. Enable the agent (<code>HKGOV_AGENT__ENABLED=true</code>) and insights will appear here within ~30s.</div>';
+        document.getElementById('briefCount').textContent = '';
+        return;
+      }
+      document.getElementById('briefCount').textContent = `(${b.items.length})`;
+      el.innerHTML = b.items.map(it => insightCard(it.insight, true)).join('');
+    }
+
+    // ---- insights feed (severity-filtered) ----
+    let allInsights = [], sevFilter = 'all';
+    function setSevFilter(s) {
+      sevFilter = s;
+      document.querySelectorAll('.insights-filter button').forEach(b => b.classList.toggle('active', b.dataset.sev === s));
+      renderInsights();
+    }
+    function renderInsights() {
+      const el = document.getElementById('insights');
+      const filtered = sevFilter === 'all' ? allInsights : allInsights.filter(i => i.severity === sevFilter);
+      if (!filtered.length) { el.innerHTML = '<div class="empty">no insights at this severity</div>'; return; }
+      el.innerHTML = filtered.map(i => insightCard(i, true)).join('');
+    }
+    async function loadInsights() {
+      const ins = await get('/v1/insights?limit=50');
+      if (!ins) return;
+      allInsights = ins;
+      renderInsights();
+    }
+
+    // ---- feedback (success metric) ----
+    async function vote(id, useful) {
+      const { base, headers } = api();
+      try {
+        await fetch(base + '/v1/insights/' + encodeURIComponent(id) + '/feedback', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
+          body: JSON.stringify({ useful })
+        });
+        const note = document.getElementById('fb-' + id);
+        if (note) note.textContent = useful ? 'thanks — marked useful' : 'thanks — marked not useful';
+      } catch (e) {}
+    }
+
+    // ---- chat rail (conversation history, not single-turn) ----
+    const chatLog = [];
+    async function askAgent() {
+      const input = document.getElementById('askInput');
+      const q = input.value.trim();
+      if (!q) return;
+      input.value = '';
+      chatLog.push({ q, loading: true });
+      renderChat();
+      const { base, headers } = api();
+      try {
+        const r = await fetch(base + '/v1/ask', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
+          body: JSON.stringify({ question: q })
+        });
+        const a = r.ok ? await r.json() : { text: 'error: ' + r.status, confidence: 0 };
+        chatLog[chatLog.length - 1] = { q, a };
+      } catch (e) {
+        chatLog[chatLog.length - 1] = { q, a: { text: 'request failed', confidence: 0 } };
+      }
+      renderChat();
+    }
+    function renderChat() {
+      const el = document.getElementById('chatLog');
+      document.getElementById('chatEmpty')?.remove();
+      el.innerHTML = chatLog.map(m => {
+        if (m.loading) return `<div class="chat-msg"><div class="q">you: ${escapeHtml(m.q)}</div><div class="a muted">thinking…</div></div>`;
+        const conf = m.a.confidence !== undefined ? ` <span class="conf">${Math.round(m.a.confidence*100)}%</span>` : '';
+        const trace = (m.a.trace && m.a.trace.length) ? `<details><summary>${m.a.trace.length} tool call(s)</summary><pre>${escapeHtml(JSON.stringify(m.a.trace, null, 1))}</pre></details>` : '';
+        return `<div class="chat-msg"><div class="q">you: ${escapeHtml(m.q)}</div><div class="a">${escapeHtml(m.a.text)}${conf}${trace}</div></div>`;
+      }).join('');
+      el.scrollTop = el.scrollHeight;
+    }
+    document.getElementById('askInput').addEventListener('keydown', e => { if (e.key === 'Enter') askAgent(); });
+
+    // ---- datasets (filterable, color cats, tag chips) ----
+    function catColorClass(cat) { return CAT_COLORS.includes(cat) ? 'cat-' + cat : 'cat-other'; }
+    function catBadge(cat) { return `<span class="cat-badge" style="background:var(--${catColorClass(cat)})">${escapeHtml(cat||'other')}</span>`; }
     async function loadCategories() {
       const cats = await get('/v1/categories');
       const sel = document.getElementById('catFilter');
-      const current = sel.value;
+      const cur = sel.value;
       sel.innerHTML = '<option value="">all categories</option>';
-      if (cats && cats.length) {
-        for (const c of cats) {
-          const o = document.createElement('option');
-          o.value = c.category;
-          o.textContent = `${c.category} (${c.count})`;
-          sel.appendChild(o);
-        }
-      }
-      sel.value = current;
+      if (cats) for (const c of cats) { const o = document.createElement('option'); o.value = c.category; o.textContent = `${c.category} (${c.count})`; sel.appendChild(o); }
+      sel.value = cur;
     }
-
-    // Re-fetch /v1/sources with the current category + search filters applied.
     async function loadSources() {
       const cat = document.getElementById('catFilter').value;
       const q = document.getElementById('srcSearch').value.trim();
@@ -133,94 +362,49 @@
       const src = await get('/v1/sources' + qs);
       const sb = document.getElementById('sources');
       if (src && src.length) {
-        sb.innerHTML = src.map(s =>
-          `<tr><td><span class="badge" style="background:rgba(88,166,255,0.15);color:var(--info)">${s.category || 'other'}</span></td>
-           <td>${s.source}/${s.dataset}<br><span class="muted">${escapeHtml(s.title)}</span></td>
-           <td class="muted">${(s.tags || []).map(escapeHtml).join(', ') || '—'}</td>
-           <td class="muted">${s.cadence || '—'}</td>
-           <td>${s.record_count}</td>
-           <td class="muted">${s.last_refreshed_at ? new Date(s.last_refreshed_at).toLocaleString() : '—'}</td></tr>`
-        ).join('');
-      } else { sb.innerHTML = '<tr><td class="empty" colspan="6">no datasets match</td></tr>'; }
+        sb.innerHTML = src.map(s => `<tr>
+          <td>${catBadge(s.category)}</td>
+          <td>${escapeHtml(s.source)}/${escapeHtml(s.dataset)}<br><span class="muted">${escapeHtml(s.title)}</span></td>
+          <td>${(s.tags||[]).map(t => `<span class="tag-chip" onclick="tagSearch('${escapeHtml(t)}')">${escapeHtml(t)}</span>`).join('') || '—'}</td>
+          <td class="muted">${escapeHtml(s.cadence||'—')}</td>
+          <td>${s.record_count}</td></tr>`).join('');
+      } else { sb.innerHTML = '<tr><td class="empty" colspan="5">no datasets match</td></tr>'; }
     }
+    function tagSearch(t) { document.getElementById('srcSearch').value = t; loadSources(); document.getElementById('dataBody').classList.add('open'); }
 
-    async function refresh() {
-      // Health (probe at root, no prefix)
+    // ---- system health (demoted) ----
+    async function loadHealth() {
       const hs = await get('/health/sources') || await get('/v1/health/sources');
-      const hb = document.getElementById('health');
-      if (hs && hs.length) {
-        hb.innerHTML = hs.map(s =>
-          `<tr><td>${s.source}</td><td class="circuit-${s.circuit}">${s.circuit}</td></tr>`
-        ).join('');
-      } else { hb.innerHTML = '<tr><td class="empty" colspan="2">unavailable</td></tr>'; }
-
-      // Populate the category dropdown once.
-      await loadCategories();
-      // Sources (filterable).
-      await loadSources();
-
-      // Insights
-      const ins = await get('/v1/insights?limit=20');
-      const ib = document.getElementById('insights');
-      if (ins && ins.length) {
-        ib.innerHTML = ins.map(i =>
-          `<tr><td><span class="badge sev-${i.severity}">${i.severity}</span></td>
-           <td>${i.kind}</td>
-           <td><b>${escapeHtml(i.title)}</b><br><span class="muted">${escapeHtml(i.summary)}</span></td>
-           <td>${i.producer}</td>
-           <td>${(i.confidence * 100).toFixed(0)}%</td>
-           <td><pre>${escapeHtml(JSON.stringify(i.evidence, null, 1))}</pre></td></tr>`
-        ).join('');
-      } else { ib.innerHTML = '<tr><td class="empty" colspan="6">no insights yet (is the agent enabled?)</td></tr>'; }
+      const el = document.getElementById('health');
+      if (!hs) { el.innerHTML = '<span class="empty">unavailable</span>'; return; }
+      el.innerHTML = hs.map(s => {
+        const color = s.circuit === 'closed' ? 'var(--ok)' : 'var(--crit)';
+        return `<div class="health-pill">${escapeHtml(s.source)}: <span style="color:${color}">${escapeHtml(s.circuit)}</span></div>`;
+      }).join('');
     }
 
-    function escapeHtml(s) {
-      return String(s || '').replace(/[&<>"]/g, c =>
-        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    // ---- collapse toggle ----
+    function toggleCollapse(id) {
+      const el = document.getElementById(id);
+      el.classList.toggle('open');
+      const needsLoad = el.classList.contains('open');
+      if (id === 'dataBody' && needsLoad) { loadCategories(); loadSources(); }
+      if (id === 'healthBody' && needsLoad) loadHealth();
     }
 
-    async function askAgent() {
-      const question = document.getElementById('askInput').value.trim();
-      const box = document.getElementById('askAnswer');
-      if (!question) { box.className = 'empty'; box.textContent = 'type a question first'; return; }
-      box.className = 'muted'; box.textContent = 'thinking…';
-      const { base, headers } = api();
-      try {
-        const r = await fetch(base + '/v1/ask', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...headers },
-          body: JSON.stringify({ question })
-        });
-        if (!r.ok) {
-          box.className = 'empty';
-          box.textContent = 'error: ' + r.status + ' ' + (await r.text());
-          return;
-        }
-        const a = await r.json();
-        const conf = a.confidence !== undefined ? ` <span class="muted">(${(a.confidence * 100).toFixed(0)}%)</span>` : '';
-        const trace = (a.trace && a.trace.length)
-          ? '<details class="muted"><summary>' + a.trace.length + ' tool call(s)</summary><pre>' +
-            escapeHtml(JSON.stringify(a.trace, null, 2)) + '</pre></details>'
-          : '';
-        box.className = '';
-        box.innerHTML = '<b>' + escapeHtml(a.text) + '</b>' + conf + trace;
-      } catch (e) {
-        box.className = 'empty';
-        box.textContent = 'request failed: ' + e;
-      }
+    // ---- targeted polling: insights refresh frequently, rest on-demand ----
+    async function loadAll() {
+      persistConfig();
+      await Promise.all([loadBrief(), loadInsights()]);
     }
-
-    // Enter key in the ask box triggers Ask.
-    document.getElementById('askInput').addEventListener('keydown', e => {
-      if (e.key === 'Enter') askAgent();
-    });
-
     // Auto-fill base URL from this server if served from one.
     if (location.protocol.startsWith('http') && location.port) {
       document.getElementById('baseUrl').value = `${location.protocol}//${location.host}`;
     }
-    refresh();
-    setInterval(refresh, 30000);
+    restoreConfig();
+    loadAll();
+    // Targeted poll: only the time-sensitive feeds, not the whole page.
+    setInterval(() => { loadBrief(); loadInsights(); }, 30000);
   </script>
 </body>
 </html>

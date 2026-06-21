@@ -43,6 +43,11 @@ pub fn router(state: AppState) -> Router {
         .route("/datasets/{source}/{dataset}", get(dataset_meta))
         .route("/datasets/{source}/{dataset}/records", get(dataset_records))
         .route("/insights", get(list_insights))
+        .route(
+            "/insights/{id}/feedback",
+            post(submit_feedback).get(get_feedback),
+        )
+        .route("/brief", get(get_brief))
         .route("/alerts", get(list_alerts))
         .route("/ask", post(ask));
 
@@ -95,6 +100,8 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
             "GET /v1/datasets/{source}/{dataset}",
             "GET /v1/datasets/{source}/{dataset}/records",
             "GET /v1/insights",
+            "POST /v1/insights/{id}/feedback",
+            "GET /v1/brief",
             "GET /v1/alerts",
             "POST /v1/ask",
         ],
@@ -277,6 +284,50 @@ async fn list_insights(
     Json(state.insights.list(q.limit).await)
 }
 
+// ---- GET /brief — the daily brief (product layer) -------------------------
+
+async fn get_brief(
+    State(state): State<AppState>,
+    Query(q): Query<InsightsQuery>,
+) -> Json<hkgov_agent::Brief> {
+    let brief = hkgov_agent::build_brief(&state.insights, q.limit, chrono::Utc::now()).await;
+    Json(brief)
+}
+
+// ---- POST + GET /insights/{id}/feedback — the success metric --------------
+
+#[derive(Deserialize)]
+struct FeedbackRequest {
+    /// `true` = useful, `false` = not useful.
+    useful: bool,
+    /// Optional reason (esp. for "not useful").
+    #[serde(default)]
+    note: Option<String>,
+}
+
+async fn submit_feedback(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<FeedbackRequest>,
+) -> Json<serde_json::Value> {
+    let fb = hkgov_agent::Feedback {
+        insight_id: id,
+        useful: req.useful,
+        note: req.note,
+        submitted_at: chrono::Utc::now(),
+    };
+    state.feedback.record(fb).await;
+    Json(serde_json::json!({ "recorded": true }))
+}
+
+async fn get_feedback(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let net = state.feedback.net_useful(&id).await;
+    Json(serde_json::json!({ "insight_id": id, "net_useful": net }))
+}
+
 // ---- GET /alerts — proactive dispatch log ---------------------------------
 
 async fn list_alerts(
@@ -386,6 +437,7 @@ mod tests {
             registry,
             store,
             insights: Arc::new(hkgov_agent::InsightStore::new()),
+            feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             settings: Arc::new(settings),
@@ -505,6 +557,7 @@ mod tests {
             registry,
             store,
             insights: Arc::new(hkgov_agent::InsightStore::new()),
+            feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             settings: Arc::new(settings),

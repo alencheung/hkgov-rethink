@@ -21,3 +21,7 @@ Thumbs.db
 *.log
 /data-local/
 NDH6SA~M
+
+# data dumps
+.archive_all.json
+*.archive.json

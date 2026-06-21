@@ -51,6 +51,19 @@ impl Finding {
 
     /// Promote a framed finding into a stored Insight.
     pub fn into_insight(self, summary: String, confidence: f64, producer: &str) -> Insight {
+        self.into_insight_experimental(summary, confidence, producer, false)
+    }
+
+    /// Like [`into_insight`] but carries the experimental flag through to the
+    /// insight, so the UI can badge it. Use when the producing detector is
+    /// marked experimental in `[[agent.scan]]`.
+    pub fn into_insight_experimental(
+        self,
+        summary: String,
+        confidence: f64,
+        producer: &str,
+        experimental: bool,
+    ) -> Insight {
         let severity = self.severity_enum();
         // Include dataset in the id so two detectors scanning different datasets
         // can't collide (the v3 id omitted it, which was fine only while exactly
@@ -74,6 +87,7 @@ impl Finding {
             confidence: confidence.clamp(0.0, 1.0),
             generated_at: Utc::now(),
             producer: producer.to_string(),
+            experimental,
         }
     }
 }
@@ -837,6 +851,101 @@ pub fn detect_benchmark_deviation(
     findings
 }
 
+/// Direction of a threshold crossing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CrossDirection {
+    /// The value rose above the threshold (e.g. a rate exceeded a watch level).
+    Above,
+    /// The value fell below the threshold (e.g. reserves dipped under a floor).
+    Below,
+}
+
+impl CrossDirection {
+    /// Did `value` cross this direction relative to `threshold`?
+    pub fn crossed(&self, value: f64, threshold: f64) -> bool {
+        match self {
+            CrossDirection::Above => value > threshold,
+            CrossDirection::Below => value < threshold,
+        }
+    }
+}
+
+/// Detect a threshold crossing — the event detector (v9). Unlike the deviation
+/// detectors (`series_jump`, `outlier`), this doesn't look at *change*; it looks
+/// at an absolute level against a configured watch line. This is how the
+/// platform surfaces **opportunities and risks** rather than just anomalies:
+///
+/// - Below: "HIBOR overnight fell below 1.0% — cheap funding window open" (opportunity)
+/// - Above: "closing balance exceeded HKD 50bn — ample liquidity" (context)
+/// - Below: "FX reserves fell below the IMF adequacy ratio" (risk)
+///
+/// Emits at most one finding (the latest period), since a crossing is a
+/// state, not a series of events. Recurrence is deduped downstream by the
+/// insight id (which fingerprints the threshold + direction, not the value).
+pub fn detect_threshold_crossing(
+    source: DataSource,
+    dataset: &str,
+    records: &[NormalizedRecord],
+    field: &str,
+    threshold: f64,
+    direction: CrossDirection,
+) -> Vec<Finding> {
+    let series = numeric_series(records, field);
+    let Some((latest_id, latest_v)) = series.last().copied() else {
+        return Vec::new();
+    };
+    if !direction.crossed(latest_v, threshold) {
+        return Vec::new();
+    }
+    // Did the previous period also cross? If so, this isn't a fresh crossing —
+    // it's a sustained state. We still report it (the user asked to watch this
+    // level) but frame it as "still crossed" rather than "just crossed".
+    let prev_crossed = series
+        .len()
+        .checked_sub(2)
+        .and_then(|i| series.get(i))
+        .map(|(_, v)| direction.crossed(*v, threshold))
+        .unwrap_or(false);
+    let verb = if prev_crossed { "remains" } else { "crossed" };
+    let prep = match direction {
+        CrossDirection::Above => "above",
+        CrossDirection::Below => "below",
+    };
+    let severity = match direction {
+        CrossDirection::Below => "warning",
+        CrossDirection::Above => "info",
+    };
+    let confidence = if prev_crossed { 0.6 } else { 0.9 };
+    vec![Finding {
+        kind: "threshold_crossing".into(),
+        source,
+        dataset: dataset.into(),
+        title: format!("{field} {verb} {prep} {threshold} at {latest_id} ({latest_v:.2})"),
+        heuristic_summary: format!(
+            "The {field} value at {latest_id} ({latest_v:.2}) is {prep} the {threshold} \
+             watch threshold. This is an event signal — a level the operator flagged as worth \
+             knowing about — rather than a deviation from history."
+        ),
+        severity: severity.into(),
+        confidence,
+        evidence: vec![
+            EvidenceRef {
+                record_id: latest_id.to_string(),
+                field: field.into(),
+                value: serde_json::json!(latest_v),
+                context: Some("latest value".into()),
+            },
+            EvidenceRef {
+                record_id: "threshold".into(),
+                field: field.into(),
+                value: serde_json::json!(threshold),
+                context: Some(format!("watch {direction:?} threshold")),
+            },
+        ],
+    }]
+}
+
 /// Look up a numeric field on one record, coercing Int → Float.
 fn numeric(r: &NormalizedRecord, field: &str) -> Option<f64> {
     match r.fields.get(field)? {
@@ -1397,5 +1506,82 @@ mod tests {
             10.0,
         );
         assert_eq!(f.len(), 1); // only Q1
+    }
+
+    // ---- v9: threshold_crossing (event detector) -------------------------
+
+    #[test]
+    fn threshold_crossing_flags_below_opportunity() {
+        // HIBOR fell below 1.0 — a cheap-funding opportunity.
+        let recs = vec![rec("2026-01", "v", 1.5), rec("2026-02", "v", 0.8)];
+        let f = detect_threshold_crossing(
+            DataSource::Hkma,
+            "x",
+            &recs,
+            "v",
+            1.0,
+            CrossDirection::Below,
+        );
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, "threshold_crossing");
+        assert!(f[0].title.contains("crossed below"));
+        assert_eq!(f[0].severity, "warning");
+        // Fresh crossing (previous period was above) → high confidence.
+        assert!(f[0].confidence > 0.8);
+    }
+
+    #[test]
+    fn threshold_crossing_flags_above() {
+        let recs = vec![rec("2026-01", "v", 40.0), rec("2026-02", "v", 55.0)];
+        let f = detect_threshold_crossing(
+            DataSource::Hkma,
+            "x",
+            &recs,
+            "v",
+            50.0,
+            CrossDirection::Above,
+        );
+        assert_eq!(f.len(), 1);
+        assert!(f[0].title.contains("crossed above"));
+        assert_eq!(f[0].severity, "info");
+    }
+
+    #[test]
+    fn threshold_crossing_quiet_when_not_crossed() {
+        let recs = vec![rec("2026-01", "v", 1.5), rec("2026-02", "v", 1.2)];
+        assert!(detect_threshold_crossing(
+            DataSource::Hkma,
+            "x",
+            &recs,
+            "v",
+            1.0,
+            CrossDirection::Below
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn threshold_crossing_sustained_states_use_remains() {
+        // Both periods below → sustained state, not a fresh cross.
+        let recs = vec![rec("2026-01", "v", 0.8), rec("2026-02", "v", 0.7)];
+        let f = detect_threshold_crossing(
+            DataSource::Hkma,
+            "x",
+            &recs,
+            "v",
+            1.0,
+            CrossDirection::Below,
+        );
+        assert_eq!(f.len(), 1);
+        assert!(f[0].title.contains("remains below"));
+        assert!(f[0].confidence < 0.9); // discounted: not fresh
+    }
+
+    #[test]
+    fn threshold_crossing_direction_predicate() {
+        assert!(CrossDirection::Above.crossed(5.0, 4.0));
+        assert!(!CrossDirection::Above.crossed(3.0, 4.0));
+        assert!(CrossDirection::Below.crossed(3.0, 4.0));
+        assert!(!CrossDirection::Below.crossed(5.0, 4.0));
     }
 }

@@ -58,6 +58,11 @@ pub struct Insight {
     pub generated_at: DateTime<Utc>,
     /// Which client produced this: `heuristic` or `llm`.
     pub producer: String,
+    /// True when the producing detector is experimental (v6/v7 detectors not
+    /// yet validated on real data — see EXAMPLES.md). Surfaced so the UI can
+    /// badge it and users can discount it. Defaults false (back-compat).
+    #[serde(default)]
+    pub experimental: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,5 +105,65 @@ impl InsightStore {
 
     pub async fn count(&self) -> usize {
         self.inner.read().await.len()
+    }
+}
+
+/// One user feedback signal on an insight. The cheapest possible success
+/// metric: did this insight help, or not?
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Feedback {
+    pub insight_id: String,
+    /// `up` = useful, `down` = not useful. The simplest possible signal.
+    pub useful: bool,
+    /// Optional free-text reason (for the "down" case especially).
+    pub note: Option<String>,
+    pub submitted_at: DateTime<Utc>,
+}
+
+/// In-process feedback store. Counts up/down per insight id so the brief
+/// ranker (and product analytics) can learn what users value.
+#[derive(Default)]
+pub struct FeedbackStore {
+    inner: Arc<RwLock<Vec<Feedback>>>,
+}
+
+impl FeedbackStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one feedback signal. Idempotent at the store level (each submit
+    /// is a new row — callers may dedup by source IP/session upstream).
+    pub async fn record(&self, feedback: Feedback) {
+        self.inner.write().await.push(feedback);
+    }
+
+    /// Net usefulness (up − down) for one insight. Negative = users found it
+    /// unhelpful more often than helpful.
+    pub async fn net_useful(&self, insight_id: &str) -> i64 {
+        self.inner
+            .read()
+            .await
+            .iter()
+            .filter(|f| f.insight_id == insight_id)
+            .map(|f| if f.useful { 1 } else { -1 })
+            .sum()
+    }
+
+    /// Total feedback count (all insights).
+    pub async fn count(&self) -> usize {
+        self.inner.read().await.len()
+    }
+
+    /// All feedback, most recent first (for analytics export).
+    pub async fn list(&self, limit: usize) -> Vec<Feedback> {
+        self.inner
+            .read()
+            .await
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
     }
 }
