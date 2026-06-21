@@ -1,8 +1,8 @@
 # Roadmap
 
 The end goal — **100k concurrent users** served from **AI-agent-generated
-insights** over consolidated HKGOV data — is a multi-month build. This roadmap
-breaks it into milestones that each ship something runnable.
+insights** over consolidated HKGOV data. This roadmap tracks what shipped and
+what remains. Each milestone is independently runnable.
 
 ## v1 — Foundation (✅ shipped)
 
@@ -10,53 +10,55 @@ breaks it into milestones that each ship something runnable.
 - HKMA connector (retry, backoff, verified live).
 - `moka` cache-first `RecordStore` + trait.
 - Ingestion supervisor (per-dataset background refresh).
-- axum API: `/health`, `/sources`, `/datasets/:source/:dataset[/records]`.
+- axum API: `/health`, `/sources`, `/datasets/{source}/{dataset}[/records]`.
 - Config + telemetry + graceful shutdown.
 
-## v2 — More sources + shared cache (✅ shipped)
+## v2 — More sources + resilience + shared cache (✅ shipped)
 
-- `data.gov.hk` connector (v2 filter API: `money-lenders-licensees`,
-  `hko-rainfall-warning`; historical archive listing — endpoints verified in
-  [DATA_SOURCES.md](DATA_SOURCES.md)).
-- Press connector (HKMA press releases API: `hkma-press-releases`).
-- LandsD / CSDI connector (open dataset catalog via the data.gov.hk archive).
-- **Redis** `RecordStore` implementation behind the `redis` feature flag
-  (the multi-node enabler).
-- Per-source **rate limiter** (token bucket) + **circuit breaker** wrapping
-  every outbound connector call.
+- `data.gov.hk` connector (v2 filter + historical archive — verified, see
+  DATA_SOURCES.md).
+- Press connector (HKMA press releases API, verified).
+- LandsD/CSDI connector (open catalog via data.gov.hk archive — gov-only map
+  API excluded).
+- Per-source **rate limiting** (token bucket) + **circuit breaker** wrapping
+  every connector.
+- **Redis** `RecordStore` implementation (`--features redis`) — the multi-node
+  cache enabler.
+- `/health/sources` endpoint exposing circuit-breaker state.
 
-Still outstanding from the original v2 scope:
-- ISD/info.gov.hk HTML scraping and news.gov.hk RSS ingestion (HKMA press API
-  is in; the broader press archive is not).
-- More dataset mappings within the existing sources (adding a dataset is one
-  entry per source's resource table).
+## v3 — AI-agent analysis layer (✅ shipped)
 
-## v3 — AI-agent analysis + agent protocols
+- `crates/agent`: pluggable LLM client trait + **heuristic** client
+  (deterministic, zero-config) + **HTTP** client (OpenAI-compatible, behind
+  `llm` feature).
+- Cross-source detectors: `series_jump` (numeric anomalies) and
+  `cross_source_gap` (press dates vs data dates).
+- Structured `Insight` records with verifiable evidence pointers.
+- `/insights` endpoint serving insights; agent scheduler decoupled from
+  serving.
+- Live-verified: agent detects real HKMA market moves (HIBOR drops, HSI swings).
 
-The agent-facing surface. Everything that lets an AI IDE, MCP server, or A2A
-agent treat this platform as a first-class data source.
+## v4 — Scale & hardening (✅ shipped)
 
-- `crates/agent`: pluggable LLM client, prompt/tool scaffolding.
-- Cross-source anomaly detection (HKMA data vs. ISD press releases).
-- "Insights" stored as records and served via `/insights`.
-- Scheduled agent runs decoupled from serving.
-- **MCP server adapter** — expose `/datasets/.../records` (and later `/insights`)
-  as Model Context Protocol tools, so AI IDEs can query live HKGOV data without
-  learning four different upstream APIs. Targets the MCP tool/resource spec.
-- **A2A protocol surface** — expose agent capabilities (monitor a dataset, flag an
-  anomaly, validate a fact across sources) as agent-to-agent endpoints so other
-  agents can subscribe to change/anomaly events and delegate validation tasks.
+- **Postgres** `RecordStore` (`--features pg`) for the persistent cold/historical
+  tier.
+- **API auth** (optional `X-API-Key` / `?api_key=`) + **API versioning**
+  (`/v1` prefix; health kept at root for probes).
+- **OpenTelemetry** trace export (`--features otel`).
+- **Load-test harness** (k6) + capacity model with the
+  single-node → 100k-concurrency scaling path.
 
-## v4 — Scale & hardening
+## v5 — Public surface (✅ shipped)
 
-- Stateless API behind LB, N replicas.
-- Postgres read replicas for historical reads.
-- Auth, rate limiting at the edge, API versioning.
-- OpenTelemetry exporters wired into `telemetry`.
-- Load-test harness (k6/oha) + a published capacity model targeting 100k.
+- Insights dashboard (`dashboard/index.html`) — static, reads the live API,
+  renders source health + insights with evidence.
+- Python API example (`examples/query_api.py`).
+- CONTRIBUTING guide with data-source verification rules and the feature matrix.
 
-## v5 — Public surface
+## Remaining (future)
 
-- Public docs site, example notebooks.
-- Web dashboard over the API.
-- Contribution guide for new connectors.
+- ISD/info.gov.hk HTML scraping + news.gov.hk RSS (press connector v2).
+- More `data.gov.hk` resources (each must be probe-verified first).
+- Persisting insights to the Postgres tier (currently in-process).
+- Deploy manifests (k8s/Helm), OTLP collector config, production hardening.
+- Auth via OAuth/JWT (current is static key).

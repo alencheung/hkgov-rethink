@@ -1,5 +1,5 @@
 [package]
-name = "hkgov-api"
+name = "hkgov-agent"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,26 +7,23 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-[[bin]]
-name = "hkgov-api"
-path = "src/main.rs"
-
 [features]
 default = []
-# Passthrough to enable the HTTP LLM client in the agent layer.
-llm = ["hkgov-agent/llm"]
+# Enables the HTTP LLM client (OpenAI-compatible). Off by default so dev/CI
+# runs in pure-heuristic mode with no API key.
+llm = []
 
 [dependencies]
 hkgov-common.workspace = true
-hkgov-connectors.workspace = true
 hkgov-store.workspace = true
-hkgov-ingest.workspace = true
-hkgov-agent.workspace = true
-anyhow.workspace = true
-axum.workspace = true
 tokio.workspace = true
-tower.workspace = true
-tower-http.workspace = true
 tracing.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
 serde_json.workspace = true

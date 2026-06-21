@@ -51,8 +51,8 @@ impl RecordStore for RedisStore {
         dataset_id: &DatasetId,
         records: Vec<NormalizedRecord>,
     ) -> Result<()> {
-        let payload = serde_json::to_vec(&records)
-            .map_err(|e| Error::Store(format!("serialize: {e}")))?;
+        let payload =
+            serde_json::to_vec(&records).map_err(|e| Error::Store(format!("serialize: {e}")))?;
         let rkey = Self::records_key(dataset_id);
         let mkey = Self::meta_key(dataset_id);
         let now = chrono::Utc::now();
@@ -78,7 +78,10 @@ impl RecordStore for RedisStore {
             .unwrap_or_default(),
             ttl,
         );
-        pipe.sadd(Self::index_key(), format!("{}:{}", dataset_id.source, dataset_id.dataset));
+        pipe.sadd(
+            Self::index_key(),
+            format!("{}:{}", dataset_id.source, dataset_id.dataset),
+        );
 
         let mut conn = self.conn.clone();
         pipe.query_async::<()>(&mut conn)

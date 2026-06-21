@@ -5,6 +5,7 @@ members = [
     "crates/connectors",
     "crates/store",
     "crates/ingest",
+    "crates/agent",
     "crates/api",
 ]
 
@@ -50,6 +51,7 @@ hkgov-common = { path = "crates/common" }
 hkgov-connectors = { path = "crates/connectors" }
 hkgov-store = { path = "crates/store" }
 hkgov-ingest = { path = "crates/ingest" }
+hkgov-agent = { path = "crates/agent" }
 
 [profile.release]
 opt-level = 3

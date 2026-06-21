@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>hkgov-rethink — insights dashboard</title>
+  <style>
+    :root {
+      --bg: #0d1117; --panel: #161b22; --border: #30363d;
+      --fg: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+      --warn: #d29922; --crit: #f85149; --info: #58a6ff; --ok: #3fb950;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font: 14px/1.5 system-ui, -apple-system, sans-serif;
+      background: var(--bg); color: var(--fg);
+    }
+    header { padding: 16px 24px; border-bottom: 1px solid var(--border); }
+    h1 { margin: 0; font-size: 18px; }
+    h1 small { color: var(--muted); font-weight: 400; }
+    .config { float: right; }
+    .config input { background: var(--panel); color: var(--fg); border: 1px solid var(--border); padding: 4px 8px; border-radius: 4px; }
+    main { padding: 24px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 1400px; margin: 0 auto; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 16px; }
+    .panel h2 { margin: 0 0 12px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .full { grid-column: 1 / -1; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--muted); font-weight: 500; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+    .sev-info { background: rgba(88,166,255,0.15); color: var(--info); }
+    .sev-warning { background: rgba(210,153,34,0.15); color: var(--warn); }
+    .sev-critical { background: rgba(248,81,73,0.15); color: var(--crit); }
+    .circuit-closed { color: var(--ok); }
+    .circuit-open, .circuit-half-open { color: var(--crit); }
+    .muted { color: var(--muted); }
+    .refresh { cursor: pointer; color: var(--accent); }
+    pre { white-space: pre-wrap; margin: 0; font-size: 12px; }
+    .empty { color: var(--muted); font-style: italic; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="config">
+      <label class="muted">API base: </label>
+      <input id="baseUrl" value="" placeholder="http://localhost:8080" size="28" />
+      <label class="muted">Key: </label>
+      <input id="apiKey" type="password" placeholder="(none)" size="12" />
+      <span class="refresh" onclick="refresh()">↻ refresh</span>
+    </div>
+    <h1>hkgov-rethink <small>— AI-infused HKGOV data insights</small></h1>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>Source health</h2>
+      <table><thead><tr><th>source</th><th>circuit</th></tr></thead>
+        <tbody id="health"><tr><td class="empty" colspan="2">loading…</td></tr></tbody></table>
+    </section>
+
+    <section class="panel">
+      <h2>Ingested datasets</h2>
+      <table><thead><tr><th>source / dataset</th><th>records</th><th>last refreshed</th></tr></thead>
+        <tbody id="sources"><tr><td class="empty" colspan="3">loading…</td></tr></tbody></table>
+    </section>
+
+    <section class="panel full">
+      <h2>Agent insights <span class="muted">(cross-source anomalies the press room leaves untold)</span></h2>
+      <table><thead><tr><th>sev</th><th>kind</th><th>title</th><th>producer</th><th>conf.</th><th>evidence</th></tr></thead>
+        <tbody id="insights"><tr><td class="empty" colspan="6">loading…</td></tr></tbody></table>
+    </section>
+  </main>
+
+  <script>
+    function api() {
+      const base = document.getElementById('baseUrl').value.replace(/\/$/, '') || 'http://localhost:8080';
+      const key = document.getElementById('apiKey').value;
+      return { base, headers: key ? { 'X-API-Key': key } : {} };
+    }
+
+    async function get(path) {
+      const { base, headers } = api();
+      try {
+        const r = await fetch(base + path, { headers });
+        if (!r.ok) return null;
+        return await r.json();
+      } catch (e) { return null; }
+    }
+
+    async function refresh() {
+      // Health (probe at root, no prefix)
+      const hs = await get('/health/sources') || await get('/v1/health/sources');
+      const hb = document.getElementById('health');
+      if (hs && hs.length) {
+        hb.innerHTML = hs.map(s =>
+          `<tr><td>${s.source}</td><td class="circuit-${s.circuit}">${s.circuit}</td></tr>`
+        ).join('');
+      } else { hb.innerHTML = '<tr><td class="empty" colspan="2">unavailable</td></tr>'; }
+
+      // Sources
+      const src = await get('/v1/sources');
+      const sb = document.getElementById('sources');
+      if (src && src.length) {
+        sb.innerHTML = src.map(s =>
+          `<tr><td>${s.source}/${s.dataset}<br><span class="muted">${s.title}</span></td>
+           <td>${s.record_count}</td>
+           <td class="muted">${s.last_refreshed_at ? new Date(s.last_refreshed_at).toLocaleString() : '—'}</td></tr>`
+        ).join('');
+      } else { sb.innerHTML = '<tr><td class="empty" colspan="3">unavailable</td></tr>'; }
+
+      // Insights
+      const ins = await get('/v1/insights?limit=20');
+      const ib = document.getElementById('insights');
+      if (ins && ins.length) {
+        ib.innerHTML = ins.map(i =>
+          `<tr><td><span class="badge sev-${i.severity}">${i.severity}</span></td>
+           <td>${i.kind}</td>
+           <td><b>${escapeHtml(i.title)}</b><br><span class="muted">${escapeHtml(i.summary)}</span></td>
+           <td>${i.producer}</td>
+           <td>${(i.confidence * 100).toFixed(0)}%</td>
+           <td><pre>${escapeHtml(JSON.stringify(i.evidence, null, 1))}</pre></td></tr>`
+        ).join('');
+      } else { ib.innerHTML = '<tr><td class="empty" colspan="6">no insights yet (is the agent enabled?)</td></tr>'; }
+    }
+
+    function escapeHtml(s) {
+      return String(s || '').replace(/[&<>"]/g, c =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    }
+
+    // Auto-fill base URL from this server if served from one.
+    if (location.protocol.startsWith('http') && location.port) {
+      document.getElementById('baseUrl').value = `${location.protocol}//${location.host}`;
+    }
+    refresh();
+    setInterval(refresh, 30000);
+  </script>
+</body>
+</html>

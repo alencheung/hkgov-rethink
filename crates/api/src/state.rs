@@ -1,5 +1,6 @@
 //! Shared application state handed to every handler via axum's `State` extractor.
 
+use hkgov_agent::InsightStore;
 use hkgov_common::Settings;
 use hkgov_connectors::registry::Registry;
 use hkgov_store::MemoryStore;
@@ -12,5 +13,6 @@ pub struct AppState {
     #[allow(dead_code)]
     pub registry: Arc<Registry>,
     pub store: Arc<MemoryStore>,
+    pub insights: Arc<InsightStore>,
     pub settings: Arc<Settings>,
 }

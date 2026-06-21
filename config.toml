@@ -1,19 +1,23 @@
 # hkgov-rethink default configuration.
-# Any value here can be overridden by an environment variable using the
-# HKGOV_ prefix and __ as the nested separator, e.g.
+# Override with env vars: HKGOV_ prefix + __ separator, e.g.
 #   HKGOV_API__BIND=0.0.0.0:9090
-#   HKGOV_LOG__FORMAT=json
+#   HKGOV_AGENT__ENABLED=true
 
 [api]
 bind = "0.0.0.0:8080"
-# Single-node v1 ceiling. Scale horizontally (see docs/ARCHITECTURE.md) for the
-# 100k-concurrency target.
+# Single-node v1 ceiling. Scale horizontally (docs/CAPACITY.md) for 100k.
 max_concurrency = 50000
 request_timeout_ms = 15000
+# All API routes nest under this prefix (health stays at root for probes).
+api_prefix = "/v1"
+# Set HKGOV_API__API_KEY to require X-API-Key on every non-health request.
+api_key = ""
+# Per-IP rate limit, req/s. 0 = unlimited.
+rate_per_sec = 0
 
 [upstream]
 hkma_base_url = "https://api.hkma.gov.hk/public"
-# Set HKGOV_UPSTREAM__HKMA_API_KEY if/when HKMA issues you a key for higher quota.
+# Set HKGOV_UPSTREAM__HKMA_API_KEY if HKMA issues you a key for higher quota.
 hkma_api_key = ""
 hkma_timeout_ms = 10000
 hkma_max_retries = 3
@@ -24,6 +28,22 @@ data_gov_hk_archive_url = "https://app.data.gov.hk/v1/historical-archive/list-fi
 [cache]
 max_entries = 200000
 ttl_secs = 600
+
+[store]
+# memory (in-process moka) or redis (needs --features redis + a running server)
+backend = "memory"
+redis_url = "redis://127.0.0.1:6379"
+
+[agent]
+# Enable the AI-agent analysis scheduler. Heuristic mode needs no LLM key.
+enabled = false
+run_interval_secs = 21600
+# Leave empty for heuristic mode; set to an OpenAI-compatible base URL + build
+# with --features llm to use the HTTP LLM client for richer insight framing.
+llm_base_url = ""
+# HKGOV_AGENT__LLM_API_KEY
+llm_api_key = ""
+llm_model = "gpt-4o-mini"
 
 [log]
 format = "plain"

@@ -5,8 +5,10 @@
 //! connector. This is the v2 resilience layer (ROADMAP item).
 
 use crate::resilience::{CircuitBreaker, RateLimiter};
-use crate::{datagovhk::DataGovHkConnector, hkma::HkmaConnector, landsd::LandsDConnector,
-            press::PressConnector, Connector, DatasetSpec};
+use crate::{
+    datagovhk::DataGovHkConnector, hkma::HkmaConnector, landsd::LandsDConnector,
+    press::PressConnector, Connector, DatasetSpec,
+};
 use async_trait::async_trait;
 use hkgov_common::{DataSource, NormalizedRecord, Result, Settings};
 use std::sync::Arc;
@@ -20,8 +22,16 @@ pub struct ResilientConnector {
 }
 
 impl ResilientConnector {
-    pub fn new(inner: Arc<dyn Connector>, limiter: Arc<RateLimiter>, breaker: Arc<CircuitBreaker>) -> Self {
-        Self { inner, limiter, breaker }
+    pub fn new(
+        inner: Arc<dyn Connector>,
+        limiter: Arc<RateLimiter>,
+        breaker: Arc<CircuitBreaker>,
+    ) -> Self {
+        Self {
+            inner,
+            limiter,
+            breaker,
+        }
     }
 
     pub fn breaker_state(&self) -> &'static str {
@@ -85,12 +95,7 @@ impl Registry {
         ));
 
         let datagovhk: Arc<dyn Connector> = Arc::new(DataGovHkConnector::new(&settings.upstream)?);
-        by_source.push(wrap(
-            datagovhk,
-            3.0,
-            5,
-            std::time::Duration::from_secs(60),
-        ));
+        by_source.push(wrap(datagovhk, 3.0, 5, std::time::Duration::from_secs(60)));
 
         let press: Arc<dyn Connector> = Arc::new(PressConnector::new(&settings.upstream)?);
         by_source.push(wrap(press, 2.0, 5, std::time::Duration::from_secs(60)));
@@ -136,7 +141,13 @@ fn wrap(
     cooldown: std::time::Duration,
 ) -> (DataSource, Arc<ResilientConnector>) {
     let source = inner.source();
-    let limiter = Arc::new(RateLimiter::new(rate_per_sec.ceil().max(1.0) as u64, rate_per_sec));
+    let limiter = Arc::new(RateLimiter::new(
+        rate_per_sec.ceil().max(1.0) as u64,
+        rate_per_sec,
+    ));
     let breaker = Arc::new(CircuitBreaker::new(failure_threshold, cooldown));
-    (source, Arc::new(ResilientConnector::new(inner, limiter, breaker)))
+    (
+        source,
+        Arc::new(ResilientConnector::new(inner, limiter, breaker)),
+    )
 }

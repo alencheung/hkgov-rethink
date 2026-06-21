@@ -10,7 +10,7 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  check:
+  fmt-clippy-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,12 +26,30 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-      - name: Clippy
+      - name: Clippy (default features)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Build
+      - name: Build (default features)
         run: cargo build --workspace --release
 
-      - name: Test
-        # `live` is intentionally off in CI — keeps the suite hermetic.
+      - name: Test (default features, hermetic — `live` off)
         run: cargo test --workspace
+
+  # Feature-gated crates: compile-check each optional backend. These need no
+  # external service to build (only to *run*), so they belong in CI.
+  features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: redis store
+        run: cargo clippy -p hkgov-store --features redis --all-targets -- -D warnings
+      - name: pg store
+        run: cargo clippy -p hkgov-store --features pg --all-targets -- -D warnings
+      - name: otel
+        run: cargo clippy -p hkgov-common --features otel --all-targets -- -D warnings
+      - name: llm (agent)
+        run: cargo clippy -p hkgov-agent --features llm --all-targets -- -D warnings

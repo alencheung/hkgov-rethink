@@ -7,10 +7,14 @@
 //! docs/ARCHITECTURE.md §"Scaling path".
 
 pub mod memory;
+#[cfg(feature = "pg")]
+pub mod pg_store;
 #[cfg(feature = "redis")]
 pub mod redis_store;
 
 pub use memory::MemoryStore;
+#[cfg(feature = "pg")]
+pub use pg_store::PgStore;
 #[cfg(feature = "redis")]
 pub use redis_store::RedisStore;
 

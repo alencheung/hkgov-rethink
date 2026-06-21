@@ -104,13 +104,16 @@ impl Connector for PressConnector {
         })?;
         let url = format!("{base}?lang=en&pagesize=200");
 
-        let resp = self.client.get(&url).send().await.map_err(|e| {
-            Error::Upstream {
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| Error::Upstream {
                 origin: "press",
                 status: 0,
                 detail: format!("transport: {e}"),
-            }
-        })?;
+            })?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let detail = resp.text().await.unwrap_or_default();
@@ -124,11 +127,10 @@ impl Connector for PressConnector {
             origin: "press",
             backtrace: serde::de::Error::custom(e.to_string()),
         })?;
-        let env: PressEnvelope =
-            serde_json::from_value(json).map_err(|e| Error::Decode {
-                origin: "press",
-                backtrace: e,
-            })?;
+        let env: PressEnvelope = serde_json::from_value(json).map_err(|e| Error::Decode {
+            origin: "press",
+            backtrace: e,
+        })?;
         if !env.header.success {
             return Err(Error::Upstream {
                 origin: "press",

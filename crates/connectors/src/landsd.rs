@@ -85,24 +85,31 @@ impl Connector for LandsDConnector {
                 "landsd: unknown dataset {dataset}"
             )));
         }
-        // Last 30 days window — keeps the catalog fresh and bounded.
-        let today = chrono::Local::now().format("%Y%m%d").to_string();
-        let start = chrono::Local::now()
+        // 30-day window ending *yesterday* — the archive rejects `end` later
+        // than yesterday. Keeps the catalog fresh and bounded.
+        let yesterday = chrono::Local::now()
+            .checked_sub_days(chrono::Days::new(1))
+            .unwrap_or_else(chrono::Local::now);
+        let end = yesterday.format("%Y%m%d").to_string();
+        let start = yesterday
             .checked_sub_days(chrono::Days::new(30))
             .map(|d| d.format("%Y%m%d").to_string())
-            .unwrap_or_else(|| today.clone());
+            .unwrap_or_else(|| end.clone());
 
         let url = format!(
             "{}?start={}&end={}&provider=hk-landsd&max=1000",
-            self.archive_url, start, today
+            self.archive_url, start, end
         );
-        let resp = self.client.get(&url).send().await.map_err(|e| {
-            Error::Upstream {
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| Error::Upstream {
                 origin: "landsd",
                 status: 0,
                 detail: format!("transport: {e}"),
-            }
-        })?;
+            })?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let detail = resp.text().await.unwrap_or_default();

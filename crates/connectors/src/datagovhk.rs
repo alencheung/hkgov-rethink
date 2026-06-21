@@ -32,37 +32,23 @@ fn resources() -> &'static [(&'static str, FilterResource)] {
         (
             "money-lenders-licensees",
             FilterResource {
-                resource_url:
-                    "http://www.cr.gov.hk/datagovhk/psi/ml_licensees.csv",
+                resource_url: "http://www.cr.gov.hk/datagovhk/psi/ml_licensees.csv",
                 id_field: Some("MLR_No"),
             },
         ),
-        (
-            "hko-rainfall-warning",
-            FilterResource {
-                resource_url:
-                    "http://www.weather.gov.hk/datagovhk/FLW_RedRainstormTextbook.csv",
-                id_field: None,
-            },
-        ),
+        // Add more verified resources here. Each must be probed live before
+        // being registered — the v2 filter API rejects unregistered URLs with
+        // {"code":"422","message":"Not a valid resource"}.
     ]
 }
 
 fn specs() -> &'static [DatasetSpec] {
-    &[
-        DatasetSpec {
-            id: "money-lenders-licensees",
-            title: "Money Lenders Licensees (Companies Registry)",
-            description: Some("List of licensed money lenders, published by the Companies Registry."),
-            refresh_interval_secs: 24 * 3600,
-        },
-        DatasetSpec {
-            id: "hko-rainfall-warning",
-            title: "HKO Rainfall Warning (Red Rainstorm Textbook)",
-            description: Some("Red rainstorm warning textbook data from the Hong Kong Observatory."),
-            refresh_interval_secs: 3600,
-        },
-    ]
+    &[DatasetSpec {
+        id: "money-lenders-licensees",
+        title: "Money Lenders Licensees (Companies Registry)",
+        description: Some("List of licensed money lenders, published by the Companies Registry."),
+        refresh_interval_secs: 24 * 3600,
+    }]
 }
 
 pub struct DataGovHkConnector {
@@ -208,7 +194,9 @@ impl Connector for DataGovHkConnector {
 
     async fn fetch(&self, dataset: &str) -> Result<Vec<NormalizedRecord>> {
         let resource = self.resource_for(dataset).ok_or_else(|| {
-            Error::Internal(format!("datagovhk: no resource mapping for dataset {dataset}"))
+            Error::Internal(format!(
+                "datagovhk: no resource mapping for dataset {dataset}"
+            ))
         })?;
         let rows = self.fetch_filter(resource.resource_url).await?;
         let now = Utc::now();

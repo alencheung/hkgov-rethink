@@ -15,6 +15,8 @@ pub struct Settings {
     pub api: ApiSettings,
     pub upstream: UpstreamSettings,
     pub cache: CacheSettings,
+    pub store: StoreSettings,
+    pub agent: AgentSettings,
     pub log: LogSettings,
 }
 
@@ -27,6 +29,13 @@ pub struct ApiSettings {
     pub max_concurrency: usize,
     /// Per-request timeout, milliseconds.
     pub request_timeout_ms: u64,
+    /// URL prefix for all API routes, e.g. `/v1`. Empty = no prefix.
+    pub api_prefix: String,
+    /// Optional API key. When set, every request must send it via the
+    /// `X-API-Key` header (or `?api_key=` query). Empty = anonymous access.
+    pub api_key: Option<String>,
+    /// Per-IP request rate limit, requests/sec. 0 = unlimited.
+    pub rate_per_sec: u32,
 }
 
 impl Default for ApiSettings {
@@ -36,6 +45,9 @@ impl Default for ApiSettings {
             // Conservative for v1 single-node; raise / shard for the 100k target.
             max_concurrency: 50_000,
             request_timeout_ms: 15_000,
+            api_prefix: "/v1".to_string(),
+            api_key: None,
+            rate_per_sec: 0,
         }
     }
 }
@@ -102,6 +114,55 @@ impl Default for LogSettings {
         Self {
             format: "plain".to_string(),
             filter: "info".to_string(),
+        }
+    }
+}
+
+/// Which backing store the API uses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoreSettings {
+    /// `memory` (in-process moka) or `redis` (shared cluster). The redis
+    /// choice requires the `redis` cargo feature at build time.
+    pub backend: String,
+    /// Redis URL, e.g. `redis://127.0.0.1:6379`. Ignored unless backend=redis.
+    pub redis_url: String,
+}
+
+impl Default for StoreSettings {
+    fn default() -> Self {
+        Self {
+            backend: "memory".to_string(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+        }
+    }
+}
+
+/// AI-agent layer knobs (ROADMAP v3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentSettings {
+    /// Whether the background agent scheduler runs. Off by default.
+    pub enabled: bool,
+    /// How often the agent re-runs its analysis passes, seconds.
+    pub run_interval_secs: u64,
+    /// LLM provider base URL. Empty = local heuristic mode (no network calls),
+    /// used so the agent layer works without API keys in dev/CI.
+    pub llm_base_url: String,
+    /// LLM API key (optional). Read from env `HKGOV_AGENT__LLM_API_KEY`.
+    pub llm_api_key: Option<String>,
+    /// Model id to request.
+    pub llm_model: String,
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            run_interval_secs: 6 * 3600,
+            llm_base_url: String::new(),
+            llm_api_key: None,
+            llm_model: "gpt-4o-mini".to_string(),
         }
     }
 }
