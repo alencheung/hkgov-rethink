@@ -11,7 +11,7 @@ authors.workspace = true
 default = []
 # Enables the HTTP LLM client (OpenAI-compatible). Off by default so dev/CI
 # runs in pure-heuristic mode with no API key.
-llm = []
+llm = ["dep:reqwest"]
 
 [dependencies]
 hkgov-common.workspace = true
@@ -23,6 +23,8 @@ serde_json.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+# Only needed by the HTTP LLM client; gated behind the `llm` feature.
+reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

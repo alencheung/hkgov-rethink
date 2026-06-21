@@ -643,6 +643,7 @@ dependencies = [
  "chrono",
  "hkgov-common",
  "hkgov-store",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
