@@ -60,8 +60,15 @@
 
     <section class="panel">
       <h2>Ingested datasets</h2>
-      <table><thead><tr><th>source / dataset</th><th>records</th><th>last refreshed</th></tr></thead>
-        <tbody id="sources"><tr><td class="empty" colspan="3">loading…</td></tr></tbody></table>
+      <div style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
+        <select id="catFilter" onchange="loadSources()" style="background:var(--bg); color:var(--fg); border:1px solid var(--border); padding:4px 8px; border-radius:4px;">
+          <option value="">all categories</option>
+        </select>
+        <input id="srcSearch" placeholder="search datasets…" oninput="loadSources()"
+               style="background:var(--bg); color:var(--fg); border:1px solid var(--border); padding:4px 8px; border-radius:4px; flex:1; min-width:120px;" />
+      </div>
+      <table><thead><tr><th>cat</th><th>source / dataset</th><th>tags</th><th>cadence</th><th>records</th><th>last refreshed</th></tr></thead>
+        <tbody id="sources"><tr><td class="empty" colspan="6">loading…</td></tr></tbody></table>
     </section>
 
     <section class="panel full">
@@ -98,6 +105,45 @@
       } catch (e) { return null; }
     }
 
+    // Populate the category dropdown from /v1/categories (called once per refresh).
+    async function loadCategories() {
+      const cats = await get('/v1/categories');
+      const sel = document.getElementById('catFilter');
+      const current = sel.value;
+      sel.innerHTML = '<option value="">all categories</option>';
+      if (cats && cats.length) {
+        for (const c of cats) {
+          const o = document.createElement('option');
+          o.value = c.category;
+          o.textContent = `${c.category} (${c.count})`;
+          sel.appendChild(o);
+        }
+      }
+      sel.value = current;
+    }
+
+    // Re-fetch /v1/sources with the current category + search filters applied.
+    async function loadSources() {
+      const cat = document.getElementById('catFilter').value;
+      const q = document.getElementById('srcSearch').value.trim();
+      const params = new URLSearchParams();
+      if (cat) params.set('category', cat);
+      if (q) params.set('q', q);
+      const qs = params.toString() ? ('?' + params.toString()) : '';
+      const src = await get('/v1/sources' + qs);
+      const sb = document.getElementById('sources');
+      if (src && src.length) {
+        sb.innerHTML = src.map(s =>
+          `<tr><td><span class="badge" style="background:rgba(88,166,255,0.15);color:var(--info)">${s.category || 'other'}</span></td>
+           <td>${s.source}/${s.dataset}<br><span class="muted">${escapeHtml(s.title)}</span></td>
+           <td class="muted">${(s.tags || []).map(escapeHtml).join(', ') || '—'}</td>
+           <td class="muted">${s.cadence || '—'}</td>
+           <td>${s.record_count}</td>
+           <td class="muted">${s.last_refreshed_at ? new Date(s.last_refreshed_at).toLocaleString() : '—'}</td></tr>`
+        ).join('');
+      } else { sb.innerHTML = '<tr><td class="empty" colspan="6">no datasets match</td></tr>'; }
+    }
+
     async function refresh() {
       // Health (probe at root, no prefix)
       const hs = await get('/health/sources') || await get('/v1/health/sources');
@@ -108,16 +154,10 @@
         ).join('');
       } else { hb.innerHTML = '<tr><td class="empty" colspan="2">unavailable</td></tr>'; }
 
-      // Sources
-      const src = await get('/v1/sources');
-      const sb = document.getElementById('sources');
-      if (src && src.length) {
-        sb.innerHTML = src.map(s =>
-          `<tr><td>${s.source}/${s.dataset}<br><span class="muted">${s.title}</span></td>
-           <td>${s.record_count}</td>
-           <td class="muted">${s.last_refreshed_at ? new Date(s.last_refreshed_at).toLocaleString() : '—'}</td></tr>`
-        ).join('');
-      } else { sb.innerHTML = '<tr><td class="empty" colspan="3">unavailable</td></tr>'; }
+      // Populate the category dropdown once.
+      await loadCategories();
+      // Sources (filterable).
+      await loadSources();
 
       // Insights
       const ins = await get('/v1/insights?limit=20');

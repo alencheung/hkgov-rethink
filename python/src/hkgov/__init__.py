@@ -10,6 +10,7 @@ from .client import HkGov, HkGovError
 from .models import (
     AlertLogEntry,
     Answer,
+    CategoryGroup,
     DatasetMeta,
     Insight,
     EvidenceRef,
@@ -25,6 +26,7 @@ __all__ = [
     "HkGovError",
     "Answer",
     "AlertLogEntry",
+    "CategoryGroup",
     "DatasetMeta",
     "EvidenceRef",
     "Health",
@@ -34,4 +36,4 @@ __all__ = [
     "SourceHealth",
     "TraceStep",
 ]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

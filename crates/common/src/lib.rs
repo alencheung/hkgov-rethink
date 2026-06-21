@@ -15,4 +15,4 @@ pub use config::{
     CompanionRef, Comparison, LogSettings, ScanTarget, Settings, StoreSettings, UpstreamSettings,
 };
 pub use error::{Error, Result};
-pub use model::{DataSource, DatasetMeta, NormalizedRecord, RecordValue};
+pub use model::{Category, DataSource, DatasetMeta, NormalizedRecord, RecordValue};

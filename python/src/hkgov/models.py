@@ -24,9 +24,19 @@ class DatasetMeta:
     dataset: str
     title: str
     description: Optional[str]
+    category: str
+    tags: list[str]
+    cadence: str
     refresh_interval_secs: int
     last_refreshed_at: Optional[str]
     record_count: int
+
+
+@dataclass(frozen=True)
+class CategoryGroup:
+    category: str
+    count: int
+    datasets: list[str]
 
 
 @dataclass(frozen=True)

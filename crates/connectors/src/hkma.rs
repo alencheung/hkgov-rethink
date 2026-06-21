@@ -17,7 +17,9 @@
 use crate::{Connector, DatasetSpec};
 use async_trait::async_trait;
 use chrono::Utc;
-use hkgov_common::{DataSource, Error, NormalizedRecord, RecordValue, Result, UpstreamSettings};
+use hkgov_common::{
+    Cadence, Category, DataSource, Error, NormalizedRecord, RecordValue, Result, UpstreamSettings,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -29,12 +31,18 @@ const DATASETS: &[DatasetSpec] = &[
         id: "capital-market-statistics",
         title: "Capital Market Statistics (T0103)",
         description: Some("Monthly capital market statistics from the HKMA Monthly Statistical Bulletin, Section Financial."),
+        category: Category::Monetary,
+        tags: &["hang-seng-index", "equities", "monthly-bulletin"],
+        cadence: Cadence::Monthly,
         refresh_interval_secs: 6 * 3600,
     },
     DatasetSpec {
         id: "daily-interbank-liquidity",
         title: "Daily Interbank Liquidity Figures",
         description: Some("Daily figures of the discount window and liquidity adjustment window."),
+        category: Category::Monetary,
+        tags: &["hibor", "interbank", "discount-window", "liquidity"],
+        cadence: Cadence::Daily,
         refresh_interval_secs: 3600,
     },
 ];

@@ -7,7 +7,7 @@
 use crate::{DatasetId, RecordPage, RecordStore};
 use async_trait::async_trait;
 use chrono::Utc;
-use hkgov_common::{DataSource, DatasetMeta, Error, NormalizedRecord, Result};
+use hkgov_common::{Cadence, Category, DataSource, DatasetMeta, Error, NormalizedRecord, Result};
 use moka::future::Cache;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,6 +20,9 @@ struct RegisteredMeta {
     title: String,
     description: Option<String>,
     refresh_interval_secs: u64,
+    category: Category,
+    tags: Vec<String>,
+    cadence: Cadence,
 }
 
 pub struct MemoryStore {
@@ -43,13 +46,18 @@ impl MemoryStore {
         }
     }
 
-    /// Register static metadata (title, description, refresh cadence). Idempotent.
+    /// Register static metadata. Idempotent. The category/tags/cadence come from
+    /// the connector's `DatasetSpec`; title/description/cadence from the same.
+    #[allow(clippy::too_many_arguments)] // mirrors DatasetSpec's fields; grouping would obscure call sites
     pub async fn register(
         &self,
         id: DatasetId,
         title: String,
         description: Option<String>,
         refresh_interval_secs: u64,
+        category: Category,
+        tags: Vec<String>,
+        cadence: Cadence,
     ) {
         self.registry.write().await.insert(
             id,
@@ -57,6 +65,9 @@ impl MemoryStore {
                 title,
                 description,
                 refresh_interval_secs,
+                category,
+                tags,
+                cadence,
             },
         );
     }
@@ -128,6 +139,9 @@ impl RecordStore for MemoryStore {
             dataset: dataset_id.dataset.clone(),
             title: static_meta.title.clone(),
             description: static_meta.description.clone(),
+            category: static_meta.category,
+            tags: static_meta.tags.clone(),
+            cadence: static_meta.cadence,
             refresh_interval_secs: static_meta.refresh_interval_secs,
             last_refreshed_at: last,
             record_count: count,
@@ -154,6 +168,9 @@ impl RecordStore for MemoryStore {
                 dataset: id.dataset.clone(),
                 title: static_meta.title.clone(),
                 description: static_meta.description.clone(),
+                category: static_meta.category,
+                tags: static_meta.tags.clone(),
+                cadence: static_meta.cadence,
                 refresh_interval_secs: static_meta.refresh_interval_secs,
                 last_refreshed_at: last,
                 record_count: count,

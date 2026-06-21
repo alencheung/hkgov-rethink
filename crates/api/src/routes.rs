@@ -39,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/health/sources", get(health_sources))
         .route("/sources", get(list_sources))
+        .route("/categories", get(list_categories))
         .route("/datasets/{source}/{dataset}", get(dataset_meta))
         .route("/datasets/{source}/{dataset}/records", get(dataset_records))
         .route("/insights", get(list_insights))
@@ -90,6 +91,7 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
             "GET /health",
             "GET /v1/health/sources",
             "GET /v1/sources",
+            "GET /v1/categories",
             "GET /v1/datasets/{source}/{dataset}",
             "GET /v1/datasets/{source}/{dataset}/records",
             "GET /v1/insights",
@@ -131,10 +133,104 @@ async fn health_sources(State(state): State<AppState>) -> Json<Vec<SourceHealth>
     )
 }
 
+// ---- GET /sources — filterable dataset catalog ---------------------------
+
+/// Query params for `/sources`. All optional; omitted = no filter. Filters
+/// compose with AND across dimensions; `tag` is repeated (matches ANY tag).
+#[derive(Deserialize, Default)]
+struct DatasetFilter {
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    /// Repeated query param: `?tag=hibor&tag=interest-rate`. A dataset matches
+    /// if it carries ANY of the listed tags.
+    #[serde(default)]
+    tag: Vec<String>,
+    #[serde(default)]
+    cadence: Option<String>,
+    /// Free-text substring (case-insensitive) over title + description + id.
+    #[serde(default)]
+    q: Option<String>,
+}
+
+fn dataset_matches(meta: &hkgov_common::DatasetMeta, f: &DatasetFilter) -> bool {
+    if let Some(ref cat) = f.category {
+        if hkgov_common::Category::parse(cat) != Some(meta.category) {
+            return false;
+        }
+    }
+    if let Some(ref cad) = f.cadence {
+        let want = hkgov_common::Cadence::parse(cad);
+        if want.is_none() || want != Some(meta.cadence) {
+            return false;
+        }
+    }
+    if !f.tag.is_empty() && !f.tag.iter().any(|t| meta.tags.iter().any(|mt| mt == t)) {
+        return false;
+    }
+    if let Some(ref q) = f.q {
+        let needle = q.to_ascii_lowercase();
+        let haystack = format!(
+            "{} {} {}",
+            meta.title,
+            meta.description.as_deref().unwrap_or(""),
+            meta.dataset
+        )
+        .to_ascii_lowercase();
+        if !haystack.contains(&needle) {
+            return false;
+        }
+    }
+    true
+}
+
 async fn list_sources(
     State(state): State<AppState>,
+    Query(f): Query<DatasetFilter>,
 ) -> Result<Json<Vec<hkgov_common::DatasetMeta>>, ApiError> {
-    Ok(Json(state.store.list(None).await?))
+    let source = f.source.as_deref().and_then(DataSource::parse);
+    let mut all = state.store.list(source).await?;
+    if f.category.is_some() || !f.tag.is_empty() || f.cadence.is_some() || f.q.is_some() {
+        all.retain(|m| dataset_matches(m, &f));
+    }
+    Ok(Json(all))
+}
+
+// ---- GET /categories — the browse entry point -----------------------------
+
+#[derive(Serialize)]
+struct CategoryGroup {
+    category: String,
+    count: usize,
+    datasets: Vec<String>,
+}
+
+async fn list_categories(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<CategoryGroup>>, ApiError> {
+    let all = state.store.list(None).await?;
+    let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for m in all {
+        groups
+            .entry(m.category.to_string())
+            .or_default()
+            .push(format!("{}/{}", m.source, m.dataset));
+    }
+    let out: Vec<CategoryGroup> = groups
+        .into_iter()
+        .map(|(category, mut datasets)| {
+            let count = datasets.len();
+            datasets.sort();
+            CategoryGroup {
+                category,
+                count,
+                datasets,
+            }
+        })
+        .collect();
+    Ok(Json(out))
 }
 
 async fn dataset_meta(
@@ -260,7 +356,15 @@ mod tests {
         // Seed one dataset so the heuristic matcher has something to find.
         let id = DatasetId::new(DataSource::Hkma, "daily-interbank-liquidity");
         store
-            .register(id.clone(), "Daily Interbank Liquidity".into(), None, 3600)
+            .register(
+                id.clone(),
+                "Daily Interbank Liquidity".into(),
+                None,
+                3600,
+                hkgov_common::Category::Monetary,
+                vec!["hibor".into()],
+                hkgov_common::Cadence::Daily,
+            )
             .await;
         let rec = hkgov_common::NormalizedRecord {
             source: DataSource::Hkma,
@@ -325,5 +429,203 @@ mod tests {
         assert!(has_ask, "root should advertise POST /v1/ask");
         // Touch `json!` so the import isn't flagged unused.
         let _ = json!({"x": 1});
+    }
+
+    // ---- /sources filtering + /categories ---------------------------------
+
+    /// A richer state with several categorized datasets for filter tests.
+    async fn multi_state() -> AppState {
+        let settings = hkgov_common::Settings::default();
+        let registry = Arc::new(
+            hkgov_connectors::registry::Registry::build(&settings).expect("registry builds"),
+        );
+        let store = Arc::new(hkgov_store::MemoryStore::new(20, 60));
+
+        // Helper to seed one categorized dataset.
+        async fn seed(
+            store: &Arc<hkgov_store::MemoryStore>,
+            source: DataSource,
+            ds: &str,
+            title: &str,
+            cat: hkgov_common::Category,
+            tags: Vec<String>,
+            cad: hkgov_common::Cadence,
+        ) {
+            let id = DatasetId::new(source, ds);
+            store
+                .register(id.clone(), title.into(), None, 3600, cat, tags, cad)
+                .await;
+            store
+                .put_dataset(
+                    &id,
+                    vec![hkgov_common::NormalizedRecord {
+                        source,
+                        dataset: ds.into(),
+                        record_id: "2026-01".into(),
+                        fields: std::collections::BTreeMap::new(),
+                        fetched_at: chrono::Utc::now(),
+                    }],
+                )
+                .await
+                .unwrap();
+        }
+
+        seed(
+            &store,
+            DataSource::Hkma,
+            "daily-interbank-liquidity",
+            "Daily Interbank Liquidity",
+            hkgov_common::Category::Monetary,
+            vec!["hibor".into(), "liquidity".into()],
+            hkgov_common::Cadence::Daily,
+        )
+        .await;
+        seed(
+            &store,
+            DataSource::Hkma,
+            "capital-market-statistics",
+            "Capital Market Statistics",
+            hkgov_common::Category::Monetary,
+            vec!["hang-seng-index".into()],
+            hkgov_common::Cadence::Monthly,
+        )
+        .await;
+        seed(
+            &store,
+            DataSource::DataGovHk,
+            "money-lenders-licensees",
+            "Money Lenders Licensees",
+            hkgov_common::Category::Fiscal,
+            vec!["licensing".into()],
+            hkgov_common::Cadence::Daily,
+        )
+        .await;
+
+        AppState {
+            registry,
+            store,
+            insights: Arc::new(hkgov_agent::InsightStore::new()),
+            llm: Arc::new(HeuristicClient::new()),
+            alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            settings: Arc::new(settings),
+        }
+    }
+
+    #[tokio::test]
+    async fn sources_returns_all_when_no_filter() {
+        let state = multi_state().await;
+        let resp = list_sources(State(state), Query(DatasetFilter::default()))
+            .await
+            .unwrap();
+        assert_eq!(resp.0.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn sources_filters_by_category() {
+        let state = multi_state().await;
+        let f = DatasetFilter {
+            category: Some("monetary".into()),
+            ..Default::default()
+        };
+        let resp = list_sources(State(state), Query(f)).await.unwrap();
+        assert_eq!(resp.0.len(), 2);
+        assert!(resp
+            .0
+            .iter()
+            .all(|m| m.category == hkgov_common::Category::Monetary));
+    }
+
+    #[tokio::test]
+    async fn sources_filters_by_tag() {
+        let state = multi_state().await;
+        // hibor only matches one.
+        let f = DatasetFilter {
+            tag: vec!["hibor".into()],
+            ..Default::default()
+        };
+        let resp = list_sources(State(state), Query(f)).await.unwrap();
+        assert_eq!(resp.0.len(), 1);
+        assert_eq!(resp.0[0].dataset, "daily-interbank-liquidity");
+    }
+
+    #[tokio::test]
+    async fn sources_tag_matches_any() {
+        let state = multi_state().await;
+        // hibor OR licensing → 2 datasets.
+        let f = DatasetFilter {
+            tag: vec!["hibor".into(), "licensing".into()],
+            ..Default::default()
+        };
+        let resp = list_sources(State(state), Query(f)).await.unwrap();
+        assert_eq!(resp.0.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn sources_filters_by_cadence() {
+        let state = multi_state().await;
+        let f = DatasetFilter {
+            cadence: Some("monthly".into()),
+            ..Default::default()
+        };
+        let resp = list_sources(State(state), Query(f)).await.unwrap();
+        assert_eq!(resp.0.len(), 1);
+        assert_eq!(resp.0[0].dataset, "capital-market-statistics");
+    }
+
+    #[tokio::test]
+    async fn sources_free_text_search() {
+        let state = multi_state().await;
+        let f = DatasetFilter {
+            q: Some("interbank".into()),
+            ..Default::default()
+        };
+        let resp = list_sources(State(state), Query(f)).await.unwrap();
+        assert_eq!(resp.0.len(), 1);
+        assert_eq!(resp.0[0].dataset, "daily-interbank-liquidity");
+    }
+
+    #[tokio::test]
+    async fn sources_composes_filters() {
+        let state = multi_state().await;
+        // monetary AND daily → 1 (the interbank one; capital-market is monthly).
+        let f = DatasetFilter {
+            category: Some("monetary".into()),
+            cadence: Some("daily".into()),
+            ..Default::default()
+        };
+        let resp = list_sources(State(state), Query(f)).await.unwrap();
+        assert_eq!(resp.0.len(), 1);
+        assert_eq!(resp.0[0].dataset, "daily-interbank-liquidity");
+    }
+
+    #[tokio::test]
+    async fn sources_invalid_category_returns_empty() {
+        let state = multi_state().await;
+        let f = DatasetFilter {
+            category: Some("nonsense".into()),
+            ..Default::default()
+        };
+        let resp = list_sources(State(state), Query(f)).await.unwrap();
+        assert!(resp.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn categories_groups_with_counts() {
+        let state = multi_state().await;
+        let resp = list_categories(State(state)).await.unwrap();
+        // Two categories present.
+        assert_eq!(resp.0.len(), 2);
+        let monetary = resp
+            .0
+            .iter()
+            .find(|g| g.category == "monetary")
+            .expect("monetary group");
+        assert_eq!(monetary.count, 2);
+        let fiscal = resp
+            .0
+            .iter()
+            .find(|g| g.category == "fiscal")
+            .expect("fiscal group");
+        assert_eq!(fiscal.count, 1);
     }
 }

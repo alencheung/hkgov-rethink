@@ -348,7 +348,8 @@ All data endpoints are under `/v1` (configurable via `api.api_prefix`).
 | `GET` | `/` | Service name, version, and an endpoint directory |
 | `GET` | `/health` | Liveness probe (`{status, version}`) |
 | `GET` | `/v1/health/sources` | Per-source circuit-breaker state (closed/open/half-open) |
-| `GET` | `/v1/sources` | All ingested datasets with metadata + refresh cadence |
+| `GET` | `/v1/sources?category=&tag=&cadence=&source=&q=` | Datasets, filterable by domain/category, tags, cadence, and free text (v8) |
+| `GET` | `/v1/categories` | The domain taxonomy with dataset counts — the browse entry point (v8) |
 | `GET` | `/v1/datasets/{source}/{dataset}` | Metadata for one dataset |
 | `GET` | `/v1/datasets/{source}/{dataset}/records?offset=&limit=` | Paginated records from cache |
 | `GET` | `/v1/insights?limit=` | AI-agent generated insights with evidence |
@@ -357,6 +358,12 @@ All data endpoints are under `/v1` (configurable via `api.api_prefix`).
 
 `{source}` is one of `hkma`, `datagovhk`, `press`, `landsd` — see
 `crates/common/src/model.rs` (`DataSource::parse`).
+
+**Dataset categories** (v8): every dataset declares exactly one of
+`monetary`, `fiscal`, `property`, `trade`, `population`, `livability`,
+`government`, `other` — plus free-form `tags` and a `cadence`. Filter with
+`?category=monetary&tag=hibor&cadence=daily&q=interbank`; see
+[EXAMPLES.md](EXAMPLES.md) and `GET /v1/categories` for the browse entry point.
 
 When `api.api_key` is set, every `/v1` request must carry it via the
 `X-API-Key` header or `?api_key=` query param.

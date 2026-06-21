@@ -37,11 +37,22 @@ impl IngestSupervisor {
             let title = spec.title.to_string();
             let description = spec.description.map(|s| s.to_string());
             let interval = spec.refresh_interval_secs;
+            let category = spec.category;
+            let tags: Vec<String> = spec.tags.iter().map(|t| (*t).to_string()).collect();
+            let cadence = spec.cadence;
 
             let handle = tokio::spawn(async move {
                 let id = DatasetId::new(source, spec_id.clone());
                 store
-                    .register(id.clone(), title, description, interval)
+                    .register(
+                        id.clone(),
+                        title,
+                        description,
+                        interval,
+                        category,
+                        tags,
+                        cadence,
+                    )
                     .await;
 
                 // Initial warm.

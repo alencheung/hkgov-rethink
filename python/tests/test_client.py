@@ -26,10 +26,17 @@ SAMPLE_SOURCES = [
         "dataset": "daily-interbank-liquidity",
         "title": "Daily Interbank Liquidity",
         "description": "Daily figures.",
+        "category": "monetary",
+        "tags": ["hibor", "liquidity"],
+        "cadence": "daily",
         "refresh_interval_secs": 3600,
         "last_refreshed_at": "2026-06-21T00:00:00Z",
         "record_count": 90,
     }
+]
+SAMPLE_CATEGORIES = [
+    {"category": "monetary", "count": 2, "datasets": ["hkma/a", "hkma/b"]},
+    {"category": "fiscal", "count": 1, "datasets": ["datagovhk/c"]},
 ]
 SAMPLE_RECORDS = {
     "source": "hkma",
@@ -96,6 +103,44 @@ def test_sources() -> None:
     assert len(s) == 1
     assert s[0].source == "hkma"
     assert s[0].record_count == 90
+    assert s[0].category == "monetary"
+    assert "hibor" in s[0].tags
+    assert s[0].cadence == "daily"
+
+
+@responses.activate
+def test_sources_filters_pass_query_params() -> None:
+    # The filter kwargs must translate to the right query params.
+    route = responses.add(
+        responses.GET, f"{BASE}{PREFIX}/sources", json=SAMPLE_SOURCES, status=200
+    )
+    _client().sources(category="monetary", tag=["hibor", "liquidity"], cadence="daily", q="interbank")
+    sent = responses.calls[-1].request
+    assert "category=monetary" in sent.url
+    assert "cadence=daily" in sent.url
+    assert "q=interbank" in sent.url
+    # repeated tag params
+    assert "tag=hibor" in sent.url and "tag=liquidity" in sent.url
+
+
+@responses.activate
+def test_sources_single_tag_string() -> None:
+    responses.add(responses.GET, f"{BASE}{PREFIX}/sources", json=SAMPLE_SOURCES, status=200)
+    _client().sources(tag="hibor")
+    sent = responses.calls[-1].request
+    assert "tag=hibor" in sent.url
+
+
+@responses.activate
+def test_categories() -> None:
+    responses.add(
+        responses.GET, f"{BASE}{PREFIX}/categories", json=SAMPLE_CATEGORIES, status=200
+    )
+    cats = _client().categories()
+    assert len(cats) == 2
+    monetary = next(c for c in cats if c.category == "monetary")
+    assert monetary.count == 2
+    assert len(monetary.datasets) == 2
 
 
 @responses.activate
