@@ -110,6 +110,15 @@ async fn run_pass(
             );
             continue;
         };
+        if target.experimental {
+            tracing::info!(
+                detector = %target.detector,
+                source = %target.source,
+                dataset = %target.dataset,
+                "agent: running EXPERIMENTAL scan target (detector not yet validated on real data; \
+                 see EXAMPLES.md)"
+            );
+        }
         let findings = run_one_target(store, source, target).await;
         all_findings.extend(findings);
     }
@@ -345,6 +354,7 @@ mod tests {
             threshold: Some(50.0),
             field_b: None,
             companion: None,
+            experimental: false,
         }];
         let settings = settings_with_scan(scan);
 
@@ -379,6 +389,7 @@ mod tests {
             threshold: Some(3.5),
             field_b: None,
             companion: None,
+            experimental: false,
         }];
         let settings = settings_with_scan(scan);
 
@@ -413,6 +424,7 @@ mod tests {
             threshold: None,
             field_b: None,
             companion: None,
+            experimental: false,
         }];
         let settings = settings_with_scan(scan);
 
@@ -435,6 +447,7 @@ mod tests {
             threshold: Some(50.0),
             field_b: None,
             companion: None,
+            experimental: false,
         }];
         let settings = settings_with_scan(scan);
 
@@ -459,6 +472,7 @@ mod tests {
                 source: "hkma".into(),
                 dataset: "daily-interbank-liquidity".into(),
             }),
+            experimental: false,
         }];
         let settings = settings_with_scan(scan);
 

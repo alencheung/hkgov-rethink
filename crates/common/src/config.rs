@@ -204,6 +204,13 @@ pub struct ScanTarget {
     /// form the "data" side of the comparison. Ignored by other detectors.
     #[serde(default)]
     pub companion: Option<CompanionRef>,
+    /// Mark this target as experimental. Experimental detectors (`seasonality`,
+    /// `correlation`) are correct by construction but haven't yet produced a
+    /// standout finding on real HKGOV data — see EXAMPLES.md. Setting this only
+    /// affects logging (an `experimental=true` field on the insight-scan log
+    /// line); it does NOT change detection. Defaults to `false`.
+    #[serde(default)]
+    pub experimental: bool,
 }
 
 /// The "other side" of a `cross_source_gap` comparison.
@@ -215,6 +222,11 @@ pub struct CompanionRef {
 
 /// The out-of-the-box scan set. Kept as a fn (not a `const`) because it allocates;
 /// this is exactly the set the old hardcoded `run_pass` ran.
+///
+/// **Note:** the v6 detectors (`outlier`, `seasonality`, `correlation`) are NOT
+/// in the defaults. `outlier` is validated (see EXAMPLES.md); `seasonality` and
+/// `correlation` are experimental. Operators opt in by adding `[[agent.scan]]`
+/// entries — see config.toml for examples.
 pub fn default_scan_targets() -> Vec<ScanTarget> {
     vec![
         ScanTarget {
@@ -225,6 +237,7 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
             threshold: Some(25.0),
             field_b: None,
             companion: None,
+            experimental: false,
         },
         ScanTarget {
             source: "hkma".into(),
@@ -234,6 +247,7 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
             threshold: Some(15.0),
             field_b: None,
             companion: None,
+            experimental: false,
         },
         ScanTarget {
             source: "hkma".into(),
@@ -243,6 +257,7 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
             threshold: Some(10.0),
             field_b: None,
             companion: None,
+            experimental: false,
         },
         ScanTarget {
             source: "press".into(),
@@ -255,6 +270,7 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
                 source: "hkma".into(),
                 dataset: "daily-interbank-liquidity".into(),
             }),
+            experimental: false,
         },
     ]
 }
