@@ -376,6 +376,12 @@ All data endpoints are under `/v1` (configurable via `api.api_prefix`).
 | `GET` | `/v1/silence-index?period=` | **HKMA Silence Index v1** — a 0–100 opacity score ("how much did HKGOV not explain this period"), built deterministically from cross-source gaps + unattributed moves (v7) |
 | `GET` | `/v1/unprecedentedness?source=&dataset=&field=&value=&k=` | **Unprecedentedness Score** — percentile rank, normal-range band, 1-in-N return period, and "last exceeded" comparator for a value against its history (v7) |
 | `GET` | `/v1/insights/{id}/cite?format=&base_url=` | **Cite-It** — a stable permalink + citation strings (BibTeX/RIS/APA/Chicago/Markdown) + a CI-reproducibility manifest (SHA-256 over the evidence) so a citation never false-claims reproducibility (v7) |
+| `GET` | `/v1/insights?since=&lang=` | **Lifeline** — insights, optionally filtered to what's new since a timestamp; `?lang=zh-HK` selects deterministic zh-HK summaries (v8) |
+| `GET` | `/v1/insights/{id}/history` | Prior versions of an insight — the evolution history (v8) |
+| `GET` | `/v1/signals` · `POST /v1/signals` | **Signal Subscriptions** — author a detector watch; preview shows what it would have fired (v8) |
+| `POST` | `/v1/signals/preview` | Run a compiled scan target against the last 90 days — the "preview IS what will fire" call (v8) |
+| `POST` | `/v1/investigations` · `/v1/investigations/{id}/steps` | **Drill-In Investigations** — saved, resumable, shareable case files from any insight (v8) |
+| `POST` | `/v1/auth/request-token` · `/v1/auth/redeem` · `GET /v1/auth/me` | **Identity Tier** — email + magic-link; the principal for per-user state (v8) |
 | `GET` | `/v1/alerts?limit=` | Proactive alert dispatch log (v6) |
 | `POST` | `/v1/ask` | Natural-language Q&A over the data (v6) |
 
@@ -544,6 +550,7 @@ examples/      Python API client
 | **v5** Public surface | ✅ | Insights dashboard, examples, CONTRIBUTING |
 | **v6** Intelligence & agentic | ✅ | richer detectors, tool belt, agent loop, `/ask` NL Q&A, proactive alerting |
 | **v7** Product layer | ✅ | **Silence Index** (opacity, quantified — the flagship) + **Unprecedentedness Score** (historical rarity) + **Cite-It** (citation-grade export w/ reproducibility manifest); first features from the PM strategy |
+| **v8** Product layer II | ✅ | **Insight Lifeline** (evolution tracking) + **Signal Subscriptions** (NL authoring + preview) + **Drill-In Investigations** (case files) + **Bilingual** (zh-HK) + **Identity Tier** (magic-link) + `threshold_crossing` scheduler wiring |
 
 Full detail, including the remaining/future work, in
 [docs/ROADMAP.md](docs/ROADMAP.md).

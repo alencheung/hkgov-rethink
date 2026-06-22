@@ -5,6 +5,54 @@ All notable changes to this project are documented here. The format is based on
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for its
 public API surface (the HTTP API + the `hkgov-py` client).
 
+## [v8] — 2026-06-22 — Product layer: Lifeline + Signals + Investigations + Bilingual + Identity
+
+> Completes the PM strategy feature set (P-100..P-108). All 8 planned features
+> are now implemented; the remaining gaps from the strategy tracker are
+> dashboard UI work (which composes against these APIs) + the Postgres
+> persistence tier (roadmap).
+
+### Added
+- **P-104 Insight Lifeline** — evolution-aware `InsightStore::upsert`. The store
+  now detects content changes on re-fire: a changed severity/title/summary/
+  confidence/producer produces an `EvolutionDiff`, bumps the version, and
+  archives the prior version to a history store. Content-stable re-fires are
+  now no-ops (fixes a prior bug where every pass churned `generated_at`). New
+  `first_seen`, `version`, `evolution` fields on `Insight` (all `serde-default`).
+  `GET /v1/insights?since=` (the "what's new since you left" filter) +
+  `GET /v1/insights/{id}/history`. (`crates/agent/src/insight.rs`)
+- **P-102 Signal Subscriptions** — a `Signal` is a user-owned `ScanTarget` plus
+  channel routing. v1 ships authoring + preview (stateless). `preview_signal`
+  runs the real detector against the last 90 days so "preview IS what will
+  fire" — the determinism guarantee holds. Routes: `POST /signals`,
+  `POST /signals/preview`, `GET/PATCH/DELETE /signals/{id}`.
+  (`crates/agent/src/signal.rs`)
+- **P-105 Drill-In Investigation** — saved, resumable, shareable case files.
+  From any insight, a user launches a multi-step investigation; each step
+  (chip/qa/finding_promotion) is persisted. Routes: `POST /investigations`,
+  `GET/DELETE /investigations/{id}`, `POST /investigations/{id}/steps`,
+  `POST /investigations/{id}/notes`. (`crates/agent/src/investigation.rs`)
+- **P-106 Bilingual Surface** — zh-HK insight summaries via a deterministic
+  re-framer (`frame_zh_hk`) keyed by detector kind. No LLM, no scheduler change.
+  `?lang=zh-HK` on `GET /v1/insights` selects the localized summary.
+  (`crates/agent/src/bilingual.rs`)
+- **P-108 Identity Tier** — email + magic-link identity. `POST /auth/request-
+  token` issues a one-time token (provisioning the `User` idempotently);
+  `POST /auth/redeem` exchanges it for a session; `GET /auth/me` resolves
+  `Authorization: Bearer`. The `User.id` is the principal the per-user features
+  key on as `owner`. (`crates/agent/src/identity.rs`)
+
+### Fixed (critical)
+- **`detect_threshold_crossing` was unreachable from the scheduler.** It existed
+  and was tested but had no match arm in `run_one_target` — hard-blocked the
+  flagship P-102 use case ("tell me when HIBOR breaks 2.5%"). Now wired, with a
+  new `direction` field on `ScanTarget` (above/below, defaults above).
+
+### Tests
+- +42 tests since v7 (8 lifeline + 6 signal + 7 investigation + 9 bilingual +
+  8 identity + 4 threshold-crossing). Workspace total 136 → **178**, all
+  passing. clippy + fmt clean.
+
 ## [v7] — 2026-06-22 — Product layer: Silence Index + Unprecedentedness + Cite-It
 
 > First features shipped from the PM/UX strategy

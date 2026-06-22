@@ -202,6 +202,7 @@
 | 5 (second independent re-audit) | 88 | 85 | 0 | 0 | 0 | 3 |
 | **6 (P-100/P-103 product layer)** | **99** | **99** | **0** | **0** | **0** | **3** |
 | **7 (P-101 Cite-It)** | **107** | **107** | **0** | **0** | **0** | **3** |
+| **8 (P-102/P-104/P-105/P-106/P-108 + threshold fix)** | **149** | **149** | **0** | **0** | **0** | **3** |
 
 **Phase 2 failures (3) → all fixed in Phase 3:** F-006 (D-001 tag filter),
 F-067 (D-002 brief hero), F-084 (D-003 empty prefix panic).
@@ -270,7 +271,7 @@ Defect details: [DEFECTS.md](DEFECTS.md).
 |------|--------|
 | `cargo build --release -p hkgov-api` | ✅ clean |
 | `cargo build --release -p hkgov-api --features alerts,llm` | ✅ clean |
-| `cargo test --workspace` | ✅ **136 passed**, 0 failed (+15 for P-101: 10 cite + 5 route) |
+| `cargo test --workspace` | ✅ **178 passed**, 0 failed (+88 since v6: P-100..P-108 + threshold fix) |
 | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ no warnings |
 | `cargo fmt --all -- --check` | ✅ clean |
 | Python `pytest tests/` | ✅ 14 passed |
