@@ -396,13 +396,21 @@ struct InsightsQuery {
 async fn list_insights(
     State(state): State<AppState>,
     Query(q): Query<InsightsQuery>,
-) -> Json<Vec<hkgov_agent::Insight>> {
+) -> Result<Json<Vec<hkgov_agent::Insight>>, ApiError> {
     let lang = hkgov_agent::Language::parse(q.lang.as_deref());
+    // D-007: a present-but-unparseable `since` is a client error, not a silent
+    // fallback to the full list. Previously a typo like `?since=banana`
+    // returned every insight as if "everything is new since banana" —
+    // misleading and a potential surprise leak surface. Now it 400s with a
+    // message naming the bad value and the accepted formats.
     let mut insights = if let Some(s) = q.since.as_deref().filter(|s| !s.is_empty()) {
-        if let Ok(ts) = parse_since(s) {
-            state.insights.list_since(q.limit, ts).await
-        } else {
-            state.insights.list(q.limit).await
+        match parse_since(s) {
+            Ok(ts) => state.insights.list_since(q.limit, ts).await,
+            Err(()) => {
+                return Err(ApiError(hkgov_common::Error::BadRequest(format!(
+                    "invalid `since` value: {s:?} (expected RFC 3339 datetime or epoch seconds)"
+                ))));
+            }
         }
     } else {
         state.insights.list(q.limit).await
@@ -413,7 +421,7 @@ async fn list_insights(
             i.summary = hkgov_agent::select_summary(i, lang);
         }
     }
-    Json(insights)
+    Ok(Json(insights))
 }
 
 /// Parse a `since` query value: RFC 3339 datetime, or epoch seconds.
@@ -499,7 +507,13 @@ struct CiteQuery {
     #[serde(default)]
     format: Option<String>,
     /// The public base URL for the permalink (e.g. `https://example.com`).
-    /// Defaults to the request's `Host` header origin, then `http://localhost:8080`.
+    /// When omitted, the permalink falls back to `http://localhost:8080`.
+    ///
+    /// D-008 note: this does NOT auto-derive from the request's `Host` header
+    /// — behind a reverse proxy the `Host`/`X-Forwarded-Host` semantics are
+    /// operator-specific, so we require the caller to pass the intended public
+    /// origin explicitly. If you deploy behind a proxy, set this per-request
+    /// (or wrap the route) rather than relying on header inference.
     #[serde(default)]
     base_url: Option<String>,
 }
@@ -646,6 +660,16 @@ async fn unprecedentedness(
 // re-scan, outbound HTTP) waits on P-108 (identity). The `owner` field is the
 // pseudo-identity `X-Reader-Id` header (client-generated UUID) until real auth
 // lands — matches the current shared-key trust model.
+//
+// ⚠️ D-009 (known risk, waived for v1 by design): `owner` is a *filter*, not
+// an *ACL*. Any caller holding the shared API key can list (`?owner=` empty →
+// all owners), read, update, or delete any other user's signals and
+// investigations. This is the documented "shared-key trust model" — every keyed
+// caller is mutually trusting. Before multi-tenant deployment, the owner must
+// become an enforced principal: derive `owner` from the authenticated session
+// (not the request body) and reject cross-owner mutations. Tracked as a risk,
+// not fixed here, because the v1 auth model intentionally has a single trust
+// domain.
 
 #[derive(Deserialize)]
 struct CreateSignalRequest {
@@ -1136,6 +1160,63 @@ mod tests {
         assert!(has_ask, "root should advertise POST /v1/ask");
         // Touch `json!` so the import isn't flagged unused.
         let _ = json!({"x": 1});
+    }
+
+    // ---- D-007: bad `?since=` must 400, not silently fall back -----------
+    //
+    // Before D-007, an unparseable `since` (e.g. `?since=banana`) silently
+    // returned the FULL unfiltered insight list — misleading and a surprise
+    // leak surface. The handler now returns 400 BadRequest naming the bad value.
+
+    #[tokio::test]
+    async fn d007_bad_since_returns_400() {
+        let state = test_state().await;
+        let q = InsightsQuery {
+            limit: 10,
+            since: Some("banana".into()),
+            lang: None,
+        };
+        let result = list_insights(State(state), Query(q)).await;
+        assert!(result.is_err(), "bad since must error, not fall back");
+        let err = result.unwrap_err();
+        assert_eq!(err.0.status_code(), 400, "bad since → 400");
+    }
+
+    #[tokio::test]
+    async fn d007_valid_rfc3339_since_still_works() {
+        let state = test_state().await;
+        let q = InsightsQuery {
+            limit: 10,
+            since: Some("2026-01-01T00:00:00Z".into()),
+            lang: None,
+        };
+        // Must NOT error — valid RFC3339 is accepted.
+        let result = list_insights(State(state), Query(q)).await;
+        assert!(result.is_ok(), "valid RFC3339 since must not 400");
+    }
+
+    #[tokio::test]
+    async fn d007_epoch_seconds_since_still_works() {
+        let state = test_state().await;
+        let q = InsightsQuery {
+            limit: 10,
+            since: Some("1717200000".into()),
+            lang: None,
+        };
+        let result = list_insights(State(state), Query(q)).await;
+        assert!(result.is_ok(), "epoch-seconds since must not 400");
+    }
+
+    #[tokio::test]
+    async fn d007_no_since_still_works() {
+        let state = test_state().await;
+        let q = InsightsQuery {
+            limit: 10,
+            since: None,
+            lang: None,
+        };
+        let result = list_insights(State(state), Query(q)).await;
+        assert!(result.is_ok(), "no since must not 400");
     }
 
     // ---- /sources filtering + /categories ---------------------------------

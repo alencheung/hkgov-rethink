@@ -290,10 +290,18 @@ fn record_after(rec: &hkgov_common::NormalizedRecord, cutoff: DateTime<Utc>) -> 
     true // unparseable → keep
 }
 
-/// The detector dispatch for preview. Mirrors the scheduler's `run_one_target`
-/// match for the self-contained detectors (no companion needed). Kept here
-/// rather than calling the scheduler's private fn so this module is testable
-/// in isolation.
+/// The detector dispatch for preview. **Must mirror the scheduler's
+/// `run_one_target` match exactly** — the determinism invariant (the module's
+/// raison d'être) is "preview IS what will fire". D-006 was precisely that this
+/// had drifted: preview called the unscaled `detect_series_jumps` while the
+/// scheduler called the cadence-scaled `detect_series_jumps_cadenced`, so a
+/// quarterly/monthly signal preview lied about its fire set.
+///
+/// The rule: every self-contained detector arm here calls the *same* function
+/// the scheduler does, with the *same* threshold-defaulting and the *same*
+/// cadence/comparison arguments. Companion detectors (`cross_source_gap`,
+/// `proxy_divergence`, `benchmark_deviation`) aren't previewable here because
+/// they need a second dataset loaded — they return empty (documented).
 fn run_detector_preview(
     source: DataSource,
     target: &ScanTarget,
@@ -319,13 +327,55 @@ fn run_detector_preview(
                 direction,
             )
         }
-        "series_jump" => detect_series_jumps(source, &target.dataset, records, field, {
-            if threshold > 0.0 {
-                threshold
+        "series_jump" => {
+            // D-006 fix: mirror the scheduler. The scheduler routes a YoY-
+            // comparison `series_jump` to `detect_year_over_year` and otherwise
+            // uses the cadence-scaled `detect_series_jumps_cadenced`. Previewing
+            // the unscaled `detect_series_jumps` made quarterly/monthly signals
+            // report a different fire set than production.
+            if matches!(target.comparison, hkgov_common::Comparison::YearOverYear) {
+                let ppy = target.cadence.periods_per_year().round() as usize;
+                detect_year_over_year(
+                    source,
+                    &target.dataset,
+                    records,
+                    field,
+                    if threshold > 0.0 {
+                        threshold
+                    } else {
+                        DEFAULT_PCT_THRESHOLD
+                    },
+                    ppy.max(1),
+                )
             } else {
-                25.0
+                let t = if threshold > 0.0 { threshold } else { 25.0 };
+                detect_series_jumps_cadenced(
+                    source,
+                    &target.dataset,
+                    records,
+                    field,
+                    t,
+                    target.cadence,
+                )
             }
-        }),
+        }
+        "year_over_year" => {
+            // D-006 fix (second half): this arm was missing entirely, so YoY
+            // signals returned an empty preview regardless of data.
+            let ppy = target.cadence.periods_per_year().round() as usize;
+            detect_year_over_year(
+                source,
+                &target.dataset,
+                records,
+                field,
+                if threshold > 0.0 {
+                    threshold
+                } else {
+                    DEFAULT_PCT_THRESHOLD
+                },
+                ppy.max(1),
+            )
+        }
         "outlier" => detect_outliers(
             source,
             &target.dataset,
@@ -435,6 +485,170 @@ mod tests {
         let b = preview_signal(&store, &target, 90).await;
         assert_eq!(a.count, b.count);
         assert_eq!(a.fired_on, b.fired_on);
+    }
+
+    // ---- D-006 regression: preview MUST equal production detection ---------
+    //
+    // The signal module's whole contract is "preview IS what will fire"
+    // (see the module doc). D-006 broke this for `series_jump` on non-Unknown
+    // cadences: preview called the unscaled detector, production called the
+    // cadence-scaled one. This test asserts the fix by calling BOTH the preview
+    // dispatch AND the cadenced detector on identical inputs and requiring
+    // identical findings. A regression here means the two paths drifted again.
+
+    /// Build records for a `+pct%` jump between two consecutive periods.
+    fn jump_records(from: f64, pct: f64) -> Vec<NormalizedRecord> {
+        let to = from * (1.0 + pct / 100.0);
+        vec![rec("2026-Q1", "v", from), rec("2026-Q2", "v", to)]
+    }
+
+    #[test]
+    fn d006_quarterly_series_jump_preview_matches_production() {
+        // +35% jump, base threshold 25%, QUARTERLY cadence.
+        // - Cadenced (production) effective threshold = 25 * sqrt(12/4) = 43.3%,
+        //   so 35% does NOT fire → production must report 0 findings.
+        // - Before D-006 fix, preview used the unscaled 25% and reported 1.
+        let records = jump_records(100.0, 35.0);
+        let target = ScanTarget {
+            source: "hkma".into(),
+            dataset: "x".into(),
+            detector: "series_jump".into(),
+            field: Some("v".into()),
+            threshold: Some(25.0),
+            cadence: Cadence::Quarterly,
+            comparison: Comparison::PeriodOverPeriod,
+            ..Default::default()
+        };
+        // Production path (what the scheduler runs).
+        let prod = crate::analysis::detect_series_jumps_cadenced(
+            DataSource::Hkma,
+            "x",
+            &records,
+            "v",
+            25.0,
+            Cadence::Quarterly,
+        );
+        // Preview path (what preview_signal runs).
+        let prev = run_detector_preview(DataSource::Hkma, &target, &records);
+        assert_eq!(
+            prod.len(),
+            prev.len(),
+            "D-006: preview ({} findings) must equal production ({}) for quarterly series_jump",
+            prev.len(),
+            prod.len()
+        );
+        assert!(
+            prev.is_empty(),
+            "D-006: 35% jump under a 43.3% quarterly threshold must NOT fire in preview"
+        );
+    }
+
+    #[test]
+    fn d006_monthly_series_jump_preview_matches_production() {
+        // +30% jump, base 25%, MONTHLY → scale sqrt(12/12)=1.0 → eff 25% → fires.
+        // (Monthly is the no-op scaling case, but it still must match exactly.)
+        let records = jump_records(100.0, 30.0);
+        let target = ScanTarget {
+            source: "hkma".into(),
+            dataset: "x".into(),
+            detector: "series_jump".into(),
+            field: Some("v".into()),
+            threshold: Some(25.0),
+            cadence: Cadence::Monthly,
+            comparison: Comparison::PeriodOverPeriod,
+            ..Default::default()
+        };
+        let prod = crate::analysis::detect_series_jumps_cadenced(
+            DataSource::Hkma,
+            "x",
+            &records,
+            "v",
+            25.0,
+            Cadence::Monthly,
+        );
+        let prev = run_detector_preview(DataSource::Hkma, &target, &records);
+        assert_eq!(prod.len(), prev.len());
+        assert_eq!(prev.len(), 1, "30% > 25% monthly threshold → fires");
+    }
+
+    #[test]
+    fn d006_unknown_cadence_preview_matches_production() {
+        // Unknown cadence: scaling is a no-op (factor 1.0), so preview and prod
+        // agree trivially. Guards that the fix didn't break the default path.
+        let records = jump_records(100.0, 30.0);
+        let target = ScanTarget {
+            source: "hkma".into(),
+            dataset: "x".into(),
+            detector: "series_jump".into(),
+            field: Some("v".into()),
+            threshold: Some(25.0),
+            cadence: Cadence::Unknown,
+            comparison: Comparison::PeriodOverPeriod,
+            ..Default::default()
+        };
+        let prod = crate::analysis::detect_series_jumps_cadenced(
+            DataSource::Hkma,
+            "x",
+            &records,
+            "v",
+            25.0,
+            Cadence::Unknown,
+        );
+        let prev = run_detector_preview(DataSource::Hkma, &target, &records);
+        assert_eq!(prod.len(), prev.len());
+        assert_eq!(prev.len(), 1);
+    }
+
+    #[test]
+    fn d006_yoy_series_jump_preview_runs() {
+        // The YoY-comparison `series_jump` arm was missing from preview entirely
+        // before D-006. With enough periods it must now delegate to
+        // detect_year_over_year and surface a finding, not silently return empty.
+        //
+        // detect_year_over_year needs series.len() >= periods_per_year + MIN_YOY_SAMPLES.
+        // For QUARTERLY (ppy=4, MIN_YOY_SAMPLES=4) that's >= 8 records. We build
+        // 8 quarters where Q4 of year 2 is +50% over Q4 of year 1 (idx 7 vs idx 3).
+        let mut records = Vec::new();
+        let baseline = [100.0, 102.0, 101.0, 100.0]; // year 1, quarters 1-4
+        let year2 = [103.0, 101.0, 102.0, 150.0]; // year 2: Q4 jumps +50% vs year1 Q4
+        for (q, v) in baseline.iter().enumerate() {
+            records.push(rec(&format!("2025-Q{}", q + 1), "v", *v));
+        }
+        for (q, v) in year2.iter().enumerate() {
+            records.push(rec(&format!("2026-Q{}", q + 1), "v", *v));
+        }
+        let target = ScanTarget {
+            source: "hkma".into(),
+            dataset: "x".into(),
+            detector: "series_jump".into(),
+            field: Some("v".into()),
+            threshold: Some(15.0),
+            cadence: Cadence::Quarterly,
+            comparison: Comparison::YearOverYear,
+            ..Default::default()
+        };
+        let prev = run_detector_preview(DataSource::Hkma, &target, &records);
+        // Cross-check against the production detector directly.
+        let prod = crate::analysis::detect_year_over_year(
+            DataSource::Hkma,
+            "x",
+            &records,
+            "v",
+            15.0,
+            4, // quarterly
+        );
+        assert_eq!(
+            prev.len(),
+            prod.len(),
+            "D-006: YoY series_jump preview must match production (prev={}, prod={})",
+            prev.len(),
+            prod.len()
+        );
+        assert!(
+            !prev.is_empty(),
+            "D-006: +50% YoY jump must surface a finding in preview"
+        );
+        assert_eq!(prev[0].kind, "year_over_year");
     }
 
     #[test]
