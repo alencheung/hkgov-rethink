@@ -88,6 +88,11 @@ impl Finding {
             generated_at: Utc::now(),
             producer: producer.to_string(),
             experimental,
+            // P-104 Lifeline: the store overrides these on upsert
+            // (first_seen is set to now, version to 1, evolution to None).
+            first_seen: None,
+            version: 1,
+            evolution: None,
         }
     }
 }

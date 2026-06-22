@@ -295,6 +295,12 @@ pub struct ScanTarget {
     /// line); it does NOT change detection. Defaults to `false`.
     #[serde(default)]
     pub experimental: bool,
+    /// For `threshold_crossing`: the direction to watch. `"above"` = fire when
+    /// the value exceeds `threshold`; `"below"` = fire when it drops under.
+    /// Any other value (or unset) defaults to `"above"`. Kept as a string (not
+    /// the agent crate's `CrossDirection` enum) to avoid a common→agent dep.
+    #[serde(default)]
+    pub direction: Option<String>,
 }
 
 /// The "other side" of a `cross_source_gap` comparison.
@@ -326,6 +332,7 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
             companion_field: None,
             join_field: None,
             experimental: false,
+            direction: None,
         },
         ScanTarget {
             source: "hkma".into(),
@@ -340,6 +347,7 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
             companion_field: None,
             join_field: None,
             experimental: false,
+            direction: None,
         },
         ScanTarget {
             source: "hkma".into(),
@@ -354,6 +362,7 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
             companion_field: None,
             join_field: None,
             experimental: false,
+            direction: None,
         },
         ScanTarget {
             source: "press".into(),
@@ -371,6 +380,7 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
             companion_field: None,
             join_field: None,
             experimental: false,
+            direction: None,
         },
     ]
 }

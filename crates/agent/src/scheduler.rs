@@ -17,8 +17,9 @@ use crate::alerts::AlertDispatcher;
 use crate::analysis::{
     detect_benchmark_deviation, detect_correlation, detect_cross_source_gaps, detect_outliers,
     detect_proxy_divergence, detect_seasonality, detect_series_jumps_cadenced,
-    detect_year_over_year, Finding, DEFAULT_CORRELATION_R, DEFAULT_OUTLIER_Z,
-    DEFAULT_PCT_THRESHOLD, DEFAULT_PROXY_DELTA_PCT, DEFAULT_PROXY_R, DEFAULT_SEASONALITY_R,
+    detect_threshold_crossing, detect_year_over_year, CrossDirection, Finding,
+    DEFAULT_CORRELATION_R, DEFAULT_OUTLIER_Z, DEFAULT_PCT_THRESHOLD, DEFAULT_PROXY_DELTA_PCT,
+    DEFAULT_PROXY_R, DEFAULT_SEASONALITY_R,
 };
 use crate::insight::{Insight, InsightStore};
 use crate::llm::LlmClient;
@@ -285,6 +286,23 @@ async fn run_one_target(
                 } else {
                     DEFAULT_CORRELATION_R
                 },
+            )
+        }
+        "threshold_crossing" => {
+            // v7 wiring (P-102 prerequisite): the detector existed but was
+            // unreachable from the scheduler. Required a `direction` on the
+            // scan target; default to "above" (the watch-level case).
+            let direction = match target.direction.as_deref() {
+                Some("below") => CrossDirection::Below,
+                _ => CrossDirection::Above,
+            };
+            detect_threshold_crossing(
+                source,
+                &target.dataset,
+                &page.records,
+                field,
+                threshold,
+                direction,
             )
         }
         other => {
@@ -705,10 +723,129 @@ mod tests {
         assert_eq!(insights.list(10).await[0].kind, "cross_source_gap");
     }
 
-    /// Sanity: the error import isn't dead (keeps clippy happy about the
+    /// Sanity: the error import isn't dead (keeps clippy happy at the
     /// `Error` re-export in the test module scope).
     #[test]
     fn error_type_is_in_scope() {
         let _e = Error::Internal("x".into());
+    }
+
+    /// v7 wiring (P-102 prerequisite): `detect_threshold_crossing` was
+    /// unreachable from the scheduler — this test proves the match arm now
+    /// routes to it. "HIBOR above 2.5" is the flagship signal-subscription
+    /// use case, so this MUST produce an insight.
+    #[tokio::test]
+    async fn threshold_crossing_target_fires_when_above() {
+        let scan = vec![ScanTarget {
+            source: "hkma".into(),
+            dataset: "daily-interbank-liquidity".into(),
+            detector: "threshold_crossing".into(),
+            field: Some("hibor_overnight".into()),
+            threshold: Some(2.5),
+            direction: Some("above".into()),
+            ..Default::default()
+        }];
+        let settings = settings_with_scan(scan);
+
+        let store = Arc::new(MemoryStore::new(100, 60));
+        seed(
+            &store,
+            vec![
+                rec("2026-06-17", "hibor_overnight", 2.0),
+                rec("2026-06-18", "hibor_overnight", 2.93), // crosses above 2.5
+            ],
+        )
+        .await;
+
+        let insights = Arc::new(InsightStore::new());
+        let llm = Arc::new(HeuristicClient::new());
+
+        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        assert_eq!(insights.count().await, 1);
+        assert_eq!(insights.list(10).await[0].kind, "threshold_crossing");
+    }
+
+    /// `below` direction: fires when the latest value drops under the watch line.
+    #[tokio::test]
+    async fn threshold_crossing_target_fires_when_below() {
+        let scan = vec![ScanTarget {
+            source: "hkma".into(),
+            dataset: "daily-interbank-liquidity".into(),
+            detector: "threshold_crossing".into(),
+            field: Some("hibor_overnight".into()),
+            threshold: Some(1.0),
+            direction: Some("below".into()),
+            ..Default::default()
+        }];
+        let settings = settings_with_scan(scan);
+
+        let store = Arc::new(MemoryStore::new(100, 60));
+        seed(
+            &store,
+            vec![
+                rec("2026-06-17", "hibor_overnight", 1.5),
+                rec("2026-06-18", "hibor_overnight", 0.8), // drops below 1.0
+            ],
+        )
+        .await;
+
+        let insights = Arc::new(InsightStore::new());
+        let llm = Arc::new(HeuristicClient::new());
+
+        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        assert_eq!(insights.count().await, 1);
+        assert_eq!(insights.list(10).await[0].kind, "threshold_crossing");
+    }
+
+    /// No crossing → no insight (the detector's negative-case contract).
+    #[tokio::test]
+    async fn threshold_crossing_target_silent_when_not_crossed() {
+        let scan = vec![ScanTarget {
+            source: "hkma".into(),
+            dataset: "daily-interbank-liquidity".into(),
+            detector: "threshold_crossing".into(),
+            field: Some("hibor_overnight".into()),
+            threshold: Some(5.0), // far above the data
+            direction: Some("above".into()),
+            ..Default::default()
+        }];
+        let settings = settings_with_scan(scan);
+
+        let store = Arc::new(MemoryStore::new(100, 60));
+        seed(&store, vec![rec("2026-06-18", "hibor_overnight", 2.0)]).await;
+
+        let insights = Arc::new(InsightStore::new());
+        let llm = Arc::new(HeuristicClient::new());
+
+        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        assert_eq!(insights.count().await, 0);
+    }
+
+    /// Direction defaults to "above" when unset (backward compat).
+    #[tokio::test]
+    async fn threshold_crossing_defaults_to_above() {
+        let scan = vec![ScanTarget {
+            source: "hkma".into(),
+            dataset: "daily-interbank-liquidity".into(),
+            detector: "threshold_crossing".into(),
+            field: Some("hibor_overnight".into()),
+            threshold: Some(2.5),
+            // direction deliberately unset
+            ..Default::default()
+        }];
+        let settings = settings_with_scan(scan);
+
+        let store = Arc::new(MemoryStore::new(100, 60));
+        seed(
+            &store,
+            vec![rec("2026-06-18", "hibor_overnight", 3.0)], // above 2.5
+        )
+        .await;
+
+        let insights = Arc::new(InsightStore::new());
+        let llm = Arc::new(HeuristicClient::new());
+
+        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        assert_eq!(insights.count().await, 1);
     }
 }

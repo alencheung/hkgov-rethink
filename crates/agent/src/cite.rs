@@ -406,6 +406,9 @@ mod tests {
             generated_at: Utc.with_ymd_and_hms(2026, 6, 22, 12, 0, 0).unwrap(),
             producer: "test".into(),
             experimental,
+            first_seen: None,
+            version: 1,
+            evolution: None,
         }
     }
 
@@ -540,6 +543,9 @@ mod tests {
             generated_at: Utc::now(),
             producer: "test".into(),
             experimental: false,
+            first_seen: None,
+            version: 1,
+            evolution: None,
         };
         let c = build_citation(&ins, &[], "https://x", None);
         assert_eq!(c.manifest.threshold, Some(1.0));

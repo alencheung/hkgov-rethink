@@ -37,7 +37,10 @@ pub use alerts::{AlertDispatcher, AlertLog, AlertLogEntry, AlertSink};
 pub use alerts::{EmailSink, WebhookSink};
 pub use brief::{build_brief, Brief, BriefItem};
 pub use cite::{build_citation, Citation, CitationFormat, ReproducibilityManifest, CITE_VERSION};
-pub use insight::{Feedback, FeedbackStore, Insight, InsightSeverity, InsightStore};
+pub use insight::{
+    EvolutionDiff, Feedback, FeedbackStore, FieldChange, Insight, InsightRevision, InsightSeverity,
+    InsightStore,
+};
 #[cfg(feature = "llm")]
 pub use llm::HttpLlmClient;
 pub use llm::{AgentStep, HeuristicClient, LlmClient, LlmFraming, Message, ToolCall};

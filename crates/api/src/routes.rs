@@ -49,6 +49,7 @@ pub fn router(state: AppState) -> Router {
             post(submit_feedback).get(get_feedback),
         )
         .route("/insights/{id}/cite", get(cite_insight))
+        .route("/insights/{id}/history", get(insight_history))
         .route("/brief", get(get_brief))
         .route("/alerts", get(list_alerts))
         .route("/silence-index", get(silence_index))
@@ -122,6 +123,7 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
             "GET /v1/insights",
             "POST /v1/insights/{id}/feedback",
             "GET /v1/insights/{id}/cite",
+            "GET /v1/insights/{id}/history",
             "GET /v1/brief",
             "GET /v1/alerts",
             "GET /v1/silence-index",
@@ -343,13 +345,47 @@ async fn dataset_records(
 struct InsightsQuery {
     #[serde(default = "default_limit")]
     limit: usize,
+    /// P-104 Lifeline: when set (RFC 3339 or epoch seconds), only return
+    /// insights first-seen or evolved after this timestamp — the
+    /// "what's new since you left" filter.
+    #[serde(default)]
+    since: Option<String>,
 }
 
 async fn list_insights(
     State(state): State<AppState>,
     Query(q): Query<InsightsQuery>,
 ) -> Json<Vec<hkgov_agent::Insight>> {
+    if let Some(s) = q.since.as_deref().filter(|s| !s.is_empty()) {
+        if let Ok(ts) = parse_since(s) {
+            return Json(state.insights.list_since(q.limit, ts).await);
+        }
+    }
     Json(state.insights.list(q.limit).await)
+}
+
+/// Parse a `since` query value: RFC 3339 datetime, or epoch seconds.
+fn parse_since(s: &str) -> Result<chrono::DateTime<chrono::Utc>, ()> {
+    // Try RFC 3339 first.
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.with_timezone(&chrono::Utc));
+    }
+    // Fall back to epoch seconds.
+    if let Ok(secs) = s.parse::<i64>() {
+        if let Some(dt) = chrono::DateTime::from_timestamp(secs, 0) {
+            return Ok(dt);
+        }
+    }
+    Err(())
+}
+
+/// P-104 Lifeline: `GET /v1/insights/{id}/history` — the prior versions of one
+/// insight, newest-first. Powers the case-file "evolved" diff view.
+async fn insight_history(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<Vec<hkgov_agent::InsightRevision>> {
+    Json(state.insights.history(&id, 50).await)
 }
 
 // ---- GET /brief — the daily brief (product layer) -------------------------
@@ -1067,6 +1103,9 @@ mod tests {
             generated_at: chrono::Utc::now(),
             producer: "test".into(),
             experimental: false,
+            first_seen: None,
+            version: 1,
+            evolution: None,
         };
         insights.upsert(gap).await;
 
@@ -1317,6 +1356,9 @@ mod tests {
             generated_at: chrono::Utc::now(),
             producer: "test".into(),
             experimental: false,
+            first_seen: None,
+            version: 1,
+            evolution: None,
         };
         insights.upsert(insight).await;
 

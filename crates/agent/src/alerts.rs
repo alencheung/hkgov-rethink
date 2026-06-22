@@ -414,6 +414,9 @@ mod tests {
             generated_at: Utc::now(),
             producer: "test".into(),
             experimental: false,
+            first_seen: None,
+            version: 1,
+            evolution: None,
         }
     }
 
