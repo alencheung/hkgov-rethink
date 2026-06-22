@@ -270,7 +270,10 @@
         return;
       }
       document.getElementById('briefCount').textContent = `(${b.items.length})`;
-      el.innerHTML = b.items.map(it => insightCard(it.insight, true)).join('');
+      // BriefItem flattens the Insight fields (severity/title/evidence/…) to the
+      // top level alongside `rank`/`score` (see brief.rs #[serde(flatten)]), so
+      // pass the item itself to insightCard — not a non-existent `.insight`.
+      el.innerHTML = b.items.map(it => insightCard(it, true)).join('');
     }
 
     // ---- insights feed (severity-filtered) ----

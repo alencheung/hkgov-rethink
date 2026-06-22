@@ -10,6 +10,8 @@ from .client import HkGov, HkGovError
 from .models import (
     AlertLogEntry,
     Answer,
+    Brief,
+    BriefItem,
     CategoryGroup,
     DatasetMeta,
     Insight,
@@ -26,6 +28,8 @@ __all__ = [
     "HkGovError",
     "Answer",
     "AlertLogEntry",
+    "Brief",
+    "BriefItem",
     "CategoryGroup",
     "DatasetMeta",
     "EvidenceRef",

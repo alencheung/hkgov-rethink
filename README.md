@@ -288,8 +288,17 @@ Enable the AI agent (heuristic mode, no API key needed):
 HKGOV_AGENT__ENABLED=true cargo run -p hkgov-api
 ```
 
-Then open [dashboard/index.html](dashboard/index.html) in a browser (point it at
-`http://localhost:8080`) to see live source health + AI-generated insights.
+Then open the dashboard in a browser — it's served by the API itself, so
+there's nothing to open as a file:
+
+```
+http://localhost:8080/dashboard      # the live insights dashboard
+```
+
+(The dashboard is also available as the static file
+[dashboard/index.html](dashboard/index.html) if you prefer; point its base-URL
+field at `http://localhost:8080`.) You'll see live source health + AI-generated
+insights.
 
 ---
 
@@ -347,6 +356,7 @@ All data endpoints are under `/v1` (configurable via `api.api_prefix`).
 |---|---|---|
 | `GET` | `/` | Service name, version, and an endpoint directory |
 | `GET` | `/health` | Liveness probe (`{status, version}`) |
+| `GET` | `/dashboard` | The static insights dashboard (served by the API; exempt from API-key auth) |
 | `GET` | `/v1/health/sources` | Per-source circuit-breaker state (closed/open/half-open) |
 | `GET` | `/v1/sources?category=&tag=&cadence=&source=&q=` | Datasets, filterable by domain/category, tags, cadence, and free text (v8) |
 | `GET` | `/v1/categories` | The domain taxonomy with dataset counts — the browse entry point (v8) |
@@ -362,8 +372,11 @@ All data endpoints are under `/v1` (configurable via `api.api_prefix`).
 **Dataset categories** (v8): every dataset declares exactly one of
 `monetary`, `fiscal`, `property`, `trade`, `population`, `livability`,
 `government`, `other` — plus free-form `tags` and a `cadence`. Filter with
-`?category=monetary&tag=hibor&cadence=daily&q=interbank`; see
-[EXAMPLES.md](EXAMPLES.md) and `GET /v1/categories` for the browse entry point.
+`?category=monetary&tag=hibor&cadence=daily&q=interbank`. The `tag` filter
+accepts a single tag (`?tag=hibor`), repeated tags
+(`?tag=hibor&tag=liquidity`, matches ANY), or comma-separated
+(`?tag=hibor,liquidity`). See [EXAMPLES.md](EXAMPLES.md) and
+`GET /v1/categories` for the browse entry point.
 
 When `api.api_key` is set, every `/v1` request must carry it via the
 `X-API-Key` header or `?api_key=` query param.

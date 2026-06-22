@@ -16,6 +16,7 @@ use crate::error::ApiError;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::middleware::from_fn;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use hkgov_agent::{heuristic_answer, run_agent_loop, Answer, HeuristicClient, LlmClient, ToolBelt};
@@ -60,14 +61,29 @@ pub fn router(state: AppState) -> Router {
 
     // Root routes (stateless root info + LB-probe health), with the versioned
     // API nested under the prefix.
+    //
+    // When a prefix is set (the default `/v1`), we mount a root `/health` for
+    // LB/k8s probes and a `/` directory, then nest the API under the prefix.
+    // When the prefix is empty, the API routes merge into the root — and since
+    // `api_routes` already defines `/health`, we must NOT add a second root
+    // `/health` here or axum panics with "Overlapping method route".
+    //
+    // `/dashboard` serves the static insights dashboard (embedded at compile
+    // time via include_str!) so the binary — and the Docker image — are
+    // self-contained: open http://host:port/dashboard in a browser. It is
+    // exempt from API-key auth (a static asset, not data).
     let router = Router::new()
         .route("/", get(root))
-        .route("/health", get(health));
-
+        .route("/dashboard", get(dashboard))
+        .route("/dashboard/", get(dashboard));
     let router = if prefix.is_empty() {
+        // api_routes already carries `/health`; merge brings it to root.
         router.merge(api_routes)
     } else {
-        router.nest(&format!("/{prefix}"), api_routes)
+        // Nested: root `/health` for probes, api_routes under /{prefix}.
+        router
+            .route("/health", get(health))
+            .nest(&format!("/{prefix}"), api_routes)
     };
 
     router
@@ -94,6 +110,7 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
         version: env!("CARGO_PKG_VERSION"),
         endpoints: &[
             "GET /health",
+            "GET /dashboard",
             "GET /v1/health/sources",
             "GET /v1/sources",
             "GET /v1/categories",
@@ -106,6 +123,18 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
             "POST /v1/ask",
         ],
     })
+}
+
+/// Serve the static insights dashboard. The HTML is embedded at compile time
+/// (`include_str!`) so the deployed binary — and the Docker image — carry it
+/// with no external file dependency. Open `http://host:port/dashboard`.
+async fn dashboard(State(_): State<AppState>) -> axum::response::Response {
+    const HTML: &str = include_str!("../../../dashboard/index.html");
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        axum::response::Html(HTML),
+    )
+        .into_response()
 }
 
 #[derive(Serialize)]
@@ -144,16 +173,20 @@ async fn health_sources(State(state): State<AppState>) -> Json<Vec<SourceHealth>
 
 /// Query params for `/sources`. All optional; omitted = no filter. Filters
 /// compose with AND across dimensions; `tag` is repeated (matches ANY tag).
+///
+/// Note: `tag` is intentionally NOT a field here. `serde_urlencoded` (axum's
+/// `Query` extractor) rejects both a lone `?tag=hibor` ("expected a sequence"
+/// for `Vec<String>`) and a repeated `?tag=a&tag=b` ("duplicate field") for any
+/// type — so any `tag` field on this struct breaks one or both forms. Instead
+/// `tag` is parsed straight off the raw query string in [`DatasetFilter::tags`],
+/// which handles all three forms: single (`?tag=hibor`), repeated
+/// (`?tag=a&tag=b`), and comma-separated (`?tag=a,b`).
 #[derive(Deserialize, Default)]
 struct DatasetFilter {
     #[serde(default)]
     source: Option<String>,
     #[serde(default)]
     category: Option<String>,
-    /// Repeated query param: `?tag=hibor&tag=interest-rate`. A dataset matches
-    /// if it carries ANY of the listed tags.
-    #[serde(default)]
-    tag: Vec<String>,
     #[serde(default)]
     cadence: Option<String>,
     /// Free-text substring (case-insensitive) over title + description + id.
@@ -161,7 +194,34 @@ struct DatasetFilter {
     q: Option<String>,
 }
 
-fn dataset_matches(meta: &hkgov_common::DatasetMeta, f: &DatasetFilter) -> bool {
+impl DatasetFilter {
+    /// Resolve the effective tag list straight from the raw query string.
+    /// Handles all three documented forms:
+    /// - single: `?tag=hibor`
+    /// - repeated: `?tag=hibor&tag=liquidity`
+    /// - comma-separated: `?tag=hibor,liquidity`
+    fn tags(&self, raw_query: Option<&str>) -> Vec<String> {
+        let mut tags: Vec<String> = Vec::new();
+        if let Some(q) = raw_query {
+            for pair in q.split('&') {
+                let mut it = pair.splitn(2, '=');
+                if it.next() == Some("tag") {
+                    if let Some(v) = it.next() {
+                        for t in v.split(',') {
+                            let t = t.trim();
+                            if !t.is_empty() {
+                                tags.push(t.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        tags
+    }
+}
+
+fn dataset_matches(meta: &hkgov_common::DatasetMeta, f: &DatasetFilter, tags: &[String]) -> bool {
     if let Some(ref cat) = f.category {
         if hkgov_common::Category::parse(cat) != Some(meta.category) {
             return false;
@@ -173,7 +233,7 @@ fn dataset_matches(meta: &hkgov_common::DatasetMeta, f: &DatasetFilter) -> bool 
             return false;
         }
     }
-    if !f.tag.is_empty() && !f.tag.iter().any(|t| meta.tags.iter().any(|mt| mt == t)) {
+    if !tags.is_empty() && !tags.iter().any(|t| meta.tags.iter().any(|mt| mt == t)) {
         return false;
     }
     if let Some(ref q) = f.q {
@@ -195,11 +255,13 @@ fn dataset_matches(meta: &hkgov_common::DatasetMeta, f: &DatasetFilter) -> bool 
 async fn list_sources(
     State(state): State<AppState>,
     Query(f): Query<DatasetFilter>,
+    raw: axum::extract::RawQuery,
 ) -> Result<Json<Vec<hkgov_common::DatasetMeta>>, ApiError> {
     let source = f.source.as_deref().and_then(DataSource::parse);
+    let tags = f.tags(raw.0.as_deref());
     let mut all = state.store.list(source).await?;
-    if f.category.is_some() || !f.tag.is_empty() || f.cadence.is_some() || f.q.is_some() {
-        all.retain(|m| dataset_matches(m, &f));
+    if f.category.is_some() || !tags.is_empty() || f.cadence.is_some() || f.q.is_some() {
+        all.retain(|m| dataset_matches(m, &f, &tags));
     }
     Ok(Json(all))
 }
@@ -567,9 +629,13 @@ mod tests {
     #[tokio::test]
     async fn sources_returns_all_when_no_filter() {
         let state = multi_state().await;
-        let resp = list_sources(State(state), Query(DatasetFilter::default()))
-            .await
-            .unwrap();
+        let resp = list_sources(
+            State(state),
+            Query(DatasetFilter::default()),
+            axum::extract::RawQuery(None),
+        )
+        .await
+        .unwrap();
         assert_eq!(resp.0.len(), 3);
     }
 
@@ -580,7 +646,9 @@ mod tests {
             category: Some("monetary".into()),
             ..Default::default()
         };
-        let resp = list_sources(State(state), Query(f)).await.unwrap();
+        let resp = list_sources(State(state), Query(f), axum::extract::RawQuery(None))
+            .await
+            .unwrap();
         assert_eq!(resp.0.len(), 2);
         assert!(resp
             .0
@@ -591,25 +659,43 @@ mod tests {
     #[tokio::test]
     async fn sources_filters_by_tag() {
         let state = multi_state().await;
-        // hibor only matches one.
-        let f = DatasetFilter {
-            tag: vec!["hibor".into()],
-            ..Default::default()
-        };
-        let resp = list_sources(State(state), Query(f)).await.unwrap();
+        // Single ?tag=hibor — the form that 400'd before the D-001 fix.
+        let resp = list_sources(
+            State(state),
+            Query(DatasetFilter::default()),
+            axum::extract::RawQuery(Some("tag=hibor".into())),
+        )
+        .await
+        .unwrap();
         assert_eq!(resp.0.len(), 1);
         assert_eq!(resp.0[0].dataset, "daily-interbank-liquidity");
     }
 
     #[tokio::test]
-    async fn sources_tag_matches_any() {
+    async fn sources_tag_matches_any_repeated() {
         let state = multi_state().await;
-        // hibor OR licensing → 2 datasets.
-        let f = DatasetFilter {
-            tag: vec!["hibor".into(), "licensing".into()],
-            ..Default::default()
-        };
-        let resp = list_sources(State(state), Query(f)).await.unwrap();
+        // Repeated ?tag=hibor&tag=licensing → ANY match → 2 datasets.
+        let resp = list_sources(
+            State(state),
+            Query(DatasetFilter::default()),
+            axum::extract::RawQuery(Some("tag=hibor&tag=licensing".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn sources_tag_matches_any_comma() {
+        let state = multi_state().await;
+        // Comma-separated ?tag=hibor,licensing → ANY match → 2 datasets.
+        let resp = list_sources(
+            State(state),
+            Query(DatasetFilter::default()),
+            axum::extract::RawQuery(Some("tag=hibor,licensing".into())),
+        )
+        .await
+        .unwrap();
         assert_eq!(resp.0.len(), 2);
     }
 
@@ -620,7 +706,9 @@ mod tests {
             cadence: Some("monthly".into()),
             ..Default::default()
         };
-        let resp = list_sources(State(state), Query(f)).await.unwrap();
+        let resp = list_sources(State(state), Query(f), axum::extract::RawQuery(None))
+            .await
+            .unwrap();
         assert_eq!(resp.0.len(), 1);
         assert_eq!(resp.0[0].dataset, "capital-market-statistics");
     }
@@ -632,7 +720,9 @@ mod tests {
             q: Some("interbank".into()),
             ..Default::default()
         };
-        let resp = list_sources(State(state), Query(f)).await.unwrap();
+        let resp = list_sources(State(state), Query(f), axum::extract::RawQuery(None))
+            .await
+            .unwrap();
         assert_eq!(resp.0.len(), 1);
         assert_eq!(resp.0[0].dataset, "daily-interbank-liquidity");
     }
@@ -646,7 +736,9 @@ mod tests {
             cadence: Some("daily".into()),
             ..Default::default()
         };
-        let resp = list_sources(State(state), Query(f)).await.unwrap();
+        let resp = list_sources(State(state), Query(f), axum::extract::RawQuery(None))
+            .await
+            .unwrap();
         assert_eq!(resp.0.len(), 1);
         assert_eq!(resp.0[0].dataset, "daily-interbank-liquidity");
     }
@@ -658,7 +750,9 @@ mod tests {
             category: Some("nonsense".into()),
             ..Default::default()
         };
-        let resp = list_sources(State(state), Query(f)).await.unwrap();
+        let resp = list_sources(State(state), Query(f), axum::extract::RawQuery(None))
+            .await
+            .unwrap();
         assert!(resp.0.is_empty());
     }
 
@@ -680,5 +774,96 @@ mod tests {
             .find(|g| g.category == "fiscal")
             .expect("fiscal group");
         assert_eq!(fiscal.count, 1);
+    }
+
+    // ---- empty-prefix routing (D-003 regression guard) ---------------------
+    //
+    // When `api.api_prefix` is empty the versioned API routes must merge to the
+    // root (no `/v1` segment) WITHOUT panicking on the duplicate `/health`. This
+    // integration test drives the full `router()` through axum's `ServiceExt`
+    // so it exercises the real route table — not just the handler fns — and
+    // locks down every reachable path. A regression here means the merge branch
+    // silently dropped routes (the failure mode the original D-003 fix risked).
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    /// Send a GET through a built router and return the status code.
+    async fn get_status(router: axum::Router, path: &str) -> u16 {
+        let resp = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status().as_u16();
+        // Drain the body so the connection is fully consumed.
+        let _ = resp.into_body().collect().await;
+        status
+    }
+
+    async fn state_for_routing() -> AppState {
+        // Reuse the multi-dataset state so /sources has something to return.
+        multi_state().await
+    }
+
+    /// Rebuild an AppState with a different `api_prefix`. The settings live
+    /// behind an `Arc`, so we replace the whole field rather than mutate.
+    fn with_prefix(mut state: AppState, prefix: &str) -> AppState {
+        let mut settings = (*state.settings).clone();
+        settings.api.api_prefix = prefix.into();
+        state.settings = Arc::new(settings);
+        state
+    }
+
+    #[tokio::test]
+    async fn empty_prefix_mounts_all_routes_at_root() {
+        let state = with_prefix(state_for_routing().await, "");
+        let app = router(state);
+
+        // Every API route must resolve at root (no /v1), and the static
+        // dashboard + root directory must still be reachable.
+        for path in [
+            "/",
+            "/dashboard",
+            "/health",
+            "/health/sources",
+            "/sources",
+            "/categories",
+            "/insights",
+            "/brief",
+            "/alerts",
+            "/datasets/hkma/daily-interbank-liquidity",
+            "/datasets/hkma/daily-interbank-liquidity/records",
+        ] {
+            assert_eq!(
+                get_status(app.clone(), path).await,
+                200,
+                "empty-prefix: {path} should be 200 at root"
+            );
+        }
+        // And the prefixed path must NOT exist (prefix is empty).
+        assert_eq!(
+            get_status(app.clone(), "/v1/sources").await,
+            404,
+            "empty-prefix: /v1/sources must be 404 (no prefix)"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_prefix_nests_routes_under_v1() {
+        // Symmetric guard: the default `/v1` prefix must keep routes under /v1.
+        let state = with_prefix(state_for_routing().await, "/v1");
+        let app = router(state);
+
+        assert_eq!(get_status(app.clone(), "/v1/sources").await, 200);
+        assert_eq!(get_status(app.clone(), "/v1/insights").await, 200);
+        assert_eq!(get_status(app.clone(), "/health").await, 200);
+        assert_eq!(get_status(app.clone(), "/dashboard").await, 200);
+        // Without the prefix, the API routes are NOT at root.
+        assert_eq!(get_status(app.clone(), "/sources").await, 404);
     }
 }

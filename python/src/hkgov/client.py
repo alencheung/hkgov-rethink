@@ -9,6 +9,8 @@ import requests
 from .models import (
     AlertLogEntry,
     Answer,
+    Brief,
+    BriefItem,
     CategoryGroup,
     DatasetMeta,
     EvidenceRef,
@@ -172,6 +174,42 @@ class HkGov:
     def insights(self, limit: int = 20) -> list[Insight]:
         d = self._get("/insights", params={"limit": limit})
         return [self._insight(x) for x in d]
+
+    def brief(self, limit: int = 5) -> Brief:
+        """The ranked daily brief — the top items worth knowing about today.
+
+        Items flatten the insight fields onto themselves (mirroring the API's
+        ``#[serde(flatten)]``); this method re-nests them under ``.insight`` so
+        each ``BriefItem`` exposes both ``rank``/``score`` and the full Insight.
+        """
+        d = self._get("/brief", params={"limit": limit})
+        items = [
+            BriefItem(
+                rank=x["rank"],
+                score=float(x["score"]),
+                insight=self._insight(x),
+            )
+            for x in d.get("items", [])
+        ]
+        return Brief(generated_at=d.get("generated_at", ""), items=items)
+
+    def feedback(self, insight_id: str, useful: bool, note: Optional[str] = None) -> None:
+        """Record was-this-useful feedback on an insight (the success metric).
+
+        Args:
+            insight_id: The insight id (URL-encoded for you).
+            useful: True = useful, False = not useful.
+            note: Optional free-text reason (especially for "not useful").
+        """
+        body: dict[str, Any] = {"useful": useful}
+        if note is not None:
+            body["note"] = note
+        self._post(f"/insights/{insight_id}/feedback", body)
+
+    def feedback_score(self, insight_id: str) -> int:
+        """Net usefulness (up − down) for an insight."""
+        d = self._get(f"/insights/{insight_id}/feedback")
+        return int(d.get("net_useful", 0))
 
     def alerts(self, limit: int = 20) -> list[AlertLogEntry]:
         d = self._get("/alerts", params={"limit": limit})

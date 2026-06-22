@@ -76,6 +76,22 @@ class Insight:
     confidence: float
     generated_at: str
     producer: str
+    experimental: bool = False
+
+
+@dataclass(frozen=True)
+class BriefItem:
+    rank: int
+    score: float
+    # The insight fields are flattened into the item (serde flatten), so they
+    # are spread onto BriefItem itself via the client factory.
+    insight: Insight
+
+
+@dataclass(frozen=True)
+class Brief:
+    generated_at: str
+    items: list[BriefItem]
 
 
 @dataclass(frozen=True)
