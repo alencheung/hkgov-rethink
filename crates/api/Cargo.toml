@@ -36,3 +36,5 @@ serde_json.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
+http-body-util = "0.1"
+tower.workspace = true

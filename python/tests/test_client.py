@@ -82,6 +82,18 @@ SAMPLE_ALERTS = [
         "dispatched_at": "2026-06-21T00:00:00Z",
     }
 ]
+# A brief item flattens the insight fields onto the top level alongside
+# rank/score (mirrors the Rust BriefItem #[serde(flatten)]).
+SAMPLE_BRIEF = {
+    "generated_at": "2026-06-21T00:00:00Z",
+    "items": [
+        {
+            "rank": 1,
+            "score": 100.0,
+            **SAMPLE_INSIGHTS[0],
+        }
+    ],
+}
 
 
 def _client(**kw) -> HkGov:
@@ -211,3 +223,42 @@ def test_api_key_header_sent() -> None:
     responses.add(responses.GET, f"{BASE}{PREFIX}/sources", json=[], status=200)
     _client(api_key="secret").sources()
     assert responses.calls[-1].request.headers.get("X-API-Key") == "secret"
+
+
+@responses.activate
+def test_brief_re_nests_flattened_insight() -> None:
+    responses.add(responses.GET, f"{BASE}{PREFIX}/brief", json=SAMPLE_BRIEF, status=200)
+    brief = _client().brief(limit=5)
+    assert brief.generated_at == "2026-06-21T00:00:00Z"
+    assert len(brief.items) == 1
+    item = brief.items[0]
+    assert item.rank == 1
+    assert item.score == 100.0
+    # The flattened insight fields are re-nested under .insight.
+    assert item.insight.severity == "critical"
+    assert item.insight.title.startswith("hibor_overnight")
+    assert len(item.insight.evidence) == 2
+
+
+@responses.activate
+def test_feedback_posts_and_reads_score() -> None:
+    insight_id = SAMPLE_INSIGHTS[0]["id"]
+    responses.add(
+        responses.POST,
+        f"{BASE}{PREFIX}/insights/{insight_id}/feedback",
+        json={"recorded": True},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        f"{BASE}{PREFIX}/insights/{insight_id}/feedback",
+        json={"insight_id": insight_id, "net_useful": 1},
+        status=200,
+    )
+    c = _client()
+    c.feedback(insight_id, useful=True, note="great catch")
+    # The POST body must carry useful + note.
+    sent_body = responses.calls[0].request.body
+    assert b'"useful": true' in sent_body
+    assert b'"note": "great catch"' in sent_body
+    assert c.feedback_score(insight_id) == 1
