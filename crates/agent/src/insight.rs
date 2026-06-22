@@ -103,6 +103,13 @@ impl InsightStore {
         r.values().rev().take(limit).cloned().collect()
     }
 
+    /// Look up one insight by id. Returns `None` if unknown. Used by the cite
+    /// route (`GET /v1/insights/{id}/cite`) and (later) by the permalink landing.
+    pub async fn get(&self, id: &str) -> Option<Insight> {
+        let r = self.inner.read().await;
+        r.get(id).cloned()
+    }
+
     pub async fn count(&self) -> usize {
         self.inner.read().await.len()
     }

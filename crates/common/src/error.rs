@@ -29,6 +29,14 @@ pub enum Error {
     #[error("unknown data source: {0}")]
     UnknownSource(String),
 
+    /// The requested resource (e.g. an insight id) does not exist.
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    /// The request was malformed (bad query param, unsupported format, etc.).
+    #[error("bad request: {0}")]
+    BadRequest(String),
+
     /// Cache / store miss or backing failure.
     #[error("store error: {0}")]
     Store(String),
@@ -52,7 +60,8 @@ impl Error {
     /// Convenience for the HTTP layer: rough status code mapping.
     pub fn status_code(&self) -> u16 {
         match self {
-            Error::UnknownSource(_) => 404,
+            Error::UnknownSource(_) | Error::NotFound(_) => 404,
+            Error::BadRequest(_) => 400,
             Error::Upstream { .. } | Error::Store(_) => 502,
             Error::Agent(_) => 502,
             Error::Decode { .. } => 502,

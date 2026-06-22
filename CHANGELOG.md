@@ -5,6 +5,52 @@ All notable changes to this project are documented here. The format is based on
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for its
 public API surface (the HTTP API + the `hkgov-py` client).
 
+## [v7] — 2026-06-22 — Product layer: Silence Index + Unprecedentedness + Cite-It
+
+> First features shipped from the PM/UX strategy
+> (`docs/PM_STRATEGY/`): the highest-RICE, fully self-contained features
+> that compose from existing deterministic detectors and need no
+> identity/persistence infrastructure.
+
+### Added
+- **Silence Index (P-100, RICE 12,000)** — the flagship. A versioned, HKMA-scoped
+  `0–100` opacity score ("how much did HKGOV not explain this period") built as a
+  pure-Rust rollup of `cross_source_gap` + unattributed `series_jump` +
+  missing-data days. Methodology v1.0; weights + the half-saturation squash
+  constant are centralized so a methodology bump is a one-line change. New
+  endpoint `GET /v1/silence-index?period=2026-Q2`. The determinism guarantee is
+  the defense against "your opacity score is biased": critics reproduce it from
+  the evidence. (`crates/agent/src/silence.rs`)
+- **Unprecedentedness Score (P-103, RICE 10,667)** — the historical-rarity layer.
+  Scores a numeric value against its own stored history: percentile rank, a
+  `median ± k·MAD` "normal range" band, a 1-in-N return period, and the most
+  recent prior exceedance ("last time this happened was ___"). New endpoint
+  `GET /v1/unprecedentedness?source=hkma&dataset=…&field=…&value=…`. Composes
+  from the same MAD math the `outlier` detector uses. (`crates/agent/src/unprecedentedness.rs`)
+- **Cite-It (P-101, RICE 4,000)** — the citation/reproducibility moat. From any
+  insight → a stable permalink + citation strings (BibTeX/RIS/APA/Chicago/Markdown)
+  + a `ReproducibilityManifest` whose SHA-256 content hash detects upstream data
+  drift (so a citation never false-claims reproducibility). New endpoint
+  `GET /v1/insights/{id}/cite[?format=…&base_url=…]`. Experimental findings carry
+  an honesty marker in every rendered string. (`crates/agent/src/cite.rs`)
+
+### Added (infrastructure)
+- `InsightStore::get(id)` — by-id insight lookup (powers `/cite`; P-104 will
+  reuse it for the permalink landing + evolution tracking).
+- `Error::NotFound` (404) + `Error::BadRequest` (400) — two common error variants
+  with status-code + `kind_for` mappings.
+
+### Tests
+- +46 tests since v6 (31 for P-100/P-103 + 15 for P-101). Workspace total
+  90 → **136**, all passing. clippy + fmt clean across all feature combinations.
+
+### Documentation
+- New `FEATURES_TRACKER.md` section J (F-089 → F-107) covers all three features
+  with expected-behaviour specs and the unit/route tests backing each.
+- PM strategy docs (`docs/PM_STRATEGY/`) are the design rationale; this entry is
+  the shipped implementation of its R1.3 (P-103), R2.3 (P-101) and R2.4 (P-100)
+  rows.
+
 ## [v6] — 2026-06-21 — Intelligence & agentic analysis layer
 
 ### Added

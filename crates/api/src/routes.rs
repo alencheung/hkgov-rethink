@@ -48,8 +48,11 @@ pub fn router(state: AppState) -> Router {
             "/insights/{id}/feedback",
             post(submit_feedback).get(get_feedback),
         )
+        .route("/insights/{id}/cite", get(cite_insight))
         .route("/brief", get(get_brief))
         .route("/alerts", get(list_alerts))
+        .route("/silence-index", get(silence_index))
+        .route("/unprecedentedness", get(unprecedentedness))
         .route("/ask", post(ask));
 
     if let Some(key) = api_key {
@@ -118,8 +121,11 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
             "GET /v1/datasets/{source}/{dataset}/records",
             "GET /v1/insights",
             "POST /v1/insights/{id}/feedback",
+            "GET /v1/insights/{id}/cite",
             "GET /v1/brief",
             "GET /v1/alerts",
+            "GET /v1/silence-index",
+            "GET /v1/unprecedentedness",
             "POST /v1/ask",
         ],
     })
@@ -390,6 +396,78 @@ async fn get_feedback(
     Json(serde_json::json!({ "insight_id": id, "net_useful": net }))
 }
 
+// ---- GET /insights/{id}/cite — citation-grade export (P-101) ---------------
+//
+// From any insight, build a citation bundle: a stable permalink, citation
+// strings in BibTeX/RIS/APA/Chicago/Markdown, and a reproducibility manifest
+// (detector + threshold + a SHA-256 content hash over the evidence). The hash
+// is the drift detector: recompute against current data and if it differs, the
+// manifest won't match — so a citation never false-claims reproducibility.
+
+#[derive(Deserialize, Default)]
+struct CiteQuery {
+    /// Optional citation format. When set, the response is a `text/plain`
+    /// rendered string (e.g. `?format=bibtex`); otherwise the full bundle JSON.
+    #[serde(default)]
+    format: Option<String>,
+    /// The public base URL for the permalink (e.g. `https://example.com`).
+    /// Defaults to the request's `Host` header origin, then `http://localhost:8080`.
+    #[serde(default)]
+    base_url: Option<String>,
+}
+
+async fn cite_insight(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<CiteQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    // Look up the insight. InsightStore::get is the by-id accessor (P-101 adds it).
+    let Some(insight) = state.insights.get(&id).await else {
+        return Err(ApiError(hkgov_common::Error::NotFound(id)));
+    };
+    // Pull the evidence records from the store to compute the content hash.
+    let dataset_id = DatasetId::new(insight.source, insight.dataset.clone());
+    let page = state.store.get_page(&dataset_id, 0, 500).await?;
+    let records = page.records;
+    let base_url = q
+        .base_url
+        .unwrap_or_else(|| "http://localhost:8080".to_string());
+    let citation = hkgov_agent::build_citation(
+        &insight,
+        &records,
+        &base_url,
+        Some(env!("CARGO_PKG_VERSION")),
+    );
+
+    // If a format is requested, render and return as text/plain; else JSON.
+    use axum::http::header::CONTENT_TYPE;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    if let Some(fmt_str) = q.format {
+        let fmt = match fmt_str.to_ascii_lowercase().as_str() {
+            "bibtex" => hkgov_agent::CitationFormat::Bibtex,
+            "ris" => hkgov_agent::CitationFormat::Ris,
+            "apa" => hkgov_agent::CitationFormat::Apa,
+            "chicago" => hkgov_agent::CitationFormat::Chicago,
+            "markdown" | "md" => hkgov_agent::CitationFormat::Markdown,
+            _ => {
+                return Err(ApiError(hkgov_common::Error::BadRequest(format!(
+                    "unknown citation format: {fmt_str} (try bibtex|ris|apa|chicago|markdown)"
+                ))))
+            }
+        };
+        let body = citation.render(fmt);
+        Ok((
+            StatusCode::OK,
+            [(CONTENT_TYPE, "text/plain; charset=utf-8")],
+            body,
+        )
+            .into_response())
+    } else {
+        Ok(Json(citation).into_response())
+    }
+}
+
 // ---- GET /alerts — proactive dispatch log ---------------------------------
 
 async fn list_alerts(
@@ -397,6 +475,80 @@ async fn list_alerts(
     Query(q): Query<InsightsQuery>,
 ) -> Json<Vec<hkgov_agent::AlertLogEntry>> {
     Json(state.alert_log.recent(q.limit))
+}
+
+// ---- GET /silence-index — government opacity, quantified (P-100) -----------
+//
+// Productizes the project's thesis: a 0–100 score for "how much did HKGOV not
+// explain this period", built purely from existing deterministic findings
+// (cross_source_gap + unattributed series_jump + missing-data days). No LLM,
+// no API key — the determinism guarantee is the defense against "your opacity
+// score is biased": critics can reproduce it from the evidence.
+//
+// v1 is HKMA-scoped (see silence.rs `COVERED_SOURCE`); widens as data.gov.hk
+// coverage expands without a methodology bump.
+
+#[derive(Deserialize, Default)]
+struct SilenceIndexQuery {
+    /// Period key like "2026-Q2". Empty/omitted = the latest complete quarter
+    /// derivable from the held insights (falls back to "" = all history).
+    #[serde(default)]
+    period: Option<String>,
+}
+
+async fn silence_index(
+    State(state): State<AppState>,
+    Query(q): Query<SilenceIndexQuery>,
+) -> Json<hkgov_agent::SilenceIndex> {
+    let period = q.period.unwrap_or_default();
+    let idx = hkgov_agent::build_silence_index(&state.insights, &period, chrono::Utc::now()).await;
+    Json(idx)
+}
+
+// ---- GET /unprecedentedness — how rare is this value? (P-103) --------------
+//
+// Scores a numeric value against its own stored history: percentile rank, a
+// median ± k·MAD "normal range" band, a 1-in-N return period, and the most
+// recent prior exceedance ("last time this happened"). Pure Rust over the
+// warmed cache; composes from the same MAD math the `outlier` detector uses.
+
+#[derive(Deserialize)]
+struct UnprecedentednessQuery {
+    /// The dataset to read history from, e.g. `hkma/daily-interbank-liquidity`.
+    source: String,
+    dataset: String,
+    /// The numeric field whose history defines "normal".
+    field: String,
+    /// The value to score (the current observation).
+    value: f64,
+    /// Optional band multiplier (defaults to 3.5, matching the outlier z).
+    #[serde(default)]
+    k: Option<f64>,
+}
+
+async fn unprecedentedness(
+    State(state): State<AppState>,
+    Query(q): Query<UnprecedentednessQuery>,
+) -> Result<Json<hkgov_agent::Unprecedentedness>, ApiError> {
+    let source = parse_source(&q.source)?;
+    let id = DatasetId::new(source, q.dataset.clone());
+    // Pull the full history (cap at the page size the store supports; the
+    // 90-day default window is well inside it).
+    let page = state.store.get_page(&id, 0, 500).await?;
+    let k = q.k.unwrap_or(hkgov_agent::DEFAULT_BAND_K);
+    // History = all field values in chronological order.
+    let history: Vec<f64> = page
+        .records
+        .iter()
+        .filter_map(|r| match r.fields.get(&q.field)? {
+            hkgov_common::RecordValue::Float(f) => Some(*f),
+            hkgov_common::RecordValue::Int(i) => Some(*i as f64),
+            _ => None,
+        })
+        .collect();
+    let records = page.records;
+    let read = hkgov_agent::score_unprecedentedness(q.value, &history, &records, &q.field, k);
+    Ok(Json(read))
 }
 
 // ---- POST /ask — natural-language Q&A -------------------------------------
@@ -805,6 +957,20 @@ mod tests {
         status
     }
 
+    /// Read the full body of a handler-produced `Response` into a UTF-8 string.
+    /// Used by the cite route tests, which need to inspect the rendered JSON /
+    /// text body (the handler returns `Response`, not `Json`).
+    async fn body_string(resp: axum::response::Response) -> String {
+        use http_body_util::BodyExt;
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("body collects")
+            .to_bytes();
+        String::from_utf8(bytes.to_vec()).expect("body is utf-8")
+    }
+
     async fn state_for_routing() -> AppState {
         // Reuse the multi-dataset state so /sources has something to return.
         multi_state().await
@@ -865,5 +1031,419 @@ mod tests {
         assert_eq!(get_status(app.clone(), "/dashboard").await, 200);
         // Without the prefix, the API routes are NOT at root.
         assert_eq!(get_status(app.clone(), "/sources").await, 404);
+    }
+
+    // ---- /silence-index (P-100) -------------------------------------------
+    //
+    // The flagship: a deterministic 0–100 opacity score built from existing
+    // findings. These tests guard the HTTP surface; the scoring math is unit-
+    // tested in crates/agent/src/silence.rs.
+
+    /// Build a state seeded with cross-source-gap + series-jump insights so the
+    /// silence index has something to score.
+    async fn silence_state() -> AppState {
+        let settings = Settings::default();
+        let registry = Arc::new(
+            hkgov_connectors::registry::Registry::build(&settings).expect("registry builds"),
+        );
+        let insights = Arc::new(hkgov_agent::InsightStore::new());
+
+        // A press-only cross_source_gap in 2026-Q2 (press release, no data row).
+        let gap = hkgov_agent::Insight {
+            id: "cross_source_gap:hkma:x:1".into(),
+            kind: "cross_source_gap".into(),
+            severity: hkgov_agent::InsightSeverity::Info,
+            title: "gap".into(),
+            summary: "press release with no data row".into(),
+            source: DataSource::Hkma,
+            dataset: "x".into(),
+            evidence: vec![hkgov_agent::insight::EvidenceRef {
+                record_id: "2026-05-10".into(),
+                field: "date".into(),
+                value: json!("2026-05-10"),
+                context: Some("press release date without matching data".into()),
+            }],
+            confidence: 0.6,
+            generated_at: chrono::Utc::now(),
+            producer: "test".into(),
+            experimental: false,
+        };
+        insights.upsert(gap).await;
+
+        AppState {
+            registry,
+            store: Arc::new(hkgov_store::MemoryStore::new(10, 60)),
+            insights,
+            feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
+            llm: Arc::new(HeuristicClient::new()),
+            alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            settings: Arc::new(settings),
+        }
+    }
+
+    #[tokio::test]
+    async fn silence_index_returns_versioned_hkma_scoped_score() {
+        let state = silence_state().await;
+        let q = SilenceIndexQuery {
+            period: Some("2026-Q2".into()),
+        };
+        let idx = silence_index(State(state), Query(q)).await.0;
+        assert_eq!(idx.methodology_version, "1.0");
+        assert!(idx.label.contains("HKMA"), "label: {}", idx.label);
+        assert_eq!(idx.source, DataSource::Hkma);
+        assert_eq!(idx.period, "2026-Q2");
+        // One press-only gap → positive score.
+        assert!(idx.score > 0.0, "score should be > 0, got {}", idx.score);
+        assert!(idx.total_events > 0);
+        // Determinism: signals are populated + auditable.
+        assert!(!idx.signals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn silence_index_empty_when_no_insights() {
+        // A state with no insights → zero score, zero events.
+        let state = silence_state().await;
+        let empty_state = AppState {
+            insights: Arc::new(hkgov_agent::InsightStore::new()),
+            ..state
+        };
+        let q = SilenceIndexQuery {
+            period: Some("2026-Q2".into()),
+        };
+        let idx = silence_index(State(empty_state), Query(q)).await.0;
+        assert_eq!(idx.score, 0.0);
+        assert_eq!(idx.total_events, 0);
+    }
+
+    // ---- /unprecedentedness (P-103) ---------------------------------------
+
+    /// Build a state seeded with a numeric series long enough to define a band
+    /// (≥ MIN_HISTORY_POINTS = 12) and a spike at the end.
+    async fn unprecedentedness_state() -> AppState {
+        let settings = Settings::default();
+        let registry = Arc::new(
+            hkgov_connectors::registry::Registry::build(&settings).expect("registry builds"),
+        );
+        let store = Arc::new(hkgov_store::MemoryStore::new(20, 60));
+        let id = DatasetId::new(DataSource::Hkma, "daily-interbank-liquidity");
+        store
+            .register(
+                id.clone(),
+                "Daily Interbank Liquidity".into(),
+                None,
+                3600,
+                hkgov_common::Category::Monetary,
+                vec!["hibor".into()],
+                hkgov_common::Cadence::Daily,
+            )
+            .await;
+        // 12 in-band values (~10) + a spike of 100 at the end.
+        let mut recs: Vec<hkgov_common::NormalizedRecord> = Vec::new();
+        let vals = [
+            9.5_f64, 10.0, 9.8, 10.2, 10.1, 9.9, 10.3, 9.7, 10.1, 9.9, 10.2, 9.8, 100.0,
+        ];
+        for (i, v) in vals.iter().enumerate() {
+            recs.push(hkgov_common::NormalizedRecord {
+                source: DataSource::Hkma,
+                dataset: "daily-interbank-liquidity".into(),
+                record_id: format!("2026-{i:02}"),
+                fields: {
+                    let mut m = std::collections::BTreeMap::new();
+                    m.insert(
+                        "hibor_overnight".into(),
+                        hkgov_common::RecordValue::Float(*v),
+                    );
+                    m
+                },
+                fetched_at: chrono::Utc::now(),
+            });
+        }
+        store.put_dataset(&id, recs).await.unwrap();
+
+        AppState {
+            registry,
+            store,
+            insights: Arc::new(hkgov_agent::InsightStore::new()),
+            feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
+            llm: Arc::new(HeuristicClient::new()),
+            alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            settings: Arc::new(settings),
+        }
+    }
+
+    #[tokio::test]
+    async fn unprecedentedness_marks_spike_unprecedented() {
+        let state = unprecedentedness_state().await;
+        let q = UnprecedentednessQuery {
+            source: "hkma".into(),
+            dataset: "daily-interbank-liquidity".into(),
+            field: "hibor_overnight".into(),
+            value: 100.0,
+            k: None,
+        };
+        let u = unprecedentedness(State(state), Query(q)).await.unwrap().0;
+        assert!(u.is_unprecedented(), "100.0 should be unprecedented: {u:?}");
+        assert!(u.band.is_some());
+        assert!(u.percentile.unwrap() > 90.0);
+        assert!(u.one_in_n.unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn unprecedentedness_in_band_value_not_unprecedented() {
+        let state = unprecedentedness_state().await;
+        let q = UnprecedentednessQuery {
+            source: "hkma".into(),
+            dataset: "daily-interbank-liquidity".into(),
+            field: "hibor_overnight".into(),
+            value: 10.0,
+            k: None,
+        };
+        let u = unprecedentedness(State(state), Query(q)).await.unwrap().0;
+        assert!(!u.is_unprecedented(), "10.0 should be in-band: {u:?}");
+    }
+
+    #[tokio::test]
+    async fn unprecedentedness_unknown_source_errors() {
+        let state = unprecedentedness_state().await;
+        let q = UnprecedentednessQuery {
+            source: "not-a-source".into(),
+            dataset: "x".into(),
+            field: "f".into(),
+            value: 1.0,
+            k: None,
+        };
+        assert!(unprecedentedness(State(state), Query(q)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn unprecedentedness_is_deterministic() {
+        let state = unprecedentedness_state().await;
+        let mk = || {
+            Query(UnprecedentednessQuery {
+                source: "hkma".into(),
+                dataset: "daily-interbank-liquidity".into(),
+                field: "hibor_overnight".into(),
+                value: 10.5,
+                k: None,
+            })
+        };
+        let a = unprecedentedness(State(state.clone()), mk())
+            .await
+            .unwrap()
+            .0;
+        let b = unprecedentedness(State(state), mk()).await.unwrap().0;
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            serde_json::to_string(&b).unwrap(),
+        );
+    }
+
+    // ---- /insights/{id}/cite (P-101) --------------------------------------
+    //
+    // The citation moat: a permalink + citation strings + a reproducibility
+    // manifest whose SHA-256 detects upstream data drift. These tests guard the
+    // HTTP surface; the rendering + hash math is unit-tested in
+    // crates/agent/src/cite.rs.
+
+    /// Build a state with one stored insight + its evidence records, so the cite
+    /// route can look it up and compute the manifest hash.
+    async fn cite_state() -> AppState {
+        let settings = Settings::default();
+        let registry = Arc::new(
+            hkgov_connectors::registry::Registry::build(&settings).expect("registry builds"),
+        );
+        let store = Arc::new(hkgov_store::MemoryStore::new(10, 60));
+        let insights = Arc::new(hkgov_agent::InsightStore::new());
+
+        // Seed the dataset the insight points at, with its evidence records.
+        let id = DatasetId::new(DataSource::Hkma, "daily-interbank-liquidity");
+        store
+            .register(
+                id.clone(),
+                "Daily Interbank Liquidity".into(),
+                None,
+                3600,
+                hkgov_common::Category::Monetary,
+                vec!["hibor".into()],
+                hkgov_common::Cadence::Daily,
+            )
+            .await;
+        let mk_rec = |rid: &str, v: f64| hkgov_common::NormalizedRecord {
+            source: DataSource::Hkma,
+            dataset: "daily-interbank-liquidity".into(),
+            record_id: rid.into(),
+            fields: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert(
+                    "hibor_overnight".into(),
+                    hkgov_common::RecordValue::Float(v),
+                );
+                m
+            },
+            fetched_at: chrono::Utc::now(),
+        };
+        store
+            .put_dataset(
+                &id,
+                vec![mk_rec("2026-04-01", 1.0), mk_rec("2026-04-15", 2.0)],
+            )
+            .await
+            .unwrap();
+
+        // Store the insight that cites those records.
+        let insight = hkgov_agent::Insight {
+            id: "series_jump:hkma:daily-interbank-liquidity:test1".into(),
+            kind: "series_jump".into(),
+            severity: hkgov_agent::InsightSeverity::Warning,
+            title: "hibor_overnight moved +100%".into(),
+            summary: "s".into(),
+            source: DataSource::Hkma,
+            dataset: "daily-interbank-liquidity".into(),
+            evidence: vec![
+                hkgov_agent::insight::EvidenceRef {
+                    record_id: "2026-04-01".into(),
+                    field: "hibor_overnight".into(),
+                    value: json!(1.0),
+                    context: Some("previous period".into()),
+                },
+                hkgov_agent::insight::EvidenceRef {
+                    record_id: "2026-04-15".into(),
+                    field: "hibor_overnight".into(),
+                    value: json!(2.0),
+                    context: Some("current period".into()),
+                },
+            ],
+            confidence: 0.8,
+            generated_at: chrono::Utc::now(),
+            producer: "test".into(),
+            experimental: false,
+        };
+        insights.upsert(insight).await;
+
+        AppState {
+            registry,
+            store,
+            insights,
+            feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
+            llm: Arc::new(HeuristicClient::new()),
+            alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            settings: Arc::new(settings),
+        }
+    }
+
+    #[tokio::test]
+    async fn cite_returns_bundle_with_manifest() {
+        let state = cite_state().await;
+        let q = CiteQuery {
+            format: None,
+            base_url: Some("https://example.com".into()),
+        };
+        let resp = cite_insight(
+            State(state),
+            Path("series_jump:hkma:daily-interbank-liquidity:test1".into()),
+            Query(q),
+        )
+        .await
+        .unwrap();
+        let body = body_string(resp).await;
+        let v: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
+        assert_eq!(
+            v["insight_id"],
+            "series_jump:hkma:daily-interbank-liquidity:test1"
+        );
+        assert!(v["permalink"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://example.com/cite/"));
+        assert_eq!(v["manifest"]["detector"], "series_jump");
+        assert!(
+            v["manifest"]["data_sha256"].as_str().unwrap().len() == 64,
+            "sha256 hex is 64 chars"
+        );
+        assert_eq!(v["cite_version"], "1.0");
+    }
+
+    #[tokio::test]
+    async fn cite_renders_format_as_text() {
+        let state = cite_state().await;
+        let q = CiteQuery {
+            format: Some("bibtex".into()),
+            base_url: Some("https://example.com".into()),
+        };
+        let resp = cite_insight(
+            State(state),
+            Path("series_jump:hkma:daily-interbank-liquidity:test1".into()),
+            Query(q),
+        )
+        .await
+        .unwrap();
+        let body = body_string(resp).await;
+        assert!(body.starts_with("@misc{"), "bibtex body: {body}");
+        assert!(body.contains("howpublished"));
+    }
+
+    #[tokio::test]
+    async fn cite_unknown_insight_404s() {
+        let state = cite_state().await;
+        let q = CiteQuery::default();
+        let result = cite_insight(State(state), Path("does-not-exist".into()), Query(q)).await;
+        assert!(result.is_err(), "unknown insight should error");
+        let err = result.unwrap_err();
+        assert_eq!(err.0.status_code(), 404);
+    }
+
+    #[tokio::test]
+    async fn cite_bad_format_400s() {
+        let state = cite_state().await;
+        let q = CiteQuery {
+            format: Some("not-a-format".into()),
+            base_url: None,
+        };
+        let result = cite_insight(
+            State(state),
+            Path("series_jump:hkma:daily-interbank-liquidity:test1".into()),
+            Query(q),
+        )
+        .await;
+        assert!(result.is_err(), "bad format should error");
+        let err = result.unwrap_err();
+        assert_eq!(err.0.status_code(), 400);
+    }
+
+    #[tokio::test]
+    async fn cite_manifest_is_deterministic() {
+        let state = cite_state().await;
+        let mk = || {
+            (
+                State(state.clone()),
+                Query(CiteQuery {
+                    format: None,
+                    base_url: Some("https://x".into()),
+                }),
+            )
+        };
+        let (s, q) = mk();
+        let a = body_string(
+            cite_insight(
+                s,
+                Path("series_jump:hkma:daily-interbank-liquidity:test1".into()),
+                q,
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        let (s, q) = mk();
+        let b = body_string(
+            cite_insight(
+                s,
+                Path("series_jump:hkma:daily-interbank-liquidity:test1".into()),
+                q,
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(a, b, "same insight + records → byte-identical citation");
     }
 }

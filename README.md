@@ -23,6 +23,12 @@ against live HKGOV open data. Full verbatim output + evidence pointers:
 > no matching statistical data row (or vice versa) — the literal "press room
 > leaves it untold" signal, with the specific dates as evidence.
 
+> 🤫 **`GET /v1/silence-index` (v7):** those signals are now rolled up into a
+> single, versioned, citable number — *how much did HKMA not explain this
+> quarter?* Built deterministically from the cross-source gaps + unattributed
+> moves above, so the same critique anyone levels at the score can be checked
+> against the exact missing dates.
+
 **The determinism guarantee:** every number above is reproducible. Same data in,
 same findings out, **no API key required**. The LLM only frames results; detection
 is pure Rust. See [Architecture → The determinism guarantee](docs/ARCHITECTURE.md).
@@ -277,6 +283,9 @@ curl http://localhost:8080/health
 curl http://localhost:8080/v1/sources
 curl 'http://localhost:8080/v1/datasets/hkma/capital-market-statistics/records?limit=5'
 curl 'http://localhost:8080/v1/insights?limit=5'
+curl 'http://localhost:8080/v1/silence-index?period=2026-Q2'         # v7: opacity, quantified
+curl 'http://localhost:8080/v1/unprecedentedness?source=hkma&dataset=daily-interbank-liquidity&field=hibor_overnight&value=2.93'  # v7: how rare?
+curl 'http://localhost:8080/v1/insights/<id>/cite?format=bibtex'     # v7: cite a finding (reproduces in CI)
 curl -X POST http://localhost:8080/v1/ask \
   -H 'Content-Type: application/json' \
   -d '{"question":"what is the interbank liquidity?"}'
@@ -363,6 +372,10 @@ All data endpoints are under `/v1` (configurable via `api.api_prefix`).
 | `GET` | `/v1/datasets/{source}/{dataset}` | Metadata for one dataset |
 | `GET` | `/v1/datasets/{source}/{dataset}/records?offset=&limit=` | Paginated records from cache |
 | `GET` | `/v1/insights?limit=` | AI-agent generated insights with evidence |
+| `GET` | `/v1/brief?limit=` | Ranked daily brief — the top findings, scored & deduped |
+| `GET` | `/v1/silence-index?period=` | **HKMA Silence Index v1** — a 0–100 opacity score ("how much did HKGOV not explain this period"), built deterministically from cross-source gaps + unattributed moves (v7) |
+| `GET` | `/v1/unprecedentedness?source=&dataset=&field=&value=&k=` | **Unprecedentedness Score** — percentile rank, normal-range band, 1-in-N return period, and "last exceeded" comparator for a value against its history (v7) |
+| `GET` | `/v1/insights/{id}/cite?format=&base_url=` | **Cite-It** — a stable permalink + citation strings (BibTeX/RIS/APA/Chicago/Markdown) + a CI-reproducibility manifest (SHA-256 over the evidence) so a citation never false-claims reproducibility (v7) |
 | `GET` | `/v1/alerts?limit=` | Proactive alert dispatch log (v6) |
 | `POST` | `/v1/ask` | Natural-language Q&A over the data (v6) |
 
@@ -530,6 +543,7 @@ examples/      Python API client
 | **v4** Scale & hardening | ✅ | Postgres store, API auth + `/v1` versioning, OpenTelemetry, k6 harness |
 | **v5** Public surface | ✅ | Insights dashboard, examples, CONTRIBUTING |
 | **v6** Intelligence & agentic | ✅ | richer detectors, tool belt, agent loop, `/ask` NL Q&A, proactive alerting |
+| **v7** Product layer | ✅ | **Silence Index** (opacity, quantified — the flagship) + **Unprecedentedness Score** (historical rarity) + **Cite-It** (citation-grade export w/ reproducibility manifest); first features from the PM strategy |
 
 Full detail, including the remaining/future work, in
 [docs/ROADMAP.md](docs/ROADMAP.md).

@@ -159,6 +159,36 @@
 | F-087 | Python client | `pip install hkgov-py`; `HkGov(base).sources()` / `.ask()`. (`python/`) | install + run | ⚠️ partial — works except **D-001** (tag); missing brief()/feedback() methods | ✅ pass — **D-001 fixed** (tag works); `brief()`+`feedback()` added |
 | F-088 | Docker image | `docker build` → ~30MB distroless-slim; runs on :8080. (`Dockerfile`) | docker build/run | ⚠️ partial — builds; **D-004** dashboard copied but unserved | ✅ pass — **D-004 fixed**: dashboard served at `/dashboard` |
 
+## J. Product layer — Silence Index + Unprecedentedness (P-100 / P-103)
+
+> Implemented from the PM strategy (`docs/PM_STRATEGY/PRODUCT_STRATEGY_TRACKER.md`).
+> P-100 (RICE 12,000) is the flagship: government opacity, quantified. P-103
+> (RICE 10,667) is the historical-rarity layer. Both compose from existing
+> deterministic detectors — the determinism guarantee is preserved: same inputs
+> in → same output out, no LLM, no API key.
+
+| ID | Feature | Expected behaviour (from code) | How to verify | Phase 2 | Phase 4 |
+|----|---------|--------------------------------|---------------|---------|---------|
+| F-089 | `GET /v1/silence-index` | Returns versioned `SilenceIndex{label, methodology_version:"1.0", source:hkma, period, score:0-100, raw_score, signals[], total_events}`. Score is a pure-Rust rollup of `cross_source_gap` + unattributed `series_jump` + missing-data days, squashed to 0-100. (`routes.rs` `silence_index`, `agent/silence.rs`) | `curl 'localhost:8080/v1/silence-index?period=2026-Q2'` | ✅ pass — route test `silence_index_returns_versioned_hkma_scoped_score` | — |
+| F-090 | Silence Index v1 is HKMA-scoped | Per Phase-5 D-5: v1 explicitly covers `DataSource::Hkma` only; non-HKMA insights excluded; label = "HKMA Silence Index". Widens as data.gov.hk coverage expands without a methodology bump. (`silence.rs` `COVERED_SOURCE`) | route test `non_hkma_insights_excluded` | ✅ pass — unit-tested | — |
+| F-091 | Silence Index score construction | `raw_score = Σ(count × weight)`; weights: press-only gap 3, data-only gap 1, unattributed jump 5, missing-data day 2. Score = `100·(1 − 1/(1 + raw/40))`. (`silence.rs` `weights`, `squash`) | unit test `squash_is_monotonic_and_bounded` | ✅ pass — unit-tested | — |
+| F-092 | Silence Index methodology versioned | `METHODOLOGY_VERSION="1.0"`; a weight/squash/signal-set change bumps it so a v1.x score is never silently compared to v1.y. (`silence.rs`) | unit test asserts `methodology_version == "1.0"` | ✅ pass — unit-tested | — |
+| F-093 | Silence Index is deterministic | Same insights + period → byte-identical serialized output. (`silence.rs`) | unit test `determinism_same_inputs_same_output` | ✅ pass — unit-tested | — |
+| F-094 | Silence Index attributes jumps with same-day press | A `series_jump` whose current-period date also appears in a `cross_source_gap` insight is *attributed* → excluded from opacity. (`silence.rs` `has_same_day_press`) | unit test `attributed_jump_excluded_from_opacity` | ✅ pass — unit-tested | — |
+| F-095 | `GET /v1/unprecedentedness` | Returns `Unprecedentedness{value, percentile?, band?, one_in_n?, hist_min?, hist_max?, n, last_exceeded?}` for a `(source, dataset, field, value)` scored against stored history. Band hidden when `n < MIN_HISTORY_POINTS` (12). (`routes.rs` `unprecedentedness`, `agent/unprecedentedness.rs`) | `curl 'localhost:8080/v1/unprecedentedness?source=hkma&dataset=daily-interbank-liquidity&field=hibor_overnight&value=2.93'` | ✅ pass — route test `unprecedentedness_marks_spike_unprecedented` | — |
+| F-096 | Unprecedentedness band = median ± k·MAD | `NormalRange{low, median, high}` with k default 3.5 (matches the `outlier` detector's z-threshold so the two views agree). `None` for flat series (MAD=0). (`unprecedentedness.rs` `normal_range`) | unit test `band_none_for_flat_series` | ✅ pass — unit-tested | — |
+| F-097 | Unprecedentedness "last exceeded" comparator | Finds the most recent *prior* record outside the band → `LastExceeded{record_id, value, when?, pct_beyond_edge}`. Current point excluded. (`unprecedentedness.rs` `last_exceeded`) | unit test `last_exceeded_finds_prior_spike` | ✅ pass — unit-tested | — |
+| F-098 | Unprecedentedness is deterministic | Same history + value → byte-identical serialized output. (`unprecedentedness.rs`) | unit test `score_is_deterministic_across_calls` | ✅ pass — unit-tested | — |
+| F-099 | Unprecedentedness unknown source → error | `?source=not-a-source` → `Error::UnknownSource` (404). (`routes.rs` `unprecedentedness` via `parse_source`) | route test `unprecedentedness_unknown_source_errors` | ✅ pass — route-tested | — |
+| F-100 | `GET /v1/insights/{id}/cite` (bundle) | Returns `Citation{permalink, insight_id, cite_version:"1.0", title, publisher, year, manifest, experimental}`. Manifest = `ReproducibilityManifest{detector, source, dataset, threshold?, data_sha256, runtime_version?, generated_at}`. (`routes.rs` `cite_insight`, `agent/cite.rs`) | `curl 'localhost:8080/v1/insights/<id>/cite?base_url=https://x'` | ✅ pass — route test `cite_returns_bundle_with_manifest` | — |
+| F-101 | Cite renders formats | `?format=bibtex|ris|apa|chicago|markdown` → `text/plain` rendered citation string; unknown format → `Error::BadRequest` (400). (`cite.rs` `render`) | route test `cite_renders_format_as_text`, `cite_bad_format_400s` | ✅ pass — route-tested | — |
+| F-102 | Cite reproducibility manifest is drift-aware | `data_sha256` is a SHA-256 over the canonical (key-sorted) evidence + record values. A data revision changes the hash; evidence order does not. (`cite.rs` `evidence_hash`) | unit tests `manifest_hash_detects_data_drift`, `manifest_hash_independent_of_evidence_order` | ✅ pass — unit-tested | — |
+| F-103 | Cite honors experimental honesty | An insight with `experimental=true` carries a marker in the rendered citation string so a researcher cites honestly. (`cite.rs` `render`) | unit test `experimental_finding_carries_honesty_marker` | ✅ pass — unit-tested | — |
+| F-104 | Cite unknown insight → 404 | `GET /v1/insights/{unknown}/cite` → `Error::NotFound` (404). (`routes.rs` via `InsightStore::get`) | route test `cite_unknown_insight_404s` | ✅ pass — route-tested | — |
+| F-105 | Cite is deterministic | Same insight + records + base_url → byte-identical serialized output. (`cite.rs`) | route test `cite_manifest_is_deterministic` | ✅ pass — route-tested | — |
+| F-106 | `InsightStore::get(id)` accessor | New by-id lookup on the in-process insight store; `None` when unknown. Powers `/cite` and (later) the permalink landing. (`insight.rs`) | exercised by `cite_unknown_insight_404s` + `cite_returns_bundle_with_manifest` | ✅ pass — route-tested | — |
+| F-107 | `Error::NotFound` + `Error::BadRequest` | Two new error variants (404 / 400) added to the common error model with status-code + `kind_for` mappings. (`common/error.rs`, `api/error.rs`) | status assertions in `cite_unknown_insight_404s` (404), `cite_bad_format_400s` (400) | ✅ pass — route-tested | — |
+
 ---
 
 ## Summary counters (updated each phase)
@@ -169,7 +199,9 @@
 | 2 (test) | 88 | 76 | 3 | 6 | 0 | 3 |
 | 4 (retest) | 88 | 85 | 0 | 0 | 0 | 3 |
 | 4 (independent re-audit) | 88 | 85 | 0 | 0 | 0 | 3 |
-| **5 (second independent re-audit)** | **88** | **85** | **0** | **0** | **0** | **3** |
+| 5 (second independent re-audit) | 88 | 85 | 0 | 0 | 0 | 3 |
+| **6 (P-100/P-103 product layer)** | **99** | **99** | **0** | **0** | **0** | **3** |
+| **7 (P-101 Cite-It)** | **107** | **107** | **0** | **0** | **0** | **3** |
 
 **Phase 2 failures (3) → all fixed in Phase 3:** F-006 (D-001 tag filter),
 F-067 (D-002 brief hero), F-084 (D-003 empty prefix panic).
@@ -238,7 +270,7 @@ Defect details: [DEFECTS.md](DEFECTS.md).
 |------|--------|
 | `cargo build --release -p hkgov-api` | ✅ clean |
 | `cargo build --release -p hkgov-api --features alerts,llm` | ✅ clean |
-| `cargo test --workspace --release` | ✅ **90 passed**, 0 failed (+4 auth guards for D-005) |
+| `cargo test --workspace` | ✅ **136 passed**, 0 failed (+15 for P-101: 10 cite + 5 route) |
 | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ no warnings |
 | `cargo fmt --all -- --check` | ✅ clean |
 | Python `pytest tests/` | ✅ 14 passed |

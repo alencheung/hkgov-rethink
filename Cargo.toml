@@ -45,6 +45,11 @@ anyhow = "1"
 url = "2"
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
+# Cryptographic hashing for the Cite-It reproducibility manifest (P-101). Used
+# to detect upstream data drift — same finding recomputed against current data
+# must hash identically, or the cite drawer surfaces a "reproduces as of {ts}"
+# warning rather than false-claiming reproducibility.
+sha2 = "0.10"
 
 # Internal crates
 hkgov-common = { path = "crates/common" }

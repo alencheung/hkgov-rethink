@@ -43,7 +43,8 @@ fn kind_for(e: &Error) -> &'static str {
     match e {
         Error::Upstream { .. } => "upstream",
         Error::Decode { .. } => "decode",
-        Error::UnknownSource(_) => "not_found",
+        Error::UnknownSource(_) | Error::NotFound(_) => "not_found",
+        Error::BadRequest(_) => "bad_request",
         Error::Store(_) => "store",
         Error::Agent(_) => "agent",
         Error::Config(_) => "config",
