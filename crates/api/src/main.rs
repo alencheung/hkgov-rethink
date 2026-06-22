@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
     let feedback = Arc::new(hkgov_agent::FeedbackStore::new());
     let signals = Arc::new(hkgov_agent::SignalStore::new());
     let investigations = Arc::new(hkgov_agent::InvestigationStore::new());
+    let users = Arc::new(hkgov_agent::UserStore::new());
     // Build the LLM client up front so both the supervisor and the /v1/ask
     // endpoint share the same instance.
     let llm: Arc<dyn LlmClient> = build_llm_client(&settings);
@@ -95,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
         feedback,
         signals,
         investigations,
+        users,
         llm,
         alert_log,
         settings: Arc::new(settings.clone()),

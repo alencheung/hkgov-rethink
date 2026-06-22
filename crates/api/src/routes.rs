@@ -73,6 +73,9 @@ pub fn router(state: AppState) -> Router {
             post(append_investigation_step),
         )
         .route("/investigations/{id}/notes", post(add_investigation_note))
+        .route("/auth/request-token", post(request_auth_token))
+        .route("/auth/redeem", post(redeem_auth_token))
+        .route("/auth/me", get(auth_me))
         .route("/ask", post(ask));
 
     if let Some(key) = api_key {
@@ -159,6 +162,9 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
             "DELETE /v1/investigations/{id}",
             "POST /v1/investigations/{id}/steps",
             "POST /v1/investigations/{id}/notes",
+            "POST /v1/auth/request-token",
+            "POST /v1/auth/redeem",
+            "GET /v1/auth/me",
             "POST /v1/ask",
         ],
     })
@@ -381,18 +387,33 @@ struct InsightsQuery {
     /// "what's new since you left" filter.
     #[serde(default)]
     since: Option<String>,
+    /// P-106 Bilingual: `zh-HK` selects the deterministic zh-HK summary frame;
+    /// any other value (or unset) keeps the stored English summary.
+    #[serde(default)]
+    lang: Option<String>,
 }
 
 async fn list_insights(
     State(state): State<AppState>,
     Query(q): Query<InsightsQuery>,
 ) -> Json<Vec<hkgov_agent::Insight>> {
-    if let Some(s) = q.since.as_deref().filter(|s| !s.is_empty()) {
+    let lang = hkgov_agent::Language::parse(q.lang.as_deref());
+    let mut insights = if let Some(s) = q.since.as_deref().filter(|s| !s.is_empty()) {
         if let Ok(ts) = parse_since(s) {
-            return Json(state.insights.list_since(q.limit, ts).await);
+            state.insights.list_since(q.limit, ts).await
+        } else {
+            state.insights.list(q.limit).await
+        }
+    } else {
+        state.insights.list(q.limit).await
+    };
+    // P-106: apply the language selection to each summary in place.
+    if lang == hkgov_agent::Language::ZhHk {
+        for i in insights.iter_mut() {
+            i.summary = hkgov_agent::select_summary(i, lang);
         }
     }
-    Json(state.insights.list(q.limit).await)
+    Json(insights)
 }
 
 /// Parse a `since` query value: RFC 3339 datetime, or epoch seconds.
@@ -875,6 +896,99 @@ async fn add_investigation_note(
     }
 }
 
+// ---- Auth (P-108) — email + magic-link identity ----------------------------
+//
+// The cheapest identity that unblocks the per-user features (signals,
+// investigations, read-state). A user POSTs their email → gets a one-time token
+// (returned directly in dev/CI; emailed in production) → redeems it for a
+// session handle → uses `Authorization: Bearer {session}` on subsequent calls.
+// The `User.id` is the principal the other features key on as `owner`.
+
+#[derive(Deserialize)]
+struct RequestTokenRequest {
+    email: String,
+}
+
+#[derive(Serialize)]
+struct TokenResponse {
+    /// The one-time token. In dev/CI this is returned directly; in production
+    /// it's emailed and this field is omitted.
+    token: String,
+    /// When the token expires (RFC 3339). The client should re-request after.
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn request_auth_token(
+    State(state): State<AppState>,
+    Json(req): Json<RequestTokenRequest>,
+) -> Json<TokenResponse> {
+    let t = state.users.issue_token(req.email.trim()).await;
+    Json(TokenResponse {
+        token: t.token,
+        expires_at: t.expires_at,
+    })
+}
+
+#[derive(Deserialize)]
+struct RedeemRequest {
+    token: String,
+}
+
+#[derive(Serialize)]
+struct RedeemResponse {
+    session_token: String,
+    user: hkgov_agent::User,
+}
+
+async fn redeem_auth_token(
+    State(state): State<AppState>,
+    Json(req): Json<RedeemRequest>,
+) -> Result<Json<RedeemResponse>, ApiError> {
+    let session = state.users.redeem_token(&req.token).await.ok_or_else(|| {
+        ApiError(hkgov_common::Error::BadRequest(
+            "token invalid, expired, or already used".into(),
+        ))
+    })?;
+    let user = state.users.get(&session.user_id).await.ok_or_else(|| {
+        ApiError(hkgov_common::Error::Internal(
+            "session minted for unknown user".into(),
+        ))
+    })?;
+    Ok(Json(RedeemResponse {
+        session_token: session.session_token,
+        user,
+    }))
+}
+
+/// Resolve the `Authorization: Bearer {session}` header to the current user.
+/// Returns 404 when no session is present (not 401, to match the existing
+/// auth model — the API-key gate already handles 401).
+async fn auth_me(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Json<Option<hkgov_agent::User>> {
+    let session = bearer_token(&headers);
+    let user = match session {
+        Some(s) => state.users.lookup_session(&s).await,
+        None => None,
+    };
+    Json(user)
+}
+
+/// Extract the `Bearer {token}` value from an Authorization header, if present.
+fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    let auth = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let token = auth.strip_prefix("Bearer ")?.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
 // ---- POST /ask — natural-language Q&A -------------------------------------
 
 #[derive(Deserialize)]
@@ -978,6 +1092,7 @@ mod tests {
             feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
+            users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             settings: Arc::new(settings),
@@ -1100,6 +1215,7 @@ mod tests {
             feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
+            users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             settings: Arc::new(settings),
@@ -1408,6 +1524,7 @@ mod tests {
             feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
+            users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             settings: Arc::new(settings),
@@ -1500,6 +1617,7 @@ mod tests {
             feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
+            users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             settings: Arc::new(settings),
@@ -1665,6 +1783,7 @@ mod tests {
             feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
+            users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             settings: Arc::new(settings),

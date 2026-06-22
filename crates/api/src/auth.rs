@@ -126,6 +126,7 @@ mod tests {
             feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
+            users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(hkgov_agent::HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             settings: Arc::new(settings),

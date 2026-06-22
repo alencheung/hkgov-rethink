@@ -21,8 +21,10 @@ pub mod alerts;
 #[cfg(feature = "alerts")]
 pub mod alerts_webhook_deps;
 pub mod analysis;
+pub mod bilingual;
 pub mod brief;
 pub mod cite;
+pub mod identity;
 pub mod insight;
 pub mod investigation;
 pub mod llm;
@@ -37,8 +39,10 @@ pub mod unprecedentedness;
 pub use alerts::{AlertDispatcher, AlertLog, AlertLogEntry, AlertSink};
 #[cfg(feature = "alerts")]
 pub use alerts::{EmailSink, WebhookSink};
+pub use bilingual::{frame_zh_hk, select_summary, Language};
 pub use brief::{build_brief, Brief, BriefItem};
 pub use cite::{build_citation, Citation, CitationFormat, ReproducibilityManifest, CITE_VERSION};
+pub use identity::{user_id_for, Session, Token, User, UserStore};
 pub use insight::{
     EvolutionDiff, Feedback, FeedbackStore, FieldChange, Insight, InsightRevision, InsightSeverity,
     InsightStore,
