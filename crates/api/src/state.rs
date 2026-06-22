@@ -1,6 +1,8 @@
 //! Shared application state handed to every handler via axum's `State` extractor.
 
-use hkgov_agent::{AlertLog, FeedbackStore, InsightStore, LlmClient};
+use hkgov_agent::{
+    AlertLog, FeedbackStore, InsightStore, InvestigationStore, LlmClient, SignalStore,
+};
 use hkgov_common::Settings;
 use hkgov_connectors::registry::Registry;
 use hkgov_store::MemoryStore;
@@ -16,6 +18,10 @@ pub struct AppState {
     pub insights: Arc<InsightStore>,
     /// User feedback (was-this-useful) — the cheapest success metric. v9.
     pub feedback: Arc<FeedbackStore>,
+    /// P-102 Signal subscriptions (authoring + preview; push waits on P-108).
+    pub signals: Arc<SignalStore>,
+    /// P-105 Drill-In Investigations (saved, resumable case files).
+    pub investigations: Arc<InvestigationStore>,
     /// The agent's LLM client. Used by `POST /v1/ask` to drive the agent loop.
     /// The periodic supervisor owns its own clone. Heuristic by default; HTTP
     /// when the `llm` feature + a configured base URL are present.

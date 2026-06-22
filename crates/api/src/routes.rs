@@ -54,6 +54,25 @@ pub fn router(state: AppState) -> Router {
         .route("/alerts", get(list_alerts))
         .route("/silence-index", get(silence_index))
         .route("/unprecedentedness", get(unprecedentedness))
+        .route("/signals", post(create_signal).get(list_signals))
+        .route("/signals/preview", post(preview_signal_route))
+        .route(
+            "/signals/{id}",
+            get(get_signal).delete(delete_signal).patch(update_signal),
+        )
+        .route(
+            "/investigations",
+            post(create_investigation).get(list_investigations),
+        )
+        .route(
+            "/investigations/{id}",
+            get(get_investigation).delete(delete_investigation),
+        )
+        .route(
+            "/investigations/{id}/steps",
+            post(append_investigation_step),
+        )
+        .route("/investigations/{id}/notes", post(add_investigation_note))
         .route("/ask", post(ask));
 
     if let Some(key) = api_key {
@@ -128,6 +147,18 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
             "GET /v1/alerts",
             "GET /v1/silence-index",
             "GET /v1/unprecedentedness",
+            "POST /v1/signals",
+            "GET /v1/signals",
+            "POST /v1/signals/preview",
+            "GET /v1/signals/{id}",
+            "PATCH /v1/signals/{id}",
+            "DELETE /v1/signals/{id}",
+            "POST /v1/investigations",
+            "GET /v1/investigations",
+            "GET /v1/investigations/{id}",
+            "DELETE /v1/investigations/{id}",
+            "POST /v1/investigations/{id}/steps",
+            "POST /v1/investigations/{id}/notes",
             "POST /v1/ask",
         ],
     })
@@ -587,6 +618,263 @@ async fn unprecedentedness(
     Ok(Json(read))
 }
 
+// ---- Signals (P-102) — authoring + preview ---------------------------------
+//
+// A signal is a user-owned ScanTarget plus channel routing. v1 ships authoring
+// + preview (stateless). Server-side push (holding channel secrets, scheduled
+// re-scan, outbound HTTP) waits on P-108 (identity). The `owner` field is the
+// pseudo-identity `X-Reader-Id` header (client-generated UUID) until real auth
+// lands — matches the current shared-key trust model.
+
+#[derive(Deserialize)]
+struct CreateSignalRequest {
+    /// The natural-language intent (kept for re-display).
+    #[serde(default)]
+    question: Option<String>,
+    /// The compiled scan target. The caller compiles intent→target client-side
+    /// for now (a future `compile_intent` LLM step can move this server-side).
+    compiled: hkgov_common::ScanTarget,
+    /// Where to push when it fires. v1 stores these; dispatch waits on P-108.
+    #[serde(default)]
+    channels: Vec<hkgov_agent::SignalChannel>,
+    /// Pseudo-identity: a client-generated UUID. Real identity arrives with P-108.
+    #[serde(default)]
+    owner: Option<String>,
+}
+
+async fn create_signal(
+    State(state): State<AppState>,
+    Json(req): Json<CreateSignalRequest>,
+) -> Json<hkgov_agent::Signal> {
+    let owner = req.owner.unwrap_or_default();
+    let id = hkgov_agent::signal_id(&owner, &req.compiled);
+    let signal = hkgov_agent::Signal {
+        id,
+        owner,
+        question: req.question.unwrap_or_default(),
+        compiled: req.compiled,
+        channels: req.channels,
+        enabled: true,
+        created_at: chrono::Utc::now(),
+        updated_at: None,
+    };
+    Json(state.signals.create(signal).await)
+}
+
+#[derive(Deserialize, Default)]
+struct ListSignalsQuery {
+    /// Filter to one owner. Empty/omitted = all (the trust model is one shared key).
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+async fn list_signals(
+    State(state): State<AppState>,
+    Query(q): Query<ListSignalsQuery>,
+) -> Json<Vec<hkgov_agent::Signal>> {
+    Json(
+        state
+            .signals
+            .list(&q.owner.unwrap_or_default(), q.limit)
+            .await,
+    )
+}
+
+async fn get_signal(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<Option<hkgov_agent::Signal>> {
+    Json(state.signals.get(&id).await)
+}
+
+async fn delete_signal(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let ok = state.signals.delete(&id).await;
+    Json(serde_json::json!({ "deleted": ok }))
+}
+
+async fn update_signal(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(mut signal): Json<hkgov_agent::Signal>,
+) -> Result<Json<hkgov_agent::Signal>, ApiError> {
+    signal.id = id;
+    match state.signals.update(signal).await {
+        Some(s) => Ok(Json(s)),
+        None => Err(ApiError(hkgov_common::Error::NotFound(
+            "signal not found".into(),
+        ))),
+    }
+}
+
+#[derive(Deserialize)]
+struct PreviewSignalRequest {
+    /// The compiled scan target to preview.
+    compiled: hkgov_common::ScanTarget,
+    /// Window in days (default 90).
+    #[serde(default = "default_preview_window")]
+    window_days: i64,
+}
+
+fn default_preview_window() -> i64 {
+    90
+}
+
+async fn preview_signal_route(
+    State(state): State<AppState>,
+    Json(req): Json<PreviewSignalRequest>,
+) -> Json<hkgov_agent::SignalPreview> {
+    let preview = hkgov_agent::preview_signal(&state.store, &req.compiled, req.window_days).await;
+    Json(preview)
+}
+
+// ---- Investigations (P-105) — saved, resumable case files ------------------
+//
+// From any insight, a user launches a multi-step investigation. v1 stores the
+// case file in-process (volatile, no DB tier). The `owner` field is the pseudo-
+// identity until P-108; share/resume work via the case-file id over the shared
+// API key.
+
+#[derive(Deserialize)]
+struct CreateInvestigationRequest {
+    /// The Insight.id this case is launched from (the seed).
+    seed_insight_id: String,
+    /// Snapshot fields (so the case is intelligible if the seed rotates).
+    seed_source: String,
+    seed_dataset: String,
+    seed_title: String,
+    /// Optional human-authored title; defaults to the seed title.
+    #[serde(default)]
+    title: Option<String>,
+    /// Pseudo-identity (P-108 lands real identity later).
+    #[serde(default)]
+    owner: Option<String>,
+}
+
+async fn create_investigation(
+    State(state): State<AppState>,
+    Json(req): Json<CreateInvestigationRequest>,
+) -> Result<Json<hkgov_agent::Investigation>, ApiError> {
+    let source = parse_source(&req.seed_source)?;
+    let now = chrono::Utc::now();
+    let id = hkgov_agent::investigation_id(&req.seed_insight_id, now);
+    let inv = hkgov_agent::Investigation {
+        id,
+        seed_insight_id: req.seed_insight_id,
+        seed_source: source,
+        seed_dataset: req.seed_dataset,
+        seed_title: req.seed_title.clone(),
+        title: req.title.unwrap_or(req.seed_title),
+        owner: req.owner.unwrap_or_default(),
+        steps: Vec::new(),
+        notes: Vec::new(),
+        created_at: now,
+        updated_at: now,
+    };
+    Ok(Json(state.investigations.create(inv).await))
+}
+
+#[derive(Deserialize, Default)]
+struct ListInvestigationsQuery {
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+async fn list_investigations(
+    State(state): State<AppState>,
+    Query(q): Query<ListInvestigationsQuery>,
+) -> Json<Vec<hkgov_agent::Investigation>> {
+    Json(
+        state
+            .investigations
+            .list(&q.owner.unwrap_or_default(), q.limit)
+            .await,
+    )
+}
+
+async fn get_investigation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<Option<hkgov_agent::Investigation>> {
+    Json(state.investigations.get(&id).await)
+}
+
+async fn delete_investigation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let ok = state.investigations.delete(&id).await;
+    Json(serde_json::json!({ "deleted": ok }))
+}
+
+#[derive(Deserialize)]
+struct AppendStepRequest {
+    kind: String,
+    prompt: String,
+    #[serde(default)]
+    answer: Option<hkgov_agent::Answer>,
+    #[serde(default)]
+    trace: Vec<hkgov_agent::TraceStep>,
+    #[serde(default)]
+    annotation: Option<String>,
+}
+
+async fn append_investigation_step(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AppendStepRequest>,
+) -> Result<Json<hkgov_agent::Investigation>, ApiError> {
+    let kind = match req.kind.as_str() {
+        "chip" => hkgov_agent::StepKind::Chip,
+        "qa" => hkgov_agent::StepKind::Qa,
+        "finding_promotion" => hkgov_agent::StepKind::FindingPromotion,
+        other => {
+            return Err(ApiError(hkgov_common::Error::BadRequest(format!(
+                "unknown step kind: {other} (try chip|qa|finding_promotion)"
+            ))))
+        }
+    };
+    let step = hkgov_agent::InvestigationStep {
+        id: String::new(), // assigned by append_step
+        kind,
+        prompt: req.prompt,
+        answer: req.answer,
+        trace: req.trace,
+        executed_at: chrono::Utc::now(),
+        annotation: req.annotation,
+    };
+    match state.investigations.append_step(&id, step).await {
+        Some(inv) => Ok(Json(inv)),
+        None => Err(ApiError(hkgov_common::Error::NotFound(
+            "investigation not found".into(),
+        ))),
+    }
+}
+
+#[derive(Deserialize)]
+struct AddNoteRequest {
+    body: String,
+}
+
+async fn add_investigation_note(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AddNoteRequest>,
+) -> Result<Json<hkgov_agent::Investigation>, ApiError> {
+    match state.investigations.add_note(&id, req.body).await {
+        Some(inv) => Ok(Json(inv)),
+        None => Err(ApiError(hkgov_common::Error::NotFound(
+            "investigation not found".into(),
+        ))),
+    }
+}
+
 // ---- POST /ask — natural-language Q&A -------------------------------------
 
 #[derive(Deserialize)]
@@ -688,6 +976,8 @@ mod tests {
             store,
             insights: Arc::new(hkgov_agent::InsightStore::new()),
             feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
+            signals: Arc::new(hkgov_agent::SignalStore::new()),
+            investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             settings: Arc::new(settings),
@@ -808,6 +1098,8 @@ mod tests {
             store,
             insights: Arc::new(hkgov_agent::InsightStore::new()),
             feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
+            signals: Arc::new(hkgov_agent::SignalStore::new()),
+            investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             settings: Arc::new(settings),
@@ -1114,6 +1406,8 @@ mod tests {
             store: Arc::new(hkgov_store::MemoryStore::new(10, 60)),
             insights,
             feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
+            signals: Arc::new(hkgov_agent::SignalStore::new()),
+            investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             settings: Arc::new(settings),
@@ -1204,6 +1498,8 @@ mod tests {
             store,
             insights: Arc::new(hkgov_agent::InsightStore::new()),
             feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
+            signals: Arc::new(hkgov_agent::SignalStore::new()),
+            investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             settings: Arc::new(settings),
@@ -1367,6 +1663,8 @@ mod tests {
             store,
             insights,
             feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
+            signals: Arc::new(hkgov_agent::SignalStore::new()),
+            investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             settings: Arc::new(settings),

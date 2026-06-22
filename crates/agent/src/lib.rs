@@ -24,10 +24,12 @@ pub mod analysis;
 pub mod brief;
 pub mod cite;
 pub mod insight;
+pub mod investigation;
 pub mod llm;
 pub mod loop_mod;
 pub mod qa;
 pub mod scheduler;
+pub mod signal;
 pub mod silence;
 pub mod tools;
 pub mod unprecedentedness;
@@ -41,12 +43,20 @@ pub use insight::{
     EvolutionDiff, Feedback, FeedbackStore, FieldChange, Insight, InsightRevision, InsightSeverity,
     InsightStore,
 };
+pub use investigation::{
+    investigation_id, Investigation, InvestigationNote, InvestigationStep, InvestigationStore,
+    StepKind,
+};
 #[cfg(feature = "llm")]
 pub use llm::HttpLlmClient;
 pub use llm::{AgentStep, HeuristicClient, LlmClient, LlmFraming, Message, ToolCall};
 pub use loop_mod::{run_agent_loop, AgentOutcome, Answer, TraceStep};
 pub use qa::heuristic_answer;
 pub use scheduler::AgentSupervisor;
+pub use signal::{
+    preview_signal, signal_id, FindingDto as SignalFindingDto, Signal, SignalChannel,
+    SignalPreview, SignalStore,
+};
 pub use silence::{
     build_index as build_silence_index,
     build_index_from_insights as build_silence_index_from_insights, SilenceIndex, SilenceSignal,
