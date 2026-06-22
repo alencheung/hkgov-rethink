@@ -13,6 +13,20 @@
 | D-003 | 🟠 medium | Empty `api_prefix` panics the server at boot | F-084 | ✅ fixed + verified (+ regression test) |
 | D-004 | 🟠 medium | Dashboard not served by API (dead in Docker + poor local UX) | F-064–F-080, F-088 | ✅ fixed + verified |
 | D-005 | 🔴 high | Auth bypass via `/health` path suffix/substring matching | F-023, F-012 | ✅ fixed + verified (+ 4 regression tests) |
+| D-006 | 🔴 high | Signal `series_jump` preview ≠ production (unscaled vs cadenced) | F-023 | ✅ fixed + verified (+ 4 regression tests) |
+| D-007 | 🟡 low | Bad `?since=` silently returns unfiltered insights (no 400) | F-011 | ✅ fixed + verified (+ 4 regression tests) |
+| D-008 | 🟡 low | Cite `base_url` docstring claims `Host` header is used (it isn't) | F-017 | ✅ fixed (doc corrected) |
+| D-009 | ⚪ risk | No owner isolation on signals/investigations (shared-key model) | F-022/26/28/30 | ⚠️ waived (documented v1 design) |
+| D-010 | 🟠 medium | Sessions never expire (leaked bearer valid forever) | F-035 | ✅ fixed + verified (+ 3 regression tests) |
+| D-011 | 🟡 low | Python client missing 8 endpoint families (signals/auth/cite/…) | F-056 | ⏸️ deferred (separate Python task) |
+
+> **Third independent re-audit (D-006 → D-011).** A fresh, from-scratch QA cycle
+> was run with **no assumption** the prior audit (D-001 → D-005) was complete. It
+> re-verified all five prior fixes (still fixed) and then hunted across the
+> v8/v9 product surface — signals, identity, cite, silence-index,
+> unprecedentedness, bilingual, the dashboard, and the Python client — for
+> defects the earlier passes missed. Details below; full per-test traces in
+> `docs/QA_PHASE2_3_TESTS_DEFECTS.md` and `docs/QA_PHASE5_REGRESSION.md`.
 
 > **Independent re-audit.** All four defects were re-verified end-to-end from
 > a clean rebuild with no assumption the fixes still held. All four reproduce
@@ -243,3 +257,137 @@ the detector math, the Python client, and the dashboard JS.
   reachability issue in the test environment, not a code defect — the agent
   produced 0 insights only because its HKMA scan targets had no data to analyze.
   The pipeline itself (pass started → completed → stored:0) ran end to end.
+
+---
+
+## Third independent re-audit (the pass that found D-006 → D-011)
+
+A fresh, from-scratch QA cycle was run with **no assumption** that the prior
+audits were complete. It re-verified D-001 → D-005 (all still fixed — their 22
+guards are green) and then hunted across the v8/v9 product surface (signals,
+identity, cite, silence-index, unprecedentedness, bilingual, dashboard, Python
+client) for defects the earlier passes missed. Full per-test traces in
+`docs/QA_PHASE2_3_TESTS_DEFECTS.md`; regression in `docs/QA_PHASE5_REGRESSION.md`.
+
+### Verification gates (this pass)
+
+| Gate | Result |
+|------|--------|
+| `cargo test --workspace` | ✅ **189 passed**, 0 failed (baseline 178; +11 new regression tests) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ clean |
+| `cargo fmt --all -- --check` | ✅ clean |
+| Python `pytest tests/` | ✅ 14 passed |
+
+### D-006 — Signal `series_jump` preview ≠ production
+
+- **Stories:** F-023 (`POST /v1/signals/preview`)
+- **Severity:** high — breaks the core product promise of signal subscriptions
+- **Observed:** The `signal.rs` module docstring promises *"preview IS what will
+  fire"* and *"reuses the scheduler's `run_one_target` so preview == production"*.
+  The code violated both for `series_jump`: preview called the **unscaled**
+  `detect_series_jumps` (`signal.rs:322`) while production called the
+  **cadence-scaled** `detect_series_jumps_cadenced` (`scheduler.rs:222`). A
+  quarterly signal previewed at threshold 25% fired on a 35% jump, but
+  production (effective threshold 25 × √3 ≈ 43.3%) stayed silent. The preview
+  also lacked a `year_over_year` arm entirely.
+- **Empirical proof:** a throwaway example binary calling both paths on
+  identical inputs printed `unscaled (preview) findings: 1 / cadenced (prod)
+  findings: 0 / D-006 CONFIRMED: they DIVERGE`.
+- **Expected:** preview == production, as documented.
+- **Root cause:** the preview dispatcher predates the v7 cadence-scaling work
+  and was never updated to mirror the scheduler's `run_one_target`.
+- **Fix:** `run_detector_preview` (`signal.rs`) now mirrors the scheduler: the
+  `series_jump` arm delegates to `detect_series_jumps_cadenced` (passing
+  `target.cadence`) and routes YoY-comparison targets to
+  `detect_year_over_year`; a new `year_over_year` arm handles direct YoY signals.
+- **Verification (Phase 5):** 4 regression tests assert preview==production for
+  quarterly/monthly/unknown cadences and for the YoY path. All pass.
+
+### D-007 — Bad `?since=` silently returns unfiltered insights
+
+- **Stories:** F-011 (`GET /v1/insights?since=`)
+- **Severity:** low — misleading, not data-corrupting
+- **Observed:** `GET /v1/insights?since=banana` returned 200 with the **full**
+  insight list, as if "everything is new since banana".
+- **Expected:** a 400 naming the bad value and the accepted formats.
+- **Root cause:** `routes.rs` `list_insights` fell through to
+  `state.insights.list(...)` when `parse_since` returned `Err`.
+- **Fix:** the handler now returns `Err(ApiError(BadRequest(...)))` on an
+  unparseable `since`.
+- **Verification (Phase 5):** 4 tests — bad since → 400; valid RFC3339 / epoch
+  / absent → Ok. All pass.
+
+### D-008 — Cite `base_url` docstring claims `Host` header is used
+
+- **Stories:** F-017 (`GET /v1/insights/{id}/cite`)
+- **Severity:** low — doc/behaviour mismatch
+- **Observed:** `CiteQuery::base_url` doc said "Defaults to the request's `Host`
+  header origin, then localhost". The code only checked the query param, then
+  hardcoded `http://localhost:8080` — the `Host` header was never read.
+- **Expected:** doc and behaviour agree.
+- **Root cause:** aspirational doc written before the simpler implementation landed.
+- **Fix (doc-only, per approval):** corrected the docstring to state the caller
+  must pass the public origin explicitly, with a deployment note for proxy
+  setups. Behaviour unchanged (changing it behind a proxy needs operator sign-off).
+- **Verification (Phase 5):** docstring now matches code.
+
+### D-009 — No owner isolation on signals/investigations
+
+- **Stories:** F-022, F-026, F-028, F-030
+- **Severity:** risk (not a code bug per the v1 design)
+- **Observed:** any keyed caller can `GET /v1/signals?owner=` (empty → all
+  owners), and read/update/delete any other user's signals or investigations.
+- **Expected (for multi-tenant):** owner-scoped ACL.
+- **Root cause:** `owner` is a filter, not a guard — the documented "shared-key
+  trust model" where every keyed caller is mutually trusting.
+- **Resolution (waived, per approval):** not fixed in v1 — the single-trust-
+  domain model is intentional. A loud `⚠️ D-009` note was added to `routes.rs`
+  at the signals section with the remediation path: derive `owner` from the
+  authenticated session and reject cross-owner mutations before any multi-tenant
+  deployment.
+
+### D-010 — Sessions never expire
+
+- **Stories:** F-035 (`GET /v1/auth/me`)
+- **Severity:** medium — security; magic-link identity's value is undermined if
+  sessions are immortal
+- **Observed:** a redeemed bearer resolved indefinitely. `Session` had no
+  `expires_at`; `lookup_session` did no TTL check.
+- **Expected:** a session TTL, mirroring the one-time token's 15-min TTL.
+- **Root cause:** the `Session` struct and `lookup_session` were written before
+  the security review and never gained an expiry.
+- **Fix:** `Session` now carries `expires_at` (default far-future for back-compat
+  with any legacy serialized blob); `redeem_token` sets it to `now + 30 days`;
+  `lookup_session` rejects `now > expires_at`.
+- **Verification (Phase 5):** 3 tests — fresh session expires ~30d out + resolves;
+  back-dated session → None; legacy far-future default keeps old sessions alive.
+
+### D-011 — Python client missing 8 endpoint families
+
+- **Stories:** F-056 (`hkgov-py` client coverage)
+- **Severity:** low — typed contract incomplete; endpoints still reachable via
+  `_get`/`_post`
+- **Observed:** `dir(HkGov)` lacks methods for signals, investigations, auth,
+  cite, silence-index, unprecedentedness, insight-history, and the `since`/`lang`
+  params — 8 endpoint families added in v8/v9 that the client never grew.
+- **Expected:** parity with the HTTP surface.
+- **Resolution (deferred, per approval):** scoped to a separate Python task
+  (different language/toolchain). Tracked here so it isn't lost.
+
+### What this pass checked and cleared (no defect)
+
+- All detector math (`series_jump`/`outlier`/`seasonality`/`correlation`/
+  `cross_source_gap`/`proxy_divergence`/`benchmark_deviation`/`year_over_year`/
+  `threshold_crossing`) — zero-variance, empty-input, sub-min-sample, and
+  divide-by-zero guards all present and correct.
+- Silence Index scoring (weights, squash constant, HKMA scoping, determinism).
+- Unprecedentedness (percentile, MAD band, 1-in-N, MIN_HISTORY_POINTS gate).
+- Cite-It manifest (SHA-256 drift detection, all 5 formats, determinism).
+- Bilingual zh-HK reframer (all detector kinds, fallback for unknown kinds,
+  severity translation, determinism).
+- Agent loop (tool dispatch, step-exhaustion error, Findings-vs-Answer framing).
+- Auth gate exact-path matching (D-005 regression).
+- Dashboard JS (brief flattening per D-002, severity filter, vote, chat rail,
+  auto-poll, responsive layout, ARIA).
+- Telemetry bootstrap (plain/json/otel paths).
+- Config load order (defaults < toml < env) and empty-prefix routing (D-003).

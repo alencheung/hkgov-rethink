@@ -62,10 +62,27 @@ pub struct Session {
     pub session_token: String,
     pub user_id: String,
     pub created_at: DateTime<Utc>,
+    /// D-010: when this session expires. A session is NOT immortal — a leaked
+    /// bearer must age out. Defaults to far-future for back-compat with any
+    /// serialized session blob that predates the field (the in-process store is
+    /// volatile, so in practice this is always set at mint time below).
+    #[serde(default = "far_future")]
+    pub expires_at: DateTime<Utc>,
 }
 
 /// How long a magic-link token is valid (15 min — short, since it's emailed).
 const TOKEN_TTL_MINUTES: i64 = 15;
+
+/// How long a redeemed session is valid (30 days — long enough to be useful,
+/// short enough that a leaked bearer ages out). D-010.
+const SESSION_TTL_DAYS: i64 = 30;
+
+/// Serde default for `Session::expires_at` — far future, so a deserialized
+/// legacy session (without the field) is treated as non-expiring rather than
+/// instantly expired. The volatile store always sets a real value at mint.
+fn far_future() -> DateTime<Utc> {
+    Utc::now() + Duration::days(365 * 100)
+}
 
 /// In-process identity store. Mirrors the other v8 stores (InsightStore,
 /// SignalStore, …) — `Arc<RwLock<BTreeMap>>`, volatile. A real deployment moves
@@ -133,10 +150,13 @@ impl UserStore {
             .counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let session_token = opaque_token(&user_id, seq, "session");
+        let now = Utc::now();
         let session = Session {
             session_token: session_token.clone(),
             user_id,
-            created_at: Utc::now(),
+            created_at: now,
+            // D-010: bound the session's lifetime so a leaked bearer ages out.
+            expires_at: now + Duration::days(SESSION_TTL_DAYS),
         };
         self.sessions
             .write()
@@ -145,10 +165,17 @@ impl UserStore {
         Some(session)
     }
 
-    /// Resolve a session token to its user. `None` if unknown.
+    /// Resolve a session token to its user. `None` if unknown OR expired (D-010:
+    /// a session is no longer immortal — a leaked bearer ages out after
+    /// `SESSION_TTL_DAYS`).
     pub async fn lookup_session(&self, session_token: &str) -> Option<User> {
         let sessions = self.sessions.read().await;
-        let user_id = sessions.get(session_token)?.user_id.clone();
+        let s = sessions.get(session_token)?;
+        // D-010: reject expired sessions.
+        if Utc::now() > s.expires_at {
+            return None;
+        }
+        let user_id = s.user_id.clone();
         drop(sessions);
         self.users.read().await.get(&user_id).cloned()
     }
@@ -165,6 +192,20 @@ impl UserStore {
 
     pub async fn count(&self) -> usize {
         self.users.read().await.len()
+    }
+
+    // ---- test-only helpers ------------------------------------------------
+    //
+    // Used to drive D-010 (session expiry) without fast-forwarding the clock:
+    // mint a real session via the public API, then back-date its expiry so
+    // `lookup_session`'s TTL check can be exercised deterministically.
+
+    #[cfg(test)]
+    pub async fn plant_session_for_test(&self, session: Session) {
+        self.sessions
+            .write()
+            .await
+            .insert(session.session_token.clone(), session);
     }
 }
 
@@ -277,5 +318,70 @@ mod tests {
         assert_eq!(u.email, "eve@example.com");
         // 4. The user id is the stable `owner` principal.
         assert!(u.id.starts_with("u:"));
+    }
+
+    // ---- D-010: sessions must expire, not be immortal ---------------------
+    //
+    // Before D-010 a `Session` had no `expires_at` and `lookup_session` did no
+    // TTL check, so a leaked bearer was valid for the process lifetime. These
+    // tests lock the fix: a fresh session is bounded to SESSION_TTL_DAYS, and
+    // an expired session resolves to None.
+
+    #[tokio::test]
+    async fn d010_fresh_session_has_future_expiry_and_resolves() {
+        let store = UserStore::new();
+        let t = store.issue_token("frank@example.com").await;
+        let s = store.redeem_token(&t.token).await.unwrap();
+        // The minted session must expire in the future (specifically ~30d out).
+        assert!(
+            s.expires_at > Utc::now(),
+            "fresh session must expire in the future"
+        );
+        let max_ttl = Duration::days(SESSION_TTL_DAYS) + Duration::seconds(5);
+        assert!(
+            s.expires_at - s.created_at <= max_ttl,
+            "session TTL must be bounded to ~{} days",
+            SESSION_TTL_DAYS
+        );
+        // And it must still resolve.
+        assert!(store.lookup_session(&s.session_token).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn d010_expired_session_resolves_to_none() {
+        let store = UserStore::new();
+        // Provision a user + a real session, then back-date the expiry so the
+        // TTL check fires. We can't fast-forward the clock, so plant a session
+        // whose expires_at is already in the past.
+        store.issue_token("grace@example.com").await;
+        let user_id = user_id_for("grace@example.com");
+        let expired = Session {
+            session_token: "stale-bearer".into(),
+            user_id,
+            created_at: Utc::now() - Duration::days(SESSION_TTL_DAYS + 1),
+            expires_at: Utc::now() - Duration::seconds(1), // expired 1s ago
+        };
+        store.plant_session_for_test(expired).await;
+        // An expired session must NOT resolve — even though the user exists.
+        assert!(
+            store.lookup_session("stale-bearer").await.is_none(),
+            "D-010: expired bearer must not resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn d010_far_future_default_keeps_legacy_sessions_alive() {
+        // A Session deserialized without `expires_at` (legacy blob) gets the
+        // far_future default and must still resolve. Guards back-compat.
+        let store = UserStore::new();
+        store.issue_token("heidi@example.com").await;
+        let legacy = Session {
+            session_token: "legacy-bearer".into(),
+            user_id: user_id_for("heidi@example.com"),
+            created_at: Utc::now(),
+            expires_at: far_future(),
+        };
+        store.plant_session_for_test(legacy).await;
+        assert!(store.lookup_session("legacy-bearer").await.is_some());
     }
 }
