@@ -137,7 +137,8 @@ free HKGOV endpoints it depends on.
    │  tower stack: timeout,      │    │  LLM frames → writes Insights    │
    │  gzip, CORS, trace,         │    └────────────────┬─────────────────┘
    │  concurrency load-shed      │                     │ upsert()
-   │  optional X-API-Key auth    │◀────────────────────┘
+   │  rate-limit on /ask+POSTs   │◀────────────────────┘
+   │  optional X-API-Key auth    │
    └──────────┬──────────────────┘
               │ HTTP /v1/*
               ▼
@@ -216,6 +217,9 @@ For the full rationale (async model, middleware stack, scaling math) see
 - Cache-first read endpoints (see [API reference](#api-reference))
 - Tower middleware stack: timeout (slowloris protection), gzip, CORS, tracing,
   concurrency load-shedding (`crates/api/src/routes.rs`)
+- Anti-abuse rate limit on the expensive POSTs (`/ask`, signals/preview,
+  investigations, feedback): per session / device / IP, warn-then-block with
+  `429` + `Retry-After` (`crates/api/src/ratelimit.rs`, `identity.rs`)
 - Optional `X-API-Key` / `?api_key=` auth (`crates/api/src/auth.rs`)
 - `/v1` API versioning (health kept at root for LB probes)
 - Graceful shutdown (SIGTERM/Ctrl-C) for zero-downtime deploys
@@ -473,6 +477,10 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §"The determinism guarantee".
 HKGOV_API__BIND=0.0.0.0:9090              # bind address
 HKGOV_API__API_KEY=secret                 # enable API key auth
 HKGOV_API__MAX_CONCURRENCY=100000         # tower load-shedding ceiling
+HKGOV_API__ASK_PER_WINDOW=5               # anti-abuse cap per dimension (/ask etc.)
+HKGOV_API__ASK_WARN_AT=4                  # warn header threshold (0-cap)
+HKGOV_API__ASK_WINDOW_SECS=60             # fixed-window length
+HKGOV_API__RATE_TRUSTED_PROXIES=1         # XFF hops to trust (0=peer only)
 HKGOV_STORE__BACKEND=redis                # memory | redis | pg
 HKGOV_STORE__REDIS_URL=redis://...        # only used when backend=redis
 HKGOV_AGENT__ENABLED=true                 # turn on the AI agent

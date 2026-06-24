@@ -38,7 +38,14 @@ The target is fleet-level, not single-node. The design is honest about that:
    concurrency lever.
 3. **Tower middleware stack.** `TimeoutLayer` (slowloris protection),
    `CompressionLayer`, `CorsLayer`, `TraceLayer`. The `api.max_concurrency`
-   setting is the knob for load-shedding under flood.
+   setting is the knob for load-shedding under flood. A per-client **rate-limit
+   layer** sits on the expensive POSTs (`/ask`, signals/preview, investigations,
+   feedback): it meters each request on three independent dimensions — per
+   session (Bearer token), per device (`X-Reader-Id`), per IP — and the first to
+   hit its cap blocks with `429` + `Retry-After`, while a warn threshold emits
+   `X-RateLimit-Warning` first. This is the abuse/token-burn backstop; it is
+   deliberately scoped off the read paths and the auth routes
+   (`crates/api/src/ratelimit.rs`, `crates/api/src/identity.rs`).
 4. **Bounded upstream pressure.** Connectors retry with exponential backoff and
    cap concurrency; the platform stays available even if an HKGOV endpoint
    degrades.
@@ -48,7 +55,7 @@ The target is fleet-level, not single-node. The design is honest about that:
 | Stage | Change | Why |
 |---|---|---|
 | v1 (now) | in-process `moka` cache, one node | proves the contract |
-| v2 | shared **Redis** cluster behind `RecordStore` trait | cache hit across nodes |
+| v2 | shared **Redis** cluster behind `RecordStore` trait | cache hit across nodes + shared rate-limit counters (today the limiter is per-node, so the effective cap is `per_window × N` behind a LB) |
 | v3 | stateless API behind a **LB**, N replicas | horizontal scale |
 | v4 | **Postgres** read replicas for cold/historical reads | unbounded dataset size |
 | v5 | **load-test harness** (k6/oha) + capacity model | validate the 100k number |
