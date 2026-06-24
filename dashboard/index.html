@@ -481,6 +481,13 @@
       try {
         const r = await fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
         setConnection(r.ok);
+        // Surface a 429 as a structured rate-limit error so callers can show a
+        // "slow down — retry in Ns" message instead of a generic failure. The
+        // Retry-After header is seconds (the server emits it on every 429).
+        if (r.status === 429) {
+          const retryAfter = parseInt(r.headers.get('Retry-After') || '0', 10);
+          return { __error: 429, __retryAfter: retryAfter, __text: await r.text() };
+        }
         if (!r.ok) return { __error: r.status, __text: await r.text() };
         return await r.json();
       } catch (e) { setConnection(false); return { __error: 0 }; }
@@ -1032,7 +1039,14 @@
       chatLog.push({ q, loading: true });
       renderChat();
       const a = await postJSON('/v1/ask', { question: q });
-      chatLog[chatLog.length - 1] = { q, a: (a && !a.__error) ? a : { text: 'error: ' + ((a && a.__error) || 'request failed'), confidence: 0 } };
+      // A 429 is the rate limiter firing — show a friendly "slow down" instead
+      // of a raw error blob, including the seconds the client should wait.
+      if (a && a.__error === 429) {
+        const wait = a.__retryAfter ? a.__retryAfter + 's' : 'a moment';
+        chatLog[chatLog.length - 1] = { q, a: { text: `Slow down — too many requests. Retry in ${wait}.`, confidence: 0 } };
+      } else {
+        chatLog[chatLog.length - 1] = { q, a: (a && !a.__error) ? a : { text: 'error: ' + ((a && a.__error) || 'request failed'), confidence: 0 } };
+      }
       renderChat();
     }
     function renderChat() {

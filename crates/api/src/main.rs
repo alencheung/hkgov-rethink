@@ -9,6 +9,8 @@
 
 mod auth;
 mod error;
+mod identity;
+mod ratelimit;
 mod routes;
 mod state;
 
@@ -108,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
         users,
         llm,
         alert_log,
+        ratelimit: Arc::new(crate::ratelimit::Limiter::default()),
         settings: Arc::new(settings.clone()),
     };
 
@@ -115,7 +118,12 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&settings.api.bind).await?;
     tracing::info!(bind = %settings.api.bind, agent_enabled = _agent, "hkgov-api listening");
-    axum::serve(listener, app)
+    // `into_make_service_with_connect_info` exposes the TCP peer address to
+    // handlers/middleware via the `ConnectInfo<SocketAddr>` request extension —
+    // required for the per-IP rate-limit dimension. Without it the limiter
+    // falls back to X-Forwarded-For (when trusted proxies are configured) and
+    // finally to the UNKNOWN_IP sentinel.
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     tracing::info!("hkgov-api stopped");

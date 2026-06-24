@@ -41,8 +41,21 @@ pub struct ApiSettings {
     /// Optional API key. When set, every request must send it via the
     /// `X-API-Key` header (or `?api_key=` query). Empty = anonymous access.
     pub api_key: Option<String>,
-    /// Per-IP request rate limit, requests/sec. 0 = unlimited.
+    /// Per-IP request rate limit, requests/sec. 0 = unlimited. (Legacy global
+    /// knob, read nowhere since the focused `ask_*` fields below took over.)
     pub rate_per_sec: u32,
+    /// Per-client rate limit on `POST /v1/ask`, requests per window. 0 = unlimited.
+    pub ask_per_window: u32,
+    /// Warn threshold for `/v1/ask`: at this count within the window, the
+    /// response carries an `X-RateLimit-Warning` header so the client can slow
+    /// down before being blocked.
+    pub ask_warn_at: u32,
+    /// Fixed-window length for the `/v1/ask` limit, in seconds.
+    pub ask_window_secs: u64,
+    /// Trusted proxy hops when resolving the client IP from `X-Forwarded-For`.
+    /// 0 = trust the TCP peer address directly. Set to the number of trusted
+    /// reverse proxies in front of the API when deployed behind a LB/proxy.
+    pub rate_trusted_proxies: u32,
 }
 
 impl Default for ApiSettings {
@@ -55,6 +68,13 @@ impl Default for ApiSettings {
             api_prefix: "/v1".to_string(),
             api_key: None,
             rate_per_sec: 0,
+            // Anti-abuse defaults for the token-burning /ask endpoint:
+            // 5 asks/min per client, warn at 4. Tight enough to stop a runaway
+            // loop or casual scripting, loose enough for real interactive use.
+            ask_per_window: 5,
+            ask_warn_at: 4,
+            ask_window_secs: 60,
+            rate_trusted_proxies: 0,
         }
     }
 }

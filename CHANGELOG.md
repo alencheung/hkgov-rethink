@@ -13,6 +13,27 @@ public API surface (the HTTP API + the `hkgov-py` client).
 > live (HTTP 200 + `header.success`) during this work.
 
 ### Added
+- **Anti-abuse rate limiting on the expensive POSTs.** The token-burning
+  `POST /v1/ask` (and `signals`, `signals/preview`, `investigations`,
+  `investigations/{id}/steps`, `investigations/{id}/notes`,
+  `insights/{id}/feedback`) are now rate-limited per client to stop runaway
+  loops, casual scripting, and deliberate token-burn attacks. Each request is
+  metered on **three independent dimensions — per session, per device
+  (`X-Reader-Id`), and per IP — all of which must pass**; the first to hit its
+  cap blocks the request with `429 Too Many Requests` + `Retry-After` +
+  `X-RateLimit-Remaining: 0`. At the warn threshold (`ask_warn_at`, default 4)
+  the response still succeeds but carries `X-RateLimit-Warning` so cooperative
+  clients slow down before being blocked. The per-IP counter is a rotation
+  backstop: cycling sessions/devices from one IP still trips it. Defaults: 5
+  asks/min per dimension, warn at 4 (`[api] ask_per_window`, `ask_warn_at`,
+  `ask_window_secs`). Set `ask_per_window=0` to disable. Behind a reverse proxy,
+  set `rate_trusted_proxies` to resolve the real client from `X-Forwarded-For`.
+  `POST /v1/auth/request-token` + `/auth/redeem` are deliberately exempt
+  (magic-link spam is a separate concern). The dashboard chat rail now shows a
+  "Slow down — retry in Ns" message on 429. In-process limiter (single-node,
+  volatile); Redis-backed is the horizontal-scale follow-up.
+  (`crates/api/src/ratelimit.rs`, `crates/api/src/identity.rs`,
+  `crates/api/src/routes.rs`, `crates/common/src/error.rs`, `config.toml`)
 - **Related market players (`GET /v1/market-players`).** A curated directory of
   the named private-sector operators in each license-issuing department's stream
   (HKMA → HSBC/BOCHK/…; IA → AIA/Prudential/…; OFCA → PCCW/SmarTone/…; plus

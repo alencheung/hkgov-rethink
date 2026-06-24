@@ -129,6 +129,7 @@ mod tests {
             users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(hkgov_agent::HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            ratelimit: Arc::new(crate::ratelimit::Limiter::default()),
             settings: Arc::new(settings),
         };
         router(state)

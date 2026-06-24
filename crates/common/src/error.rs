@@ -49,6 +49,12 @@ pub enum Error {
     #[error("configuration error: {0}")]
     Config(String),
 
+    /// The caller has exceeded a rate limit. Carries the seconds the client
+    /// SHOULD wait before retrying (emitted as the `Retry-After` header at the
+    /// HTTP boundary). Mapped to 429 Too Many Requests.
+    #[error("rate limited; retry after {0}s")]
+    RateLimited(u64),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
@@ -62,6 +68,7 @@ impl Error {
         match self {
             Error::UnknownSource(_) | Error::NotFound(_) => 404,
             Error::BadRequest(_) => 400,
+            Error::RateLimited(_) => 429,
             Error::Upstream { .. } | Error::Store(_) => 502,
             Error::Agent(_) => 502,
             Error::Decode { .. } => 502,

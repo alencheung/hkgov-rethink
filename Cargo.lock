@@ -713,6 +713,7 @@ dependencies = [
  "hkgov-ingest",
  "hkgov-store",
  "http-body-util",
+ "moka",
  "serde",
  "serde_json",
  "tokio",

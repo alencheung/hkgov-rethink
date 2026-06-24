@@ -35,6 +35,24 @@ impl IntoResponse for ApiError {
                 "message": self.0.to_string(),
             }
         }));
+
+        // 429 responses carry the standard `Retry-After` header (seconds) and a
+        // machine-readable `X-RateLimit-Remaining: 0` so well-behaved clients
+        // can back off without parsing the message body.
+        if let Error::RateLimited(secs) = &self.0 {
+            return (
+                status,
+                [
+                    (axum::http::header::RETRY_AFTER, secs.to_string()),
+                    (
+                        axum::http::HeaderName::from_static("x-ratelimit-remaining"),
+                        "0".to_string(),
+                    ),
+                ],
+                body,
+            )
+                .into_response();
+        }
         (status, body).into_response()
     }
 }
@@ -45,6 +63,7 @@ fn kind_for(e: &Error) -> &'static str {
         Error::Decode { .. } => "decode",
         Error::UnknownSource(_) | Error::NotFound(_) => "not_found",
         Error::BadRequest(_) => "bad_request",
+        Error::RateLimited(_) => "rate_limited",
         Error::Store(_) => "store",
         Error::Agent(_) => "agent",
         Error::Config(_) => "config",

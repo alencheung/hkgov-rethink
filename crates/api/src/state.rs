@@ -1,5 +1,6 @@
 //! Shared application state handed to every handler via axum's `State` extractor.
 
+use crate::ratelimit::Limiter;
 use hkgov_agent::{
     AlertLog, FeedbackStore, InsightStore, InvestigationStore, LlmClient, SignalStore, UserStore,
 };
@@ -32,5 +33,9 @@ pub struct AppState {
     /// Dispatch log for proactive alerting (always present; empty when alerts
     /// are disabled). Exposed via `GET /v1/alerts`.
     pub alert_log: Arc<AlertLog>,
+    /// Anti-abuse rate limiter for the expensive POST endpoints
+    /// (`/ask`, signals/preview, investigations, feedback). One shared store;
+    /// the protected routes meter per session / device / IP via the middleware.
+    pub ratelimit: Arc<Limiter>,
     pub settings: Arc<Settings>,
 }

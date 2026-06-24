@@ -14,17 +14,22 @@
 
 use crate::auth::{guard, make_guard};
 use crate::error::ApiError;
+use crate::identity;
+use crate::ratelimit::{self, Verdict};
 use crate::state::AppState;
-use axum::extract::{Path, Query, State};
-use axum::middleware::from_fn;
-use axum::response::IntoResponse;
+use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::http::{HeaderName, HeaderValue};
+use axum::middleware::{from_fn, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use hkgov_agent::{heuristic_answer, run_agent_loop, Answer, HeuristicClient, LlmClient, ToolBelt};
-use hkgov_common::DataSource;
+use hkgov_common::{DataSource, Error};
 use hkgov_store::{DatasetId, RecordStore};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
@@ -34,6 +39,31 @@ pub fn router(state: AppState) -> Router {
     let timeout = Duration::from_millis(state.settings.api.request_timeout_ms);
     let api_key = make_guard(state.settings.api.api_key.clone());
     let prefix = state.settings.api.api_prefix.trim_matches('/').to_string();
+
+    // The limiter snapshot, captured by the middleware closure once. Settings
+    // live behind an Arc, so we read the live values cheaply per request.
+    let limiter = state.ratelimit.clone();
+    let rl_settings = state.settings.clone();
+    let rate_cfg = move || (rl_settings.api.ask_per_window, rl_settings.api.ask_warn_at, rl_settings.api.ask_window_secs, rl_settings.api.rate_trusted_proxies);
+
+    // The expensive write endpoints — POSTs that drive LLM/compute and are the
+    // abuse/token-burn surface. Split into their own sub-router so the limiter
+    // layer applies to exactly these (and their GET siblings stay unmetered).
+    // NOTE: `/auth/request-token` + `/auth/redeem` are deliberately NOT here —
+    // magic-link spam needs its own (volume-based) throttle, a separate concern.
+    let expensive_writes = Router::new()
+        .route("/ask", post(ask))
+        .route("/signals", post(create_signal))
+        .route("/signals/preview", post(preview_signal_route))
+        .route("/investigations", post(create_investigation))
+        .route("/investigations/{id}/steps", post(append_investigation_step))
+        .route("/investigations/{id}/notes", post(add_investigation_note))
+        .route("/insights/{id}/feedback", post(submit_feedback))
+        .layer(from_fn(move |req, next| {
+            let limiter = limiter.clone();
+            let (per_window, warn_at, window_secs, trusted_proxies) = rate_cfg();
+            async move { rate_limit_guard(limiter, per_window, warn_at, window_secs, trusted_proxies, req, next).await }
+        }));
 
     // The versioned API routes. State is applied here so the nested router is
     // fully resolved before it's mounted under the prefix.
@@ -48,7 +78,8 @@ pub fn router(state: AppState) -> Router {
         .route("/insights", get(list_insights))
         .route(
             "/insights/{id}/feedback",
-            post(submit_feedback).get(get_feedback),
+            // GET is unmetered; the POST sibling lives in `expensive_writes`.
+            get(get_feedback),
         )
         .route("/insights/{id}/cite", get(cite_insight))
         .route("/insights/{id}/history", get(insight_history))
@@ -56,29 +87,17 @@ pub fn router(state: AppState) -> Router {
         .route("/alerts", get(list_alerts))
         .route("/silence-index", get(silence_index))
         .route("/unprecedentedness", get(unprecedentedness))
-        .route("/signals", post(create_signal).get(list_signals))
-        .route("/signals/preview", post(preview_signal_route))
-        .route(
-            "/signals/{id}",
-            get(get_signal).delete(delete_signal).patch(update_signal),
-        )
-        .route(
-            "/investigations",
-            post(create_investigation).get(list_investigations),
-        )
+        .route("/signals", get(list_signals))
+        .route("/signals/{id}", get(get_signal).delete(delete_signal).patch(update_signal))
+        .route("/investigations", get(list_investigations))
         .route(
             "/investigations/{id}",
             get(get_investigation).delete(delete_investigation),
         )
-        .route(
-            "/investigations/{id}/steps",
-            post(append_investigation_step),
-        )
-        .route("/investigations/{id}/notes", post(add_investigation_note))
         .route("/auth/request-token", post(request_auth_token))
         .route("/auth/redeem", post(redeem_auth_token))
         .route("/auth/me", get(auth_me))
-        .route("/ask", post(ask));
+        .merge(expensive_writes);
 
     if let Some(key) = api_key {
         api_routes = api_routes.layer(from_fn(move |req, next| {
@@ -131,6 +150,114 @@ struct Root {
     version: &'static str,
     endpoints: &'static [&'static str],
 }
+
+/// Three-dimensional rate-limit guard for the expensive POST endpoints.
+///
+/// Meters each request against three independent counters — per session, per
+/// device (`X-Reader-Id`), per IP — using a shared [`ratelimit::Limiter`]. The
+/// request proceeds only if **all** present dimensions are under their cap;
+/// the first that returns [`Verdict::Block`] short-circuits with `429`. When a
+/// dimension reaches its warn threshold (but not the hard cap) the response
+/// carries `X-RateLimit-Warning` so cooperative clients can slow down before
+/// being blocked.
+///
+/// `ConnectInfo<SocketAddr>` is the source of the peer IP (the server is
+/// started with `into_make_service_with_connect_info`); `X-Forwarded-For` is
+/// honored only when `rate_trusted_proxies > 0`.
+async fn rate_limit_guard(
+    limiter: Arc<ratelimit::Limiter>,
+    per_window: u32,
+    warn_at: u32,
+    window_secs: u64,
+    trusted_proxies: u32,
+    req: axum::extract::Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    // A 0 cap means "this dimension is unlimited" (and the limiter treats it as
+    // such). When per_window is 0 we skip the whole mechanism — matches the
+    // documented "0 = unlimited" config contract.
+    if per_window == 0 {
+        return Ok(next.run(req).await);
+    }
+
+    let headers = req.headers().clone();
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0);
+    let id = identity::resolve(&headers, peer, trusted_proxies);
+    let now = SystemTime::now();
+
+    // Check all present dimensions. We record first, then decide, so a blocked
+    // request still counts against the caller's window (you can't dodge the cap
+    // by flooding until you get a 429). The *first* Block wins; we surface the
+    // worst (largest) remaining time if several block at once.
+    let mut blocked_retry_after: Option<u64> = None;
+    let mut should_warn = false;
+    if let Some(session) = &id.session {
+        let v = limiter
+            .check(&ratelimit::keys::session(session), per_window, warn_at, window_secs, now)
+            .await;
+        match v {
+            Verdict::Block { retry_after_secs } => {
+                blocked_retry_after = Some(blocked_retry_after.map_or(retry_after_secs, |a| a.max(retry_after_secs)));
+            }
+            Verdict::Warn => should_warn = true,
+            Verdict::Allow => {}
+        }
+    }
+    if let Some(device) = &id.device {
+        let v = limiter
+            .check(&ratelimit::keys::device(device), per_window, warn_at, window_secs, now)
+            .await;
+        match v {
+            Verdict::Block { retry_after_secs } => {
+                blocked_retry_after = Some(blocked_retry_after.map_or(retry_after_secs, |a| a.max(retry_after_secs)));
+            }
+            Verdict::Warn => should_warn = true,
+            Verdict::Allow => {}
+        }
+    }
+    // IP always resolves (to the sentinel UNKNOWN_IP if nothing else). The
+    // per-IP counter is the rotation backstop: a caller cycling sessions or
+    // devices from one IP still hits this cap.
+    {
+        let v = limiter
+            .check(&ratelimit::keys::ip(&id.ip), per_window, warn_at, window_secs, now)
+            .await;
+        match v {
+            Verdict::Block { retry_after_secs } => {
+                blocked_retry_after = Some(blocked_retry_after.map_or(retry_after_secs, |a| a.max(retry_after_secs)));
+            }
+            Verdict::Warn => should_warn = true,
+            Verdict::Allow => {}
+        }
+    }
+
+    if let Some(retry_after) = blocked_retry_after {
+        // The per-window counter has already been incremented, so the 429
+        // itself counts against future requests — callers can't flood-through.
+        return Err(ApiError(Error::RateLimited(retry_after)));
+    }
+
+    let mut resp = next.run(req).await;
+    if should_warn {
+        // Cooperative back-pressure: tell the client it's near the cap.
+        resp.headers_mut()
+            .insert(X_RATELIMIT_WARNING, HeaderValue::from_static("approaching-limit"));
+        // remaining = cap - max(count). The limiter doesn't expose its count
+        // here, so we report the conservative "1 left" semantics: the next
+        // request may be the last allowed one.
+        resp.headers_mut()
+            .insert(X_RATELIMIT_REMAINING, HeaderValue::from_static("1"));
+    }
+    Ok(resp)
+}
+
+/// Standard-ish rate-limit response headers. Lowercase per HTTP/2 norms; axum
+/// normalizes on egress.
+const X_RATELIMIT_WARNING: HeaderName = HeaderName::from_static("x-ratelimit-warning");
+const X_RATELIMIT_REMAINING: HeaderName = HeaderName::from_static("x-ratelimit-remaining");
 
 async fn root(State(_): State<AppState>) -> Json<Root> {
     Json(Root {
@@ -1040,26 +1167,12 @@ async fn auth_me(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Json<Option<hkgov_agent::User>> {
-    let session = bearer_token(&headers);
+    let session = identity::bearer_token(&headers);
     let user = match session {
         Some(s) => state.users.lookup_session(&s).await,
         None => None,
     };
     Json(user)
-}
-
-/// Extract the `Bearer {token}` value from an Authorization header, if present.
-fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
-    let auth = headers
-        .get(axum::http::header::AUTHORIZATION)?
-        .to_str()
-        .ok()?;
-    let token = auth.strip_prefix("Bearer ")?.trim();
-    if token.is_empty() {
-        None
-    } else {
-        Some(token.to_string())
-    }
 }
 
 // ---- POST /ask — natural-language Q&A -------------------------------------
@@ -1168,6 +1281,7 @@ mod tests {
             users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            ratelimit: Arc::new(crate::ratelimit::Limiter::default()),
             settings: Arc::new(settings),
         }
     }
@@ -1348,6 +1462,7 @@ mod tests {
             users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            ratelimit: Arc::new(crate::ratelimit::Limiter::default()),
             settings: Arc::new(settings),
         }
     }
@@ -1657,6 +1772,7 @@ mod tests {
             users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            ratelimit: Arc::new(crate::ratelimit::Limiter::default()),
             settings: Arc::new(settings),
         }
     }
@@ -1750,6 +1866,7 @@ mod tests {
             users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            ratelimit: Arc::new(crate::ratelimit::Limiter::default()),
             settings: Arc::new(settings),
         }
     }
@@ -1916,6 +2033,7 @@ mod tests {
             users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            ratelimit: Arc::new(crate::ratelimit::Limiter::default()),
             settings: Arc::new(settings),
         }
     }
@@ -2034,5 +2152,214 @@ mod tests {
         )
         .await;
         assert_eq!(a, b, "same insight + records → byte-identical citation");
+    }
+
+    // ---- Rate limiting (anti-abuse) on expensive POSTs ----------------------
+    //
+    // These drive the FULL router() (so the limiter middleware is wired) with
+    // synthetic ConnectInfo extensions so the per-IP dimension resolves to a
+    // known address. They lock the contract the limiter advertises:
+    //   * the Nth+1 protected POST from one client → 429 + Retry-After
+    //   * a request at/above the warn threshold (but under the cap) → 200 +
+    //     X-RateLimit-Warning
+    //   * GET routes are unmetered (no 429 under identical load)
+    //   * the per-IP backstop catches rotation: new session, same IP → still
+    //     blocked once the IP bucket is exhausted.
+
+    /// A state whose limiter settings are tight + deterministic for tests:
+    /// per_window=3, warn_at=2, window=3600s, no trusted proxies.
+    async fn rl_state() -> AppState {
+        let mut settings = Settings::default();
+        settings.api.ask_per_window = 3;
+        settings.api.ask_warn_at = 2;
+        settings.api.ask_window_secs = 3600;
+        settings.api.rate_trusted_proxies = 0;
+        let s = multi_state().await;
+        AppState {
+            settings: Arc::new(settings),
+            ..s
+        }
+    }
+
+    /// POST a JSON body to `path` through a built router, optionally attaching
+    /// a peer `ConnectInfo` and extra headers. Returns status + headers + body
+    /// so tests can inspect all three.
+    async fn post(
+        router: axum::Router,
+        path: &str,
+        body: serde_json::Value,
+        peer: Option<SocketAddr>,
+        headers: Vec<(&str, &str)>,
+    ) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+        let mut builder = axum::http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json");
+        for (k, v) in &headers {
+            builder = builder.header(*k, *v);
+        }
+        let mut req = builder
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        if let Some(sa) = peer {
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(sa));
+        }
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    fn ask_body() -> serde_json::Value {
+        serde_json::json!({ "question": "what is the interbank liquidity?" })
+    }
+
+    fn test_peer() -> SocketAddr {
+        "203.0.113.9:5000".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn ask_allows_under_cap_then_blocks() {
+        let state = rl_state().await;
+        let app = router(state);
+        // per_window=3 → requests 1..3 succeed (200), 4th → 429.
+        for _ in 0..3 {
+            let (st, _, _) =
+                post(app.clone(), "/v1/ask", ask_body(), Some(test_peer()), vec![]).await;
+            assert_eq!(st, axum::http::StatusCode::OK, "under cap must be 200");
+        }
+        let (st, hdrs, _) = post(app, "/v1/ask", ask_body(), Some(test_peer()), vec![]).await;
+        assert_eq!(st, axum::http::StatusCode::TOO_MANY_REQUESTS, "4th must be 429");
+        // 429 must carry Retry-After.
+        assert!(
+            hdrs.contains_key("retry-after"),
+            "429 must carry Retry-After header"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_warns_at_threshold_before_blocking() {
+        let state = rl_state().await;
+        let app = router(state);
+        // warn_at=2 → request 1 no warning, request 2 carries the warning.
+        let (st1, hdrs1, _) =
+            post(app.clone(), "/v1/ask", ask_body(), Some(test_peer()), vec![]).await;
+        assert_eq!(st1, axum::http::StatusCode::OK);
+        assert!(
+            !hdrs1.contains_key("x-ratelimit-warning"),
+            "request 1 must not warn"
+        );
+        let (st2, hdrs2, _) =
+            post(app.clone(), "/v1/ask", ask_body(), Some(test_peer()), vec![]).await;
+        assert_eq!(st2, axum::http::StatusCode::OK, "warn is still allowed");
+        assert!(
+            hdrs2.contains_key("x-ratelimit-warning"),
+            "request at warn threshold must carry X-RateLimit-Warning"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_routes_are_unmetered() {
+        let state = rl_state().await;
+        let app = router(state);
+        // Hammer a GET route from the same peer far past the POST cap — all 200.
+        for _ in 0..20 {
+            assert_eq!(
+                get_status(app.clone(), "/v1/sources").await,
+                200,
+                "GET must never be rate limited"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn per_ip_backstop_catches_session_rotation() {
+        let state = rl_state().await;
+        let app = router(state);
+        // Exhaust the IP bucket via 3 different sessions (same peer).
+        for i in 0..3 {
+            let (st, _, _) = post(
+                app.clone(),
+                "/v1/ask",
+                ask_body(),
+                Some(test_peer()),
+                vec![("Authorization", &format!("Bearer sess-{i}"))],
+            )
+            .await;
+            assert_eq!(st, axum::http::StatusCode::OK, "session {i} first call OK");
+        }
+        // A 4th, brand-new session from the SAME IP must still 429: the per-IP
+        // backstop bucket is exhausted regardless of session rotation.
+        let (st, _, _) = post(
+            app,
+            "/v1/ask",
+            ask_body(),
+            Some(test_peer()),
+            vec![("Authorization", "Bearer brand-new-session")],
+        )
+        .await;
+        assert_eq!(
+            st,
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "IP backstop must block session-rotation abuse"
+        );
+    }
+
+    #[tokio::test]
+    async fn different_ip_has_independent_bucket() {
+        let state = rl_state().await;
+        let app = router(state);
+        let other_peer = SocketAddr::from(([198u8, 51, 100, 1], 4000));
+        // Exhaust peer A's bucket.
+        for _ in 0..3 {
+            post(app.clone(), "/v1/ask", ask_body(), Some(test_peer()), vec![]).await;
+        }
+        // Peer B (different IP) has its own fresh bucket → still OK.
+        let (st, _, _) = post(app, "/v1/ask", ask_body(), Some(other_peer), vec![]).await;
+        assert_eq!(st, axum::http::StatusCode::OK, "distinct IP = distinct bucket");
+    }
+
+    #[tokio::test]
+    async fn auth_routes_exempt_from_limiter() {
+        // /auth/request-token + /auth/redeem are deliberately NOT rate-limited
+        // (magic-link spam is a separate concern). Hammering them stays 200/4xx,
+        // never 429.
+        let state = rl_state().await;
+        let app = router(state);
+        for _ in 0..20 {
+            let (st, _, _) = post(
+                app.clone(),
+                "/v1/auth/request-token",
+                serde_json::json!({ "email": "a@b.c" }),
+                Some(test_peer()),
+                vec![],
+            )
+            .await;
+            assert_ne!(
+                st,
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                "auth routes must not be rate limited"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_when_per_window_zero() {
+        // 0 = unlimited (the documented contract). No 429 under load.
+        let mut settings = Settings::default();
+        settings.api.ask_per_window = 0;
+        let s = multi_state().await;
+        let state = AppState {
+            settings: Arc::new(settings),
+            ..s
+        };
+        let app = router(state);
+        for _ in 0..30 {
+            let (st, _, _) =
+                post(app.clone(), "/v1/ask", ask_body(), Some(test_peer()), vec![]).await;
+            assert_eq!(st, axum::http::StatusCode::OK, "per_window=0 = unlimited");
+        }
     }
 }
