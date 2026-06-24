@@ -181,10 +181,15 @@ For the full rationale (async model, middleware stack, scaling math) see
 ### ✅ Shipped (v1–v5)
 
 **Ingestion & connectors**
-- HKMA connector — monetary & market statistics, press releases
-  (`crates/connectors/src/hkma.rs`)
-- data.gov.hk connector — cross-departmental data via the v2 filter + historical
-  archive APIs (`crates/connectors/src/datagovhk.rs`)
+- HKMA connector — the **full public HKMA Open API catalog (151 datasets)**,
+  every endpoint probe-verified live. Monetary & market statistics, banking,
+  Exchange Fund Bills & Notes, exchange rates/interest rates, monetary
+  operations, government bonds, daily figures, Bank/SVF registers, debt
+  securities settlement, and the trade repository. Segment/`lang` params are
+  handled per-row (`crates/connectors/src/hkma.rs`)
+- data.gov.hk connector — **33 verified cross-departmental resources** via the
+  v2 filter API + the historical archive for catalog discovery
+  (`crates/connectors/src/datagovhk.rs`)
 - Press connector — HKMA press releases API
   (`crates/connectors/src/press.rs`)
 - LandsD/CSDI connector — open geospatial catalog via the data.gov.hk archive
@@ -261,7 +266,9 @@ For the full rationale (async model, middleware stack, scaling math) see
 ### 🔮 Planned (from [docs/ROADMAP.md](docs/ROADMAP.md) "Remaining")
 
 - ISD / info.gov.hk HTML scraping + news.gov.hk RSS (press connector v2)
-- More `data.gov.hk` resources (each must be probe-verified first)
+- Wider `data.gov.hk` coverage — the 33 registered resources are the
+  probe-verified subset; the remaining 340+ catalog datasets are rejected by
+  the v2 filter API until their PSI URLs are registered upstream
 - Persisting insights to the Postgres tier (currently in-process only)
 - Generalize `ToolBelt` / `AgentSupervisor` to `Arc<dyn RecordStore>` so the
   agent works against Redis/Postgres backends

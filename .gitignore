@@ -25,3 +25,6 @@ NDH6SA~M
 # data dumps
 .archive_all.json
 *.archive.json
+
+# Scratch / probe working dir (live endpoint verification artifacts, not source)
+.probe/

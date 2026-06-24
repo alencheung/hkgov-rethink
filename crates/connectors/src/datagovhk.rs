@@ -9,6 +9,26 @@
 //!   list files for a provider between two dates.
 //!
 //! Both verified live — see docs/DATA_SOURCES.md.
+//!
+//! ## Resource coverage
+//!
+//! data.gov.hk publishes **376 datasets** across 17 providers, but the v2 filter
+//! API only accepts a **registered subset** of PSI resource URLs — the rest are
+//! rejected with `{"code":"422","message":"Not a valid resource"}`. Every entry
+//! in `RESOURCES` below was probe-verified live against the filter API (returned
+//! HTTP 200 with a non-empty row array). The historical-archive connector
+//! (`landsd-catalog`) remains the discovery path for the full catalog; this
+//! connector only registers resources that actually return queryable data.
+//!
+//! Adding a resource = adding a row here; the `Connector` impl derives
+//! everything else. Each row's category is inferred from its provider:
+//! - `hk-cr` → Fiscal (Companies Registry business statistics)
+//! - `hk-dh` → Livability (Centre for Health Protection)
+//! - `hk-csd` → Government (Correctional Services)
+//! - `hk-ofca` → Government (telecoms licensing)
+//! - `hk-edb` → Population (Education Bureau)
+//! - `hktramways` / `hk-wsd` → Livability (transport / water)
+//! - `centaline` → Property (price index)
 
 use crate::{Connector, DatasetSpec};
 use async_trait::async_trait;
@@ -19,42 +39,338 @@ use hkgov_common::{
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-/// A resource exposed via the v2 filter API. Each one is a real data.gov.hk
-/// resource URL — adding a dataset is adding an entry here plus a slug below.
-#[derive(Debug, Clone)]
-struct FilterResource {
-    /// data.gov.hk resource URL (CSV/JSON/Excel). Queried verbatim.
+/// One verified data.gov.hk resource. Adding a dataset = adding a row here.
+#[derive(Debug, Clone, Copy)]
+struct DataGovResource {
+    /// Dataset id (the slug used in `/v1/datasets/datagovhk/<slug>`).
+    slug: &'static str,
+    title: &'static str,
+    /// data.gov.hk resource URL (CSV/JSON). Queried verbatim via the v2 filter
+    /// API. Must be probe-verified — the filter API rejects unregistered URLs.
     resource_url: &'static str,
-    /// Which field (if any) uniquely identifies a row.
+    category: Category,
+    tags: &'static [&'static str],
+    cadence: Cadence,
+    /// Which field (if any) uniquely identifies a row. `None` → hash fallback.
     id_field: Option<&'static str>,
 }
 
-fn resources() -> &'static [(&'static str, FilterResource)] {
-    &[
-        (
-            "money-lenders-licensees",
-            FilterResource {
-                resource_url: "http://www.cr.gov.hk/datagovhk/psi/ml_licensees.csv",
-                id_field: Some("MLR_No"),
-            },
-        ),
-        // Add more verified resources here. Each must be probed live before
-        // being registered — the v2 filter API rejects unregistered URLs with
-        // {"code":"422","message":"Not a valid resource"}.
-    ]
-}
-
-fn specs() -> &'static [DatasetSpec] {
-    &[DatasetSpec {
-        id: "money-lenders-licensees",
+/// The verified data.gov.hk resource table. Every `resource_url` here was
+/// confirmed to return data via `api.data.gov.hk/v2/filter` (see module docs).
+const RESOURCES: &[DataGovResource] = &[
+    // --- hk-cr (Companies Registry; 11 resources) ---
+    DataGovResource {
+        slug: "money-lenders-licensees",
         title: "Money Lenders Licensees (Companies Registry)",
-        description: Some("List of licensed money lenders, published by the Companies Registry."),
+        resource_url: "http://www.cr.gov.hk/datagovhk/psi/ml_licensees.csv",
         category: Category::Fiscal,
         tags: &["money-lenders", "licensing", "companies-registry"],
         cadence: Cadence::Daily,
-        refresh_interval_secs: 24 * 3600,
-    }]
-}
+        id_field: Some("MLR_No"),
+    },
+    DataGovResource {
+        slug: "cr-prosecution-records",
+        title: "Statistics Data on Prosecution (Companies Registry)",
+        resource_url: "http://www.cr.gov.hk/datagovhk/psi/conviction_record.csv",
+        category: Category::Fiscal,
+        tags: &["companies-registry", "prosecution", "business-statistics"],
+        cadence: Cadence::Monthly,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "cr-non-compliance-change-name",
+        title: "Non-Compliance with Directions to Change/Replace Company Names (Companies Registry)",
+        resource_url: "http://www.cr.gov.hk/datagovhk/psi/replace_name.csv",
+        category: Category::Fiscal,
+        tags: &["companies-registry", "business-statistics"],
+        cadence: Cadence::Daily,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "cr-stat-companies-on-register",
+        title: "Statistical Data on Local Companies Registered on the Companies Register",
+        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_01.csv",
+        category: Category::Fiscal,
+        tags: &["companies-registry", "business-statistics"],
+        cadence: Cadence::Monthly,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "cr-stat-companies-incorporated",
+        title: "Statistical Data on Local Companies Incorporated",
+        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_02.csv",
+        category: Category::Fiscal,
+        tags: &["companies-registry", "business-statistics"],
+        cadence: Cadence::Monthly,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "cr-stat-non-hk-companies",
+        title: "Statistical Data on Registered Non-Hong Kong Companies",
+        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_03.csv",
+        category: Category::Fiscal,
+        tags: &["companies-registry", "business-statistics"],
+        cadence: Cadence::Monthly,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "cr-stat-dissolutions",
+        title: "Statistical Data on Dissolution (Companies Registry)",
+        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_04.csv",
+        category: Category::Fiscal,
+        tags: &["companies-registry", "business-statistics"],
+        cadence: Cadence::Monthly,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "cr-stat-liquidations",
+        title: "Statistical Data on Liquidations (Companies Registry)",
+        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_05.csv",
+        category: Category::Fiscal,
+        tags: &["companies-registry", "business-statistics"],
+        cadence: Cadence::Monthly,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "cr-stat-documents-delivered",
+        title: "Statistical Data on Documents Delivered for Registration (Companies Registry)",
+        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_06.csv",
+        category: Category::Fiscal,
+        tags: &["companies-registry", "business-statistics"],
+        cadence: Cadence::Monthly,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "cr-stat-charges-discharge",
+        title: "Statistical Data on Charges/Memorandum of Discharge Delivered for Registration",
+        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_07.csv",
+        category: Category::Fiscal,
+        tags: &["companies-registry", "business-statistics"],
+        cadence: Cadence::Monthly,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "cr-stat-company-searches",
+        title: "Statistics Data on Searches on Image Records of Documents (Companies Registry)",
+        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_08.csv",
+        category: Category::Fiscal,
+        tags: &["companies-registry", "business-statistics"],
+        cadence: Cadence::Monthly,
+        id_field: None,
+    },
+
+    // --- hk-dh (Department of Health / Centre for Health Protection; 5 resources) ---
+    DataGovResource {
+        slug: "dh-covid-active-quarantine-orders",
+        title: "Active Quarantine Orders (COVID-19, Cap. 599C) — Centre for Health Protection",
+        resource_url: "http://www.chp.gov.hk/files/misc/active_quarantine_orders_cap599c.csv",
+        category: Category::Livability,
+        tags: &["health", "public-health", "covid-19"],
+        cadence: Cadence::Daily,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "dh-gastroenteritis-viruses-2013",
+        title: "Detection of Gastroenteritis Viruses from Faecal Specimens (2013)",
+        resource_url: "http://www.chp.gov.hk/files/misc/detection_of_gastroenteritis_viruses_from_faecal_specimens_in_2013_en.csv",
+        category: Category::Livability,
+        tags: &["health", "public-health", "laboratory-surveillance"],
+        cadence: Cadence::Unknown,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "dh-respiratory-pathogens-2014",
+        title: "Detection of Pathogens from Respiratory Specimens (2014)",
+        resource_url: "http://www.chp.gov.hk/files/misc/detection_of_influenza_viruses_in_respiratory_specimens_in_2014_en.csv",
+        category: Category::Livability,
+        tags: &["health", "public-health", "laboratory-surveillance"],
+        cadence: Cadence::Unknown,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "dh-influenza-subtyping-2014",
+        title: "Influenza Virus Subtyping (2014)",
+        resource_url: "http://www.chp.gov.hk/files/misc/influenza_virus_subtyping_in_2014_en.csv",
+        category: Category::Livability,
+        tags: &["health", "public-health", "laboratory-surveillance"],
+        cadence: Cadence::Unknown,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "dh-dengue-fever-statistics",
+        title: "Statistics on Dengue Fever — Centre for Health Protection",
+        resource_url: "https://www.chp.gov.hk/files/misc/df2002_en.csv",
+        category: Category::Livability,
+        tags: &["health", "public-health", "infectious-disease"],
+        cadence: Cadence::Unknown,
+        id_field: None,
+    },
+
+    // --- hk-csd (Correctional Services Department; 6 resources) ---
+    DataGovResource {
+        slug: "csd-chronology-history",
+        title: "Chronology of CSD's Development and Penal Measures of Hong Kong",
+        resource_url: "https://www.csd.gov.hk/datagovhk/About_Us_History_EN.csv",
+        category: Category::Government,
+        tags: &["correctional-services", "statistics"],
+        cadence: Cadence::Unknown,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "csd-approved-hand-in-articles",
+        title: "Approved Hand-in Articles (Correctional Services)",
+        resource_url: "http://www.csd.gov.hk/datagovhk/Approved_Hand_in_articles_EN.csv",
+        category: Category::Government,
+        tags: &["correctional-services", "statistics"],
+        cadence: Cadence::Daily,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "csd-institution-information",
+        title: "Correctional Institutions Information",
+        resource_url: "http://www.csd.gov.hk/datagovhk/PSI_Institution_information_EN.csv",
+        category: Category::Government,
+        tags: &["correctional-services", "statistics"],
+        cadence: Cadence::Unknown,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "csd-rehab-publicity-activities",
+        title: "Rehabilitation Publicity Activities for Rehabilitated Persons",
+        resource_url: "https://www.csd.gov.hk/datagovhk/Rehabilitation_Publicity_Activities_for_Rehabilitated_Persons_EN.csv",
+        category: Category::Government,
+        tags: &["correctional-services", "statistics"],
+        cadence: Cadence::Unknown,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "csd-escape-rate",
+        title: "Escape Rate of Persons in Custody (Correctional Services)",
+        resource_url: "https://www.csd.gov.hk/datagovhk/Stat_T1-11_escape_rate_en.csv",
+        category: Category::Government,
+        tags: &["correctional-services", "statistics"],
+        cadence: Cadence::Unknown,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "csd-ciu-complaints",
+        title: "Complaints/Requests/Enquiries Received by Complaint Investigation Unit",
+        resource_url: "https://www.csd.gov.hk/datagovhk/Stat_T1-13_ciu_en.csv",
+        category: Category::Government,
+        tags: &["correctional-services", "statistics"],
+        cadence: Cadence::Unknown,
+        id_field: None,
+    },
+
+    // --- hk-ofca (Office of the Communications Authority; 4 resources) ---
+    DataGovResource {
+        slug: "ofca-carrier-licensees",
+        title: "List of Carrier Licensees (OFCA)",
+        resource_url: "https://www.ofca.gov.hk/filemanager/ofca/common/datagovhk/carrier_lic_en.csv",
+        category: Category::Government,
+        tags: &["telecommunications", "licensing", "ofca"],
+        cadence: Cadence::Daily,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "ofca-experimental-station-licensees",
+        title: "List of Experimental Station Licensees (OFCA)",
+        resource_url: "https://www.ofca.gov.hk/filemanager/ofca/common/datagovhk/ex_en.csv",
+        category: Category::Government,
+        tags: &["telecommunications", "licensing", "ofca"],
+        cadence: Cadence::Daily,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "ofca-sbo-licensees",
+        title: "List of Services-Based Operator (SBO) Licensees (OFCA)",
+        resource_url: "https://www.ofca.gov.hk/filemanager/ofca/common/datagovhk/sbo_lic_en.csv",
+        category: Category::Government,
+        tags: &["telecommunications", "licensing", "ofca"],
+        cadence: Cadence::Daily,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "ofca-radio-dealer-unrestricted-licensees",
+        title: "List of Radio Dealer (Unrestricted) Licensees (OFCA)",
+        resource_url: "https://www.ofca.gov.hk/filemanager/ofca/common/datagovhk/xru_en.csv",
+        category: Category::Government,
+        tags: &["telecommunications", "licensing", "ofca"],
+        cadence: Cadence::Daily,
+        id_field: None,
+    },
+
+    // --- hk-edb (Education Bureau; 3 resources) ---
+    DataGovResource {
+        slug: "edb-curriculum-development-council-members",
+        title: "Membership of Curriculum Development Council (Education Bureau)",
+        resource_url: "https://www.edb.gov.hk/attachment/datagovhk/Membership_of_Curriculum_Development_Council_en.csv",
+        category: Category::Population,
+        tags: &["education", "edb"],
+        cadence: Cadence::Unknown,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "edb-cross-boundary-students",
+        title: "Cross-boundary Students in Kindergartens/Primary/Secondary Schools (Education Bureau)",
+        resource_url: "https://www.edb.gov.hk/attachment/datagovhk/Number_of_cross_boundary_students_en.csv",
+        category: Category::Population,
+        tags: &["education", "edb", "cross-boundary"],
+        cadence: Cadence::Annual,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "edb-cross-boundary-students-by-control-point",
+        title: "Cross-boundary Students by Land Boundary Control Point and Class Level (Education Bureau)",
+        resource_url: "https://www.edb.gov.hk/attachment/datagovhk/Number_of_cross_boundary_students_land_en.csv",
+        category: Category::Population,
+        tags: &["education", "edb", "cross-boundary"],
+        cadence: Cadence::Annual,
+        id_field: None,
+    },
+
+    // --- hktramways (2 resources) ---
+    DataGovResource {
+        slug: "tramways-main-routes",
+        title: "Hong Kong Tramways Main Routes",
+        resource_url: "http://static.data.gov.hk/tramways/datasets/main_routes/tramways_main_routes_en.csv",
+        category: Category::Livability,
+        tags: &["transport", "tram", "routes"],
+        cadence: Cadence::Unknown,
+        id_field: None,
+    },
+    DataGovResource {
+        slug: "tramways-tram-stops",
+        title: "Hong Kong Tramways Tram Stops",
+        resource_url: "http://static.data.gov.hk/tramways/datasets/tram_stops/summary_tram_stops_en.csv",
+        category: Category::Livability,
+        tags: &["transport", "tram", "stops"],
+        cadence: Cadence::Unknown,
+        id_field: None,
+    },
+
+    // --- hk-wsd (Water Supplies Department; 1 resource) ---
+    DataGovResource {
+        slug: "wsd-annual-fresh-water-supply",
+        title: "Annual Quantity of Fresh Water Supply (Water Supplies Department)",
+        resource_url: "https://www.wsd.gov.hk/datagovhk/en-data/annual_quantity_of_fresh_water_supply_en.csv",
+        category: Category::Livability,
+        tags: &["water-supply", "wsd"],
+        cadence: Cadence::Annual,
+        id_field: None,
+    },
+
+    // --- centaline (1 resource) ---
+    DataGovResource {
+        slug: "centaline-cci-estates",
+        title: "Property Information of the CCI Constituent Estates (Centaline)",
+        resource_url: "http://hk.centanet.com/opendata/CCI%20Estate%20for%20Opendata.csv",
+        category: Category::Property,
+        tags: &["property", "price-index", "centaline"],
+        cadence: Cadence::Daily,
+        id_field: None,
+    },
+];
 
 pub struct DataGovHkConnector {
     filter_url: String,
@@ -78,11 +394,8 @@ impl DataGovHkConnector {
         })
     }
 
-    fn resource_for(&self, dataset: &str) -> Option<&FilterResource> {
-        resources()
-            .iter()
-            .find(|(id, _)| *id == dataset)
-            .map(|(_, r)| r)
+    fn resource_for(&self, dataset: &str) -> Option<&'static DataGovResource> {
+        RESOURCES.iter().find(|r| r.slug == dataset)
     }
 
     /// Build the `q` parameter value for the v2 filter API.
@@ -194,7 +507,13 @@ impl Connector for DataGovHkConnector {
     }
 
     fn datasets(&self) -> &[DatasetSpec] {
-        specs()
+        // The table is the source of truth; project lazily on first call so the
+        // `&'static`-bound return of the trait is sound.
+        ensure_specs_initialized();
+        DATAGOVHK_SPECS
+            .get()
+            .map(Vec::as_slice)
+            .expect("datagovhk specs initialized")
     }
 
     async fn fetch(&self, dataset: &str) -> Result<Vec<NormalizedRecord>> {
@@ -222,6 +541,31 @@ impl Connector for DataGovHkConnector {
         tracing::info!(dataset, count = records.len(), "datagovhk: fetched dataset");
         Ok(records)
     }
+}
+
+/// Lazy-built `DatasetSpec` slice projected from [`RESOURCES`].
+static DATAGOVHK_SPECS: std::sync::OnceLock<Vec<DatasetSpec>> = std::sync::OnceLock::new();
+
+/// Initialize the projected specs once. Called from the registry build so the
+/// `&'static` lifetime in `datasets()` is sound.
+pub(crate) fn ensure_specs_initialized() {
+    DATAGOVHK_SPECS.get_or_init(|| {
+        RESOURCES
+            .iter()
+            .map(|r| {
+                let desc = format!("data.gov.hk: {}", r.title);
+                DatasetSpec {
+                    id: r.slug,
+                    title: r.title,
+                    description: Some(Box::leak(desc.into_boxed_str())),
+                    category: r.category,
+                    tags: r.tags,
+                    cadence: r.cadence,
+                    refresh_interval_secs: 24 * 3600,
+                }
+            })
+            .collect()
+    });
 }
 
 fn normalize_row(raw: &serde_json::Value) -> BTreeMap<String, RecordValue> {
@@ -308,5 +652,42 @@ mod tests {
         fields.insert("foo".into(), RecordValue::Str("bar".into()));
         let id = record_id_for("x", None, &fields);
         assert!(id.starts_with("id-"));
+    }
+
+    #[test]
+    fn resource_table_is_well_formed() {
+        // Regression guard: every row is unique + URL is a verified PSI path.
+        assert!(
+            RESOURCES.len() >= 30,
+            "datagovhk resource count drifted below the verified set"
+        );
+        let mut seen = std::collections::HashSet::new();
+        for r in RESOURCES {
+            assert!(seen.insert(r.slug), "duplicate datagovhk slug: {}", r.slug);
+        }
+        for r in RESOURCES {
+            assert!(!r.resource_url.is_empty(), "empty url for {}", r.slug);
+            // Every registered URL uses one of the verified PSI host patterns.
+            assert!(
+                r.resource_url.contains("/datagovhk/")
+                    || r.resource_url.contains("/files/misc/")
+                    || r.resource_url.contains("static.data.gov.hk/tramways")
+                    || r.resource_url.contains("centanet.com/opendata")
+                    || r.resource_url.contains("/filemanager/ofca/"),
+                "resource URL for {} is not on a verified PSI path: {}",
+                r.slug,
+                r.resource_url
+            );
+        }
+    }
+
+    #[test]
+    fn money_lenders_resource_preserved() {
+        // The original v1 resource must still be present with its id field.
+        let r = RESOURCES
+            .iter()
+            .find(|r| r.slug == "money-lenders-licensees")
+            .expect("money-lenders-licensees must remain registered");
+        assert_eq!(r.id_field, Some("MLR_No"));
     }
 }

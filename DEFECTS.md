@@ -19,6 +19,7 @@
 | D-009 | ⚪ risk | No owner isolation on signals/investigations (shared-key model) | F-022/26/28/30 | ⚠️ waived (documented v1 design) |
 | D-010 | 🟠 medium | Sessions never expire (leaked bearer valid forever) | F-035 | ✅ fixed + verified (+ 3 regression tests) |
 | D-011 | 🟡 low | Python client missing 8 endpoint families (signals/auth/cite/…) | F-056 | ⏸️ deferred (separate Python task) |
+| D-012 | 🔴 critical | Widened HKMA catalog silently broke the agent: dead scan-target slug + hash record-ids + dropped `hibor` tag + agent runs before data warms | F-038,F-039,F-046,F-067,F-077,F-089 | ✅ fixed + verified (+ 7 regression tests) |
 
 > **Third independent re-audit (D-006 → D-011).** A fresh, from-scratch QA cycle
 > was run with **no assumption** the prior audit (D-001 → D-005) was complete. It
@@ -391,3 +392,128 @@ client) for defects the earlier passes missed. Full per-test traces in
   auto-poll, responsive layout, ARIA).
 - Telemetry bootstrap (plain/json/otel paths).
 - Config load order (defaults < toml < env) and empty-prefix routing (D-003).
+
+---
+
+## Fourth independent re-audit (the pass that found D-012)
+
+A fresh, from-scratch QA cycle was run with **no assumption** that the prior
+audits were complete. Unlike the earlier passes — which leaned heavily on
+unit tests and "JS logic verified by inspection" — this pass **booted the
+live server against real HKGOV data and drove every user story end-to-end**
+through HTTP (curl) and through a headless Node harness that executes the
+dashboard's actual JS against the live API payloads.
+
+### Verification gates (this pass)
+
+| Gate | Result |
+|------|--------|
+| `cargo build --release -p hkgov-api` | ✅ clean |
+| `cargo test --workspace` | ✅ **200 passed**, 0 failed (baseline 193; +7 D-012 guards) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ clean |
+| `cargo fmt --all -- --check` | ✅ clean |
+| Python `pytest tests/` | ✅ 14 passed |
+| Live server regression (3 instances: open / key-enabled / empty-prefix) | ✅ all pass |
+| Headless dashboard harness (executes every page's JS vs live API) | ✅ no throws |
+
+### D-012 — Widened HKMA catalog silently broke the agent (4 linked defects)
+
+- **Stories:** F-038 (agent enabled), F-039 (series_jump / HIBOR), F-046
+  (cross_source_gap), F-067 (brief hero), F-077 (tag chips), F-089 (Silence
+  Index) — i.e. the project's **entire flagship surface**.
+- **Severity:** critical — the headline feature (HIBOR spike detection +
+  the "press room leaves it untold" Silence Index) produced nothing on a
+  real boot, despite the prior audits marking these stories "pass".
+- **Root cause:** the HKMA connector was expanded from 5 datasets to the
+  full 151-dataset public catalog, but the downstream agent integration was
+  never updated to match. Four linked breakages resulted:
+
+  1. **Dead scan-target slug.** `default_scan_targets()` (config.rs) still
+     referenced `daily-interbank-liquidity`, which was renamed to
+     `daily-figures-interbank-liquidity` in the catalog rewrite. 3 of the 4
+     default detectors pointed at a dataset that no longer exists.
+  2. **Hash record-ids.** `record_id_for` (hkma.rs) only mapped 2 legacy
+     slugs to date keys; all 149 new datasets fell through to an opaque
+     `id-<hash>` record_id. This broke `cross_source_gap` (which joins press
+     dates against data record_ids — hashes never matched, so every press
+     date looked "unexplained") and made evidence pointers unreadable.
+  3. **Dropped `hibor` tag.** The tag was removed from the interbank
+     datasets in the rewrite, so `?tag=hibor` returned 0 — breaking the
+     dashboard's tag-search and contradicting the README's flagship
+     narrative.
+  4. **Agent runs before its data warms.** The agent's first pass fired
+     after a fixed 20s `sleep`. With 186 datasets warming concurrently under
+     per-source rate limits (HKMA 5/s ⇒ ~37s for HKMA alone), the HIBOR feed
+     had not been fetched when the first (and for 6 hours the only) pass
+     ran, so it scanned an empty store. The README's "241 insights" was
+     unreachable from a real boot.
+
+- **Observed (pre-fix, live boot, agent enabled):**
+  - `/v1/insights` → **4** insights (all `capital-market-statistics`); README
+    claims ~241.
+  - `/v1/silence-index?period=2026-Q2` → score **0.0**, total_events **0**.
+  - `/v1/sources?tag=hibor` → **0** datasets.
+  - `daily-figures-interbank-liquidity` record_ids → `id-839da50f…` (hash).
+  - Dashboard Signals page: source=hkma defaults to the first-listed dataset
+    (`hkd-interbank-trans`, which lacks `hibor_overnight`), so a fresh user's
+    first Preview returned 0 findings.
+
+- **Expected:** the flagship HIBOR detection produces findings on a real
+  boot; the Silence Index reflects real opacity; tags and evidence pointers
+  are human-readable.
+
+- **Fix (four parts):**
+  1. `default_scan_targets()` (config.rs): updated all three references from
+     the dead slug to `daily-figures-interbank-liquidity`.
+  2. `record_id_for` (hkma.rs): added a generic date/period-field fallback
+     (`end_of_date`, `end_of_month`, `end_of_quarter`, `date`, `year_month`,
+     `quarter`, `year`) so the ~150 widened datasets get natural, joinable
+     ids instead of hashes; kept the explicit map for the legacy slugs.
+  3. Restored the `hibor` tag on `daily-figures-interbank-liquidity` and the
+     three `hk-interbank-ir-*` datasets; fixed the dashboard Signals page
+     (`sigDatasetFill`) to auto-select a dataset that carries the configured
+     field (preferring the canonical HIBOR feed), so a fresh user's first
+     Preview hits real data.
+  4. Replaced the fixed 20s `sleep` before the agent's first pass
+     (main.rs) with `wait_for_scan_readiness`, which polls the store until
+     every scan-target dataset (primary + companion) has ≥1 record, capped
+     at 180s so a permanently-unreachable upstream never blocks the agent.
+
+- **Verification (Phase 4, live boot, agent enabled):**
+  - `/v1/insights` → **242** insights (238 HIBOR `series_jump` + 4
+    capital-market), incl. "hibor_overnight moved +99.3% in 2026-02-16" —
+    exactly the README's flagship example.
+  - `/v1/silence-index?period=2026-Q2` → score **75.76**, 25 unattributed
+    jump events.
+  - `/v1/sources?tag=hibor` → **4** datasets.
+  - `daily-figures-interbank-liquidity` record_ids → real dates
+    (`2026-06-23`, …).
+  - Dashboard harness: `insights` region 10548 → **164632** chars rendered;
+    no JS throws across any page.
+  - 7 new regression tests (3 in config.rs, 4 in hkma.rs) lock the slug,
+    the HIBOR coverage, the cross_source_gap companion, the date-key
+    record_id behaviour, and the `hibor` tag. Workspace count 193 → **200**.
+
+### Why the prior audits missed it
+
+The earlier passes verified these stories through unit tests (which seed
+their own in-memory stores with the old slug) and by "inspecting the JS
+logic". Neither path exercises the real connector → real HKMA data → real
+agent-scheduler chain, so a slug rename that broke the live pipeline was
+invisible to them. This pass's distinguishing method was **booting against
+live data and asserting on the served output**, which is where the 4-insight
+count became undeniable.
+
+### What this pass checked and cleared (no new defect)
+
+- All 11 prior defects (D-001 → D-011): re-verified end-to-end against a
+  clean rebuild — all still fixed.
+- Full auth matrix (key on/off, header vs query, D-005 health-suffix bypass)
+  on a key-enabled instance.
+- Empty-prefix routing (D-003) on a dedicated instance.
+- Dashboard JS across all six pages via the headless harness (Overview,
+  Datasets, Signals, Cases, Health, Licences) — no throws, no undefined refs.
+- Signals preview, create, list, investigations create/steps/notes/delete,
+  auth request-token/redeem/me, cite all five formats + bundle + manifest,
+  unprecedentedness, since-filter (D-007), feedback round-trip.
+

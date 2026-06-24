@@ -318,10 +318,20 @@ pub struct CompanionRef {
 /// `correlation` are experimental. Operators opt in by adding `[[agent.scan]]`
 /// entries — see config.toml for examples.
 pub fn default_scan_targets() -> Vec<ScanTarget> {
+    // D-012: the HKMA catalog was widened to the full 151 datasets and the
+    // legacy `daily-interbank-liquidity` slug was renamed to
+    // `daily-figures-interbank-liquidity` (it is the same Daily Figures of
+    // Interbank Liquidity feed, same `hibor_overnight`/`closing_balance`
+    // fields). The three targets below previously pointed at the old slug, so
+    // the HIBOR spike + balance-swing + cross-source-gap detectors silently
+    // scanned an empty dataset and produced nothing — only the capital-market
+    // series_jump target fired. Updating the slug restores the flagship
+    // HIBOR detection surface (the project's headline feature) and the
+    // cross_source_gap input to the Silence Index.
     vec![
         ScanTarget {
             source: "hkma".into(),
-            dataset: "daily-interbank-liquidity".into(),
+            dataset: "daily-figures-interbank-liquidity".into(),
             detector: "series_jump".into(),
             field: Some("hibor_overnight".into()),
             threshold: Some(25.0),
@@ -336,7 +346,7 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
         },
         ScanTarget {
             source: "hkma".into(),
-            dataset: "daily-interbank-liquidity".into(),
+            dataset: "daily-figures-interbank-liquidity".into(),
             detector: "series_jump".into(),
             field: Some("closing_balance".into()),
             threshold: Some(15.0),
@@ -373,7 +383,7 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
             field_b: None,
             companion: Some(CompanionRef {
                 source: "hkma".into(),
-                dataset: "daily-interbank-liquidity".into(),
+                dataset: "daily-figures-interbank-liquidity".into(),
             }),
             cadence: Cadence::Unknown,
             comparison: Comparison::PeriodOverPeriod,
@@ -435,5 +445,76 @@ impl Settings {
             .merge(figment::providers::Toml::file("config.toml"))
             .merge(Env::prefixed("HKGOV_").split("__"))
             .extract()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- D-012: default scan targets must reference LIVE datasets ------------
+    //
+    // When the HKMA catalog was widened to 151 datasets, the legacy
+    // `daily-interbank-liquidity` slug was renamed to
+    // `daily-figures-interbank-liquidity` but the default scan targets kept
+    // pointing at the old name. Three of four flagship detectors silently
+    // scanned an empty dataset and produced nothing — only the capital-market
+    // target fired, so the project's headline HIBOR detection was dead. These
+    // guards lock the slug against any future rename-driven regression and
+    // assert the field/cadence contract each detector needs.
+
+    #[test]
+    fn default_scan_targets_reference_live_datasets() {
+        let scan = default_scan_targets();
+        assert!(!scan.is_empty(), "defaults must be non-empty");
+
+        // No target may point at the dead legacy slug.
+        for t in &scan {
+            assert_ne!(
+                t.dataset, "daily-interbank-liquidity",
+                "D-012 regression: scan target still references the dead slug"
+            );
+            if let Some(c) = &t.companion {
+                assert_ne!(
+                    c.dataset, "daily-interbank-liquidity",
+                    "D-012 regression: companion still references the dead slug"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_scan_targets_cover_hibor_detection() {
+        // The project's flagship: HIBOR series_jump on the live daily feed.
+        let scan = default_scan_targets();
+        let has_hibor = scan.iter().any(|t| {
+            t.dataset == "daily-figures-interbank-liquidity"
+                && t.detector == "series_jump"
+                && t.field.as_deref() == Some("hibor_overnight")
+        });
+        assert!(
+            has_hibor,
+            "defaults must include hibor_overnight series_jump on the live feed"
+        );
+    }
+
+    #[test]
+    fn default_scan_targets_include_cross_source_gap_companion() {
+        // The Silence Index is built from cross_source_gap; its companion must
+        // be the live interbank dataset (whose record_ids are dates).
+        let scan = default_scan_targets();
+        let gap = scan
+            .iter()
+            .find(|t| t.detector == "cross_source_gap")
+            .expect("defaults must include a cross_source_gap target");
+        let companion = gap
+            .companion
+            .as_ref()
+            .expect("cross_source_gap needs a companion");
+        assert_eq!(companion.source, "hkma");
+        assert_eq!(
+            companion.dataset, "daily-figures-interbank-liquidity",
+            "cross_source_gap companion must be the live (date-keyed) dataset"
+        );
     }
 }

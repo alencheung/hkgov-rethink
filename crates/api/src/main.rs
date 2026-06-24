@@ -66,9 +66,18 @@ async fn main() -> anyhow::Result<()> {
         let llm_for_agent = llm.clone();
         let settings_for_agent = Arc::new(settings.clone());
         let alerts_for_agent = alert_dispatcher.clone();
-        // Delay the first pass so the cache has something to analyze.
+        // D-012: previously the first agent pass fired after a fixed 20s delay.
+        // With the catalog widened to 186 datasets warming concurrently under
+        // per-source rate limits (HKMA 5/s ⇒ ~37s for HKMA alone), 20s was not
+        // long enough for the flagship HIBOR feed to be fetched — so the first
+        // (and for hours the only) pass scanned an empty dataset and produced
+        // no HIBOR findings. Instead of a blind sleep, wait until the datasets
+        // the scan targets reference actually have records, capped at a few
+        // minutes so a permanently-unreachable source never blocks the agent.
+        let readiness_store = store.clone();
+        let readiness_settings = settings_for_agent.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(20)).await;
+            wait_for_scan_readiness(&readiness_store, &readiness_settings.agent).await;
             let sup = AgentSupervisor::spawn(
                 store_for_agent,
                 insights_for_agent,
@@ -124,6 +133,71 @@ fn build_llm_client(settings: &Settings) -> Arc<dyn LlmClient> {
     }
     let _ = settings;
     Arc::new(HeuristicClient::new())
+}
+
+/// Wait until the datasets the configured scan targets reference have at least
+/// one record each before letting the agent's first pass run. Capped at
+/// `cap` so a permanently-unreachable upstream never blocks the agent — it
+/// just proceeds with whatever has warmed. Polls every 2s; the minimum wait is
+/// a short grace so the ingest supervisor has been scheduled at all.
+///
+/// D-012: this replaces the old fixed 20s sleep. The sleep was too short once
+/// the catalog grew to 186 datasets under per-source rate limits, so the first
+/// (and for hours the only) analysis pass ran against an empty store and the
+/// flagship HIBOR detector produced nothing.
+async fn wait_for_scan_readiness(
+    store: &Arc<hkgov_store::MemoryStore>,
+    agent: &hkgov_common::AgentSettings,
+) {
+    use hkgov_common::{DataSource, ScanTarget};
+    use hkgov_store::{DatasetId, RecordStore};
+    // Resolve the effective scan list (defaults when none configured).
+    let scan: Vec<ScanTarget> = if agent.scan.is_empty() {
+        hkgov_common::default_scan_targets()
+    } else {
+        agent.scan.clone()
+    };
+    // Collect the set of datasets the targets need (primary + companion).
+    let mut needed: Vec<DatasetId> = Vec::new();
+    for t in &scan {
+        if let Some(s) = DataSource::parse(&t.source) {
+            needed.push(DatasetId::new(s, t.dataset.clone()));
+        }
+        if let Some(c) = &t.companion {
+            if let Some(s) = DataSource::parse(&c.source) {
+                needed.push(DatasetId::new(s, c.dataset.clone()));
+            }
+        }
+    }
+    // A short initial grace so the ingest supervisor (spawned just before us)
+    // has actually been polled and kicked off its fetch tasks.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let cap = Duration::from_secs(180);
+    let deadline = tokio::time::Instant::now() + cap;
+    loop {
+        let mut ready = 0;
+        for id in &needed {
+            match store.meta(id).await {
+                Ok(Some(m)) if m.record_count > 0 => ready += 1,
+                _ => {}
+            }
+        }
+        if ready == needed.len() || needed.is_empty() {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(
+                ready,
+                total = needed.len(),
+                "agent: scan-target readiness wait timed out after 180s; \
+                 running the first pass with the datasets that have warmed"
+            );
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    tracing::info!("agent: scan-target datasets warmed, starting first analysis pass");
 }
 
 async fn shutdown_signal() {

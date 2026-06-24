@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HK City Pulse — hkgov-rethink</title>
+  <link href="https://cdn.jsdelivr.net/npm/remixicon@4.2.0/fonts/remixicon.css" rel="stylesheet">
   <style>
     :root {
       --bg: #0d1117; --panel: #161b22; --panel2: #1c2230; --border: #30363d;
@@ -18,35 +19,66 @@
     }
     * { box-sizing: border-box; }
     body { margin:0; font:14px/1.55 system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--fg); }
+    /* Remix Icon sizing — icons inherit color from their parent. */
+    i[class^="ri-"], i[class*=" ri-"] { font-size:1.05em; vertical-align:-0.125em; line-height:1; }
+    .icon-btn i, .actions button i, .fmt-tabs i { font-size:14px; }
+    .sev-icon i { font-size:16px; }
+    .banner i, .silence-signal i { font-size:14px; }
 
-    /* ---- header ---- */
-    header { position:sticky; top:0; z-index:10; background:var(--bg); border-bottom:1px solid var(--border); padding:12px 24px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+    /* ---- header with primary nav (multi-page app) ---- */
+    header { position:sticky; top:0; z-index:20; background:var(--bg); border-bottom:1px solid var(--border); }
+    .header-row { display:flex; align-items:center; gap:16px; flex-wrap:wrap; padding:12px 24px; }
     header h1 { margin:0; font-size:16px; font-weight:600; white-space:nowrap; }
     header h1 small { color:var(--muted); font-weight:400; }
     .status-dot { width:8px; height:8px; border-radius:50%; background:var(--muted); flex-shrink:0; }
     .status-dot.ok { background:var(--ok); } .status-dot.err { background:var(--crit); }
+    .status-dot.warn { background:var(--warn); }
     .config { margin-left:auto; display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
     .config input { background:var(--panel); color:var(--fg); border:1px solid var(--border); padding:5px 8px; border-radius:4px; font-size:13px; }
     .config label { color:var(--muted); font-size:12px; }
     .icon-btn { background:var(--panel); color:var(--fg); border:1px solid var(--border); padding:5px 10px; border-radius:4px; cursor:pointer; font-size:13px; }
+    nav.tabs { display:flex; gap:0; padding:0 24px; border-top:1px solid var(--border); overflow-x:auto; }
+    nav.tabs button { background:none; border:none; color:var(--muted); padding:10px 16px; cursor:pointer; font-size:13px; font-weight:500; border-bottom:2px solid transparent; white-space:nowrap; }
+    nav.tabs button:hover { color:var(--fg); }
+    nav.tabs button.active { color:var(--fg); border-bottom-color:var(--accent); }
+    nav.tabs .count { display:inline-block; margin-left:5px; background:var(--panel2); color:var(--muted); border-radius:8px; padding:0 6px; font-size:11px; font-weight:600; min-width:16px; text-align:center; }
 
     /* ---- layout ---- */
-    main { max-width:1100px; margin:0 auto; padding:24px 16px 80px; }
-    .layout { display:grid; grid-template-columns:1fr 340px; gap:20px; align-items:start; }
+    main { max-width:1200px; margin:0 auto; padding:24px 16px 80px; }
+    .page { display:none; }
+    .page.active { display:block; }
+    .layout { display:grid; grid-template-columns:1fr 360px; gap:20px; align-items:start; }
     @media (max-width:900px) { .layout { grid-template-columns:1fr; } .config { margin-left:0; width:100%; } header { position:static; } }
 
     /* ---- sections ---- */
     section { margin-bottom:24px; }
     h2 { margin:0 0 12px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:0.6px; font-weight:600; }
+    h3 { margin:18px 0 8px; font-size:15px; font-weight:600; }
+
+    /* ---- silence index hero (DUX-01) ---- */
+    .silence-hero { background:linear-gradient(135deg,var(--panel) 0%,var(--panel2) 100%); border:1px solid var(--border); border-radius:12px; padding:20px 24px; margin-bottom:20px; display:flex; gap:24px; align-items:center; flex-wrap:wrap; }
+    .silence-score { text-align:center; min-width:140px; }
+    .silence-score .num { font-size:48px; font-weight:700; line-height:1; }
+    .silence-score .lbl { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:0.5px; margin-top:4px; }
+    .silence-body { flex:1; min-width:240px; }
+    .silence-body .title { font-size:17px; font-weight:600; margin-bottom:4px; }
+    .silence-body .sub { color:var(--muted); font-size:13px; margin-bottom:10px; }
+    .silence-signal { display:inline-flex; align-items:center; gap:6px; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:4px 8px; margin:2px; font-size:12px; }
+    .silence-signal .dot { width:6px; height:6px; border-radius:50%; }
+    .silence-bar { height:8px; background:var(--bg); border-radius:4px; overflow:hidden; margin-top:8px; }
+    .silence-bar > div { height:100%; background:linear-gradient(90deg,var(--ok),var(--warn),var(--crit)); }
 
     /* ---- insight cards ---- */
     .insights-filter { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
     .insights-filter button { background:var(--panel); color:var(--muted); border:1px solid var(--border); padding:4px 10px; border-radius:12px; cursor:pointer; font-size:12px; }
     .insights-filter button.active { color:var(--fg); border-color:var(--accent); }
+    .insights-filter button.dim { opacity:0.4; cursor:default; }
+    .insights-filter .filter-clear { color:var(--accent); font-size:11px; align-self:center; cursor:pointer; margin-left:4px; }
     .card { background:var(--panel); border:1px solid var(--border); border-left-width:4px; border-radius:8px; padding:14px 16px; margin-bottom:12px; transition:opacity .2s; }
     .card.sev-critical { border-left-color:var(--crit); background:var(--crit-bg); }
     .card.sev-warning { border-left-color:var(--warn); background:var(--warn-bg); }
     .card.sev-info { border-left-color:var(--info); }
+    .card.anchored { box-shadow:0 0 0 2px var(--accent); }
     .card-head { display:flex; align-items:center; gap:10px; margin-bottom:6px; flex-wrap:wrap; }
     .sev-icon { font-size:16px; line-height:1; }
     .card-head .title { font-weight:600; flex:1; min-width:0; }
@@ -58,16 +90,33 @@
     .badge-exp { background:rgba(248,81,73,0.08); color:var(--crit); border:1px dashed var(--crit); }
     .card .summary { color:#c9d1d9; }
     .card .meta { color:var(--muted); font-size:12px; margin-top:6px; display:flex; gap:12px; flex-wrap:wrap; }
-    details.evidence { margin-top:8px; }
-    details.evidence summary { cursor:pointer; color:var(--accent); font-size:12px; }
+    .card .actions { margin-top:8px; display:flex; gap:6px; flex-wrap:wrap; }
+    .card .actions button { background:var(--panel2); border:1px solid var(--border); color:var(--muted); border-radius:4px; padding:3px 8px; cursor:pointer; font-size:12px; }
+    .card .actions button:hover { color:var(--fg); border-color:var(--accent); }
+    .card .actions .note { color:var(--muted); font-size:11px; align-self:center; }
+    details.evidence, details.history { margin-top:8px; }
+    details.evidence summary, details.history summary { cursor:pointer; color:var(--accent); font-size:12px; }
     details.evidence pre { white-space:pre-wrap; margin:6px 0 0; font-size:11px; color:var(--muted); background:var(--bg); padding:8px; border-radius:4px; }
-    .fb { margin-top:8px; display:flex; gap:6px; align-items:center; }
-    .fb button { background:var(--panel2); border:1px solid var(--border); color:var(--muted); border-radius:4px; padding:3px 8px; cursor:pointer; font-size:12px; }
-    .fb button.voted { color:var(--fg); border-color:var(--accent); }
-    .fb .note { color:var(--muted); font-size:11px; }
+    details.evidence div.ev { font-size:12px; color:var(--muted); margin-top:4px; }
+
+    /* ---- citation modal (DUX-02) ---- */
+    .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,0.6); display:none; z-index:50; align-items:center; justify-content:center; padding:16px; }
+    .modal-bg.open { display:flex; }
+    .modal { background:var(--panel); border:1px solid var(--border); border-radius:10px; max-width:640px; width:100%; max-height:80vh; overflow-y:auto; }
+    .modal-head { display:flex; align-items:center; padding:14px 18px; border-bottom:1px solid var(--border); }
+    .modal-head .t { font-weight:600; flex:1; }
+    .modal-head button { background:none; border:none; color:var(--muted); font-size:20px; cursor:pointer; }
+    .modal-body { padding:14px 18px; }
+    .fmt-tabs { display:flex; gap:4px; flex-wrap:wrap; margin-bottom:12px; }
+    .fmt-tabs button { background:var(--panel2); border:1px solid var(--border); color:var(--muted); border-radius:4px; padding:4px 10px; cursor:pointer; font-size:12px; }
+    .fmt-tabs button.active { color:var(--fg); border-color:var(--accent); }
+    .cite-out { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:12px; font-family:ui-monospace,monospace; font-size:12px; white-space:pre-wrap; word-break:break-word; max-height:240px; overflow-y:auto; }
+    .cite-actions { display:flex; gap:8px; margin-top:10px; }
+    .manifest { margin-top:14px; font-size:11px; color:var(--muted); }
+    .manifest code { color:var(--accent); }
 
     /* ---- chat rail ---- */
-    .rail { position:sticky; top:80px; }
+    .rail { position:sticky; top:140px; }
     .chat-log { max-height:380px; overflow-y:auto; margin-bottom:10px; }
     .chat-msg { margin-bottom:10px; }
     .chat-msg .q { color:var(--muted); font-size:12px; }
@@ -79,110 +128,325 @@
     .chat-input input { flex:1; background:var(--panel); color:var(--fg); border:1px solid var(--border); padding:8px; border-radius:4px; font-size:13px; }
     .chat-input button { background:var(--accent); color:var(--bg); border:none; padding:8px 14px; border-radius:4px; cursor:pointer; font-weight:600; font-size:13px; }
 
-    /* ---- datasets + health (collapsible, secondary) ---- */
-    .collapse-toggle { cursor:pointer; color:var(--accent); font-size:12px; margin-bottom:8px; display:inline-block; }
-    .collapse-body { display:none; }
-    .collapse-body.open { display:block; }
-    .tag-chip { display:inline-block; background:var(--panel2); border:1px solid var(--border); color:var(--muted); padding:1px 7px; border-radius:8px; font-size:11px; cursor:pointer; margin:1px; }
-    .tag-chip:hover { color:var(--fg); border-color:var(--accent); }
-    .cat-badge { display:inline-block; padding:1px 7px; border-radius:8px; font-size:11px; font-weight:600; color:#fff; opacity:0.9; }
+    /* ---- datasets / health pages ---- */
+    .toolbar { display:flex; gap:8px; margin:10px 0; flex-wrap:wrap; align-items:center; }
+    .toolbar select, .toolbar input { background:var(--panel); color:var(--fg); border:1px solid var(--border); padding:5px 8px; border-radius:4px; font-size:13px; }
+    .toolbar input { flex:1; min-width:140px; }
     table { width:100%; border-collapse:collapse; }
     th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); vertical-align:top; font-size:13px; }
     th { color:var(--muted); font-weight:500; font-size:12px; }
+    .tag-chip { display:inline-block; background:var(--panel2); border:1px solid var(--border); color:var(--muted); padding:1px 7px; border-radius:8px; font-size:11px; cursor:pointer; margin:1px; }
+    .tag-chip:hover { color:var(--fg); border-color:var(--accent); }
+    .cat-badge { display:inline-block; padding:1px 7px; border-radius:8px; font-size:11px; font-weight:600; color:#fff; opacity:0.9; }
     .health-grid { display:flex; gap:12px; flex-wrap:wrap; }
-    .health-pill { background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:6px 12px; font-size:13px; }
+    .health-card { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:14px; min-width:200px; flex:1; }
+    .health-card .src { font-weight:600; font-size:15px; }
+    .health-card .state { margin-top:6px; font-size:13px; }
+    .health-card .recs { font-size:12px; color:var(--muted); margin-top:6px; }
+
+    /* ---- signals page (DUX-07) ---- */
+    .composer { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:16px; }
+    .composer label { display:block; color:var(--muted); font-size:12px; margin:8px 0 4px; }
+    .composer input, .composer select { background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:4px; padding:6px 8px; font-size:13px; width:100%; }
+    .composer .row { display:flex; gap:8px; flex-wrap:wrap; }
+    .composer .row > * { flex:1; min-width:120px; }
+    .composer .nl { width:100%; }
+    .preview-box { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px; margin-top:10px; font-size:12px; min-height:32px; }
+
+    /* ---- investigations / cases page (DUX-05) ---- */
+    .case-card { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:10px; }
+    .case-card .ct { font-weight:600; }
+    .case-card .cm { color:var(--muted); font-size:12px; margin-top:4px; }
 
     /* ---- states ---- */
     .empty { color:var(--muted); font-style:italic; padding:20px 0; text-align:center; }
     .skeleton { background:linear-gradient(90deg,var(--panel) 25%,var(--panel2) 50%,var(--panel) 75%); background-size:200% 100%; animation:sk 1.5s infinite; border-radius:8px; height:60px; margin-bottom:12px; }
     @keyframes sk { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
     .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); border:0; }
+    /* degraded-state banner (DUX-04) */
+    .banner { border-radius:8px; padding:10px 14px; margin-bottom:16px; font-size:13px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .banner.warn { background:var(--warn-bg); border:1px solid var(--warn); color:var(--warn); }
+    .banner.crit { background:var(--crit-bg); border:1px solid var(--crit); color:var(--crit); }
+    .banner button { background:transparent; border:1px solid currentColor; color:inherit; border-radius:4px; padding:3px 8px; cursor:pointer; font-size:12px; }
+
+    /* ---- licences directory (resource page) ---- */
+    .lic-keyrow { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; margin-bottom:22px; }
+    .lic-key { background:linear-gradient(135deg,var(--panel) 0%,var(--panel2) 100%); border:1px solid var(--border); border-radius:8px; padding:14px 16px; }
+    .lic-key .kt { font-weight:600; font-size:14px; margin-bottom:2px; }
+    .lic-key .kd { color:var(--muted); font-size:12px; margin-bottom:10px; }
+    .lic-highlights { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:10px; margin-bottom:20px; }
+    .lic-hl { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:12px 14px; }
+    .lic-hl .name { font-weight:600; font-size:13px; }
+    .lic-hl .who { color:var(--muted); font-size:11px; margin:3px 0 8px; }
+    .lic-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr)); gap:12px; }
+    .lic-card { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:14px; display:flex; flex-direction:column; }
+    .lic-card .dept { font-weight:600; font-size:14px; }
+    .lic-card .desc { color:var(--muted); font-size:12px; margin:4px 0 8px; }
+    .lic-card .lics { font-size:12px; color:#c9d1d9; line-height:1.6; flex:1; }
+    .lic-card .portal { margin-top:10px; }
+    .lic-card .lics b { color:var(--fg); font-weight:500; }
+    /* ---- related market players panel (per department) ---- */
+    .lic-card .players { margin-top:10px; padding-top:10px; border-top:1px dashed var(--border); }
+    .lic-card .players .players-hd { font-size:12px; font-weight:600; color:var(--accent); margin-bottom:6px; display:flex; align-items:center; gap:5px; }
+    .lic-card .players .player { display:flex; gap:8px; font-size:12px; line-height:1.5; color:#c9d1d9; padding:2px 0; }
+    .lic-card .players .player .rank { flex-shrink:0; width:18px; height:18px; border-radius:4px; background:var(--panel2); border:1px solid var(--border); color:var(--muted); font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; margin-top:1px; }
+    .lic-card .players .player .nm { color:var(--fg); font-weight:500; }
+    .lic-card .players .player .nt { color:var(--muted); }
+    .lic-card .players .players-disc { color:var(--muted); font-size:10px; margin-top:6px; font-style:italic; }
+    /* outbound link button (official external resource) — reuses .icon-btn */
+    a.ext-link { display:inline-flex; align-items:center; gap:4px; text-decoration:none; background:var(--panel2); border:1px solid var(--border); color:var(--muted); border-radius:4px; padding:4px 10px; font-size:12px; cursor:pointer; }
+    a.ext-link:hover { color:var(--fg); border-color:var(--accent); }
+    a.ext-link i { font-size:13px; }
+    .lic-note { color:var(--muted); font-size:12px; margin-top:14px; padding:10px 12px; background:var(--info-bg); border:1px solid var(--border); border-radius:6px; }
+    #licSearch { background:var(--panel); color:var(--fg); border:1px solid var(--border); padding:6px 10px; border-radius:4px; font-size:13px; width:100%; margin-bottom:14px; box-sizing:border-box; }
+
+    /* ---- scenario wizard ("I want to...") ---- */
+    .wiz { background:linear-gradient(135deg,var(--panel) 0%,var(--panel2) 100%); border:1px solid var(--border); border-radius:10px; padding:16px 18px; margin-bottom:22px; }
+    .wiz label { display:block; color:var(--muted); font-size:12px; margin-bottom:6px; }
+    .wiz-row { display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; }
+    .wiz select { background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:4px; padding:7px 10px; font-size:13px; flex:1; min-width:220px; }
+    .wiz .go-btn { background:var(--accent); color:var(--bg); border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:600; font-size:13px; }
+    .wiz .go-btn:hover { filter:brightness(1.1); }
+    .wiz-hint { color:var(--muted); font-size:12px; margin-top:8px; }
+    .wiz-result { margin-top:16px; }
+    .wiz-bundle-title { font-weight:600; font-size:14px; margin-bottom:8px; }
+    .wiz-steps { display:flex; flex-direction:column; gap:8px; }
+    .wiz-step { display:flex; gap:10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px 12px; }
+    .wiz-step .num { flex-shrink:0; width:22px; height:22px; border-radius:50%; background:var(--panel2); border:1px solid var(--border); color:var(--accent); font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+    .wiz-step .body { flex:1; min-width:0; }
+    .wiz-step .lic { font-weight:600; font-size:13px; }
+    .wiz-step .meta { color:var(--muted); font-size:12px; margin:2px 0 4px; }
+    .wiz-step .why { font-size:12px; color:#c9d1d9; }
+    .wiz-step .actions { margin-top:6px; }
+    .wiz-disc { color:var(--muted); font-size:11px; margin-top:12px; padding-top:10px; border-top:1px solid var(--border); }
+  </style>
   </style>
 </head>
 <body>
   <header>
-    <span id="statusDot" class="status-dot" aria-hidden="true"></span>
-    <h1>HK City Pulse <small>— what the press room leaves untold</small></h1>
-    <div class="config">
-      <label for="baseUrl" class="sr-only">API base URL</label>
-      <input id="baseUrl" value="" placeholder="http://localhost:8080" size="24" aria-label="API base URL" />
-      <label for="apiKey" class="sr-only">API key</label>
-      <input id="apiKey" type="password" placeholder="key" size="10" aria-label="API key" />
-      <button class="icon-btn" onclick="loadAll()" aria-label="Refresh all">↻</button>
+    <div class="header-row">
+      <span id="statusDot" class="status-dot" aria-hidden="true"></span>
+      <h1>HK City Pulse <small>— what the press room leaves untold</small></h1>
+      <div class="config">
+        <label for="baseUrl" class="sr-only">API base URL</label>
+        <input id="baseUrl" value="" placeholder="http://localhost:8080" size="24" aria-label="API base URL" />
+        <label for="apiKey" class="sr-only">API key</label>
+        <input id="apiKey" type="password" placeholder="key" size="10" aria-label="API key" />
+        <button class="icon-btn" onclick="loadAll()" aria-label="Refresh all"><i class="ri-refresh-line"></i></button>
+      </div>
     </div>
+    <nav class="tabs" role="tablist" aria-label="Primary">
+      <button data-tab="overview" class="active" onclick="go('overview')" role="tab">Overview</button>
+      <button data-tab="datasets" onclick="go('datasets')" role="tab">Datasets</button>
+      <button data-tab="signals" onclick="go('signals')" role="tab">Signals <span class="count" id="navSignals">0</span></button>
+      <button data-tab="cases" onclick="go('cases')" role="tab">Cases <span class="count" id="navCases">0</span></button>
+      <button data-tab="health" onclick="go('health')" role="tab">Health</button>
+      <button data-tab="licences" onclick="go('licences')" role="tab">Licences</button>
+    </nav>
   </header>
 
   <main>
-    <div class="layout">
-      <!-- ===== LEFT: the product (insights-first) ===== -->
-      <div>
-        <!-- Daily brief hero -->
-        <section aria-live="polite" aria-atomic="false">
-          <h2>Today's brief <span id="briefCount" style="color:var(--accent)"></span></h2>
-          <div id="brief" role="region" aria-label="Daily brief">
-            <div class="skeleton"></div><div class="skeleton"></div>
-          </div>
-        </section>
+    <!-- =================== OVERVIEW =================== -->
+    <div id="page-overview" class="page active">
+      <div class="layout">
+        <div>
+          <div id="degradedBanner"></div>
 
-        <!-- Full insights feed (filterable) -->
-        <section aria-live="polite" aria-atomic="false">
-          <h2>All insights</h2>
-          <div class="insights-filter" role="group" aria-label="Filter insights by severity">
-            <button class="active" data-sev="all" onclick="setSevFilter('all')">all</button>
-            <button data-sev="critical" onclick="setSevFilter('critical')">🔴 critical</button>
-            <button data-sev="warning" onclick="setSevFilter('warning')">🟡 warning</button>
-            <button data-sev="info" onclick="setSevFilter('info')">🔵 info</button>
-          </div>
-          <div id="insights" role="region" aria-label="Insights feed">
-            <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
-          </div>
-        </section>
-
-        <!-- Collapsible secondary: data browse -->
-        <section>
-          <span class="collapse-toggle" onclick="toggleCollapse('dataBody')">▸ Browse datasets</span>
-          <div id="dataBody" class="collapse-body">
-            <div style="display:flex; gap:8px; margin:10px 0; flex-wrap:wrap;">
-              <select id="catFilter" onchange="loadSources()" aria-label="Filter by category" style="background:var(--panel); color:var(--fg); border:1px solid var(--border); padding:4px 8px; border-radius:4px;">
-                <option value="">all categories</option>
-              </select>
-              <input id="srcSearch" placeholder="search datasets…" oninput="loadSources()" aria-label="Search datasets" style="background:var(--panel); color:var(--fg); border:1px solid var(--border); padding:4px 8px; border-radius:4px; flex:1; min-width:120px;" />
+          <!-- Silence Index hero (DUX-01) -->
+          <section aria-live="polite">
+            <div id="silence" class="silence-hero">
+              <div class="silence-score">
+                <div class="num" id="silenceNum">—</div>
+                <div class="lbl" id="silenceLbl">Silence Index</div>
+              </div>
+              <div class="silence-body">
+                <div class="title" id="silenceTitle">Loading HKMA Silence Index…</div>
+                <div class="sub" id="silenceSub"></div>
+                <div class="silence-bar"><div id="silenceBar" style="width:0%"></div></div>
+                <div id="silenceSignals" style="margin-top:10px;"></div>
+              </div>
             </div>
-            <table><thead><tr><th>cat</th><th>source / dataset</th><th>tags</th><th>cadence</th><th>records</th></tr></thead>
-              <tbody id="sources"><tr><td class="empty" colspan="5">collapsed</td></tr></tbody></table>
-          </div>
-        </section>
+          </section>
 
-        <!-- Collapsible secondary: system health -->
-        <section>
-          <span class="collapse-toggle" onclick="toggleCollapse('healthBody')">▸ System health</span>
-          <div id="healthBody" class="collapse-body">
-            <div id="health" class="health-grid" style="margin-top:10px;"></div>
+          <!-- Daily brief hero (deduped + diversified: DUX-03) -->
+          <section aria-live="polite" aria-atomic="false">
+            <h2>Today's brief <span id="briefCount" style="color:var(--accent)"></span></h2>
+            <div id="briefFilters" class="insights-filter" role="group" aria-label="Filter brief by tag" style="display:none;"></div>
+            <div id="brief" role="region" aria-label="Daily brief">
+              <div class="skeleton"></div><div class="skeleton"></div>
+            </div>
+          </section>
+
+          <!-- Full insights feed (filterable) -->
+          <section aria-live="polite" aria-atomic="false">
+            <h2>All insights</h2>
+            <div class="insights-filter" role="group" aria-label="Filter insights by severity">
+              <button class="active" data-sev="all" onclick="setSevFilter('all')">all</button>
+              <button data-sev="critical" onclick="setSevFilter('critical')"><i class="ri-error-warning-fill" style="color:var(--crit)"></i> critical</button>
+              <button data-sev="warning" onclick="setSevFilter('warning')"><i class="ri-alert-line" style="color:var(--warn)"></i> warning</button>
+              <button data-sev="info" onclick="setSevFilter('info')"><i class="ri-information-line" style="color:var(--info)"></i> info</button>
+            </div>
+            <div id="insights" role="region" aria-label="Insights feed">
+              <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+            </div>
+          </section>
+        </div>
+
+        <!-- right rail: chat -->
+        <div>
+          <section class="rail">
+            <h2>Ask the agent</h2>
+            <div id="chatLog" class="chat-log" role="log" aria-label="Q&A history" aria-live="polite">
+              <div class="empty" id="chatEmpty">ask anything about the data</div>
+            </div>
+            <div class="chat-input">
+              <input id="askInput" placeholder="e.g. what is the interbank liquidity doing?" aria-label="Question for the agent" />
+              <button onclick="askAgent()" aria-label="Send question">Ask</button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- =================== DATASETS =================== -->
+    <div id="page-datasets" class="page">
+      <h2 style="margin-bottom:4px;">Browse datasets</h2>
+      <p style="color:var(--muted); margin:0 0 14px;">Every ingested HKGOV source, filterable. Click a tag to search.</p>
+      <div class="toolbar">
+        <select id="catFilter" onchange="loadSources()" aria-label="Filter by category"></select>
+        <input id="srcSearch" placeholder="search datasets…" oninput="loadSources()" aria-label="Search datasets" />
+      </div>
+      <table><thead><tr><th>cat</th><th>source / dataset</th><th>tags</th><th>cadence</th><th>records</th></tr></thead>
+        <tbody id="sources"><tr><td class="empty" colspan="5">loading…</td></tr></tbody></table>
+    </div>
+
+    <!-- =================== SIGNALS =================== -->
+    <div id="page-signals" class="page">
+      <h2 style="margin-bottom:4px;">Signal subscriptions</h2>
+      <p style="color:var(--muted); margin:0 0 14px;">Author a detector watch, preview what it <i>would have</i> fired over the last 90 days (deterministic — preview IS what will fire), then save it.</p>
+
+      <div class="composer">
+        <div class="row">
+          <div>
+            <label for="sigSource">source</label>
+            <select id="sigSource" onchange="sigDatasetFill()"></select>
           </div>
-        </section>
+          <div>
+            <label for="sigDataset">dataset</label>
+            <select id="sigDataset"></select>
+          </div>
+          <div>
+            <label for="sigDetector">detector</label>
+            <select id="sigDetector">
+              <option value="threshold_crossing">threshold_crossing (value breaks a level)</option>
+              <option value="series_jump">series_jump (% move between periods)</option>
+              <option value="outlier">outlier (MAD robust z)</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="sigField">field</label>
+            <input id="sigField" value="hibor_overnight" />
+          </div>
+          <div>
+            <label for="sigThreshold">threshold</label>
+            <input id="sigThreshold" type="number" step="any" value="2.0" />
+          </div>
+          <div>
+            <label for="sigDirection">direction</label>
+            <select id="sigDirection"><option value="above">above</option><option value="below">below</option></select>
+          </div>
+        </div>
+        <label for="sigQuestion" class="nl">describe it in your words (optional, re-displayed on the list)</label>
+        <input id="sigQuestion" class="nl" placeholder="e.g. tell me when overnight HIBOR breaks 2.5%" />
+        <div class="cite-actions">
+          <button class="icon-btn" onclick="previewSignal()"><i class="ri-play-line"></i> Preview (last 90 days)</button>
+          <button class="icon-btn" onclick="saveSignal()"><i class="ri-add-line"></i> Save signal</button>
+        </div>
+        <div id="sigPreview" class="preview-box">Preview results appear here.</div>
       </div>
 
-      <!-- ===== RIGHT: persistent chat rail ===== -->
-      <div>
-        <section class="rail">
-          <h2>Ask the agent</h2>
-          <div id="chatLog" class="chat-log" role="log" aria-label="Q&A history" aria-live="polite">
-            <div class="empty" id="chatEmpty">ask anything about the data</div>
-          </div>
-          <div class="chat-input">
-            <input id="askInput" placeholder="e.g. what is the interbank liquidity doing?" aria-label="Question for the agent" />
-            <button onclick="askAgent()" aria-label="Send question">Ask</button>
-          </div>
-        </section>
+      <h3>Saved signals</h3>
+      <div id="signalsList"><div class="empty">no signals yet — create one above</div></div>
+    </div>
+
+    <!-- =================== CASES (Investigations) =================== -->
+    <div id="page-cases" class="page">
+      <h2 style="margin-bottom:4px;">Drill-in investigations</h2>
+      <p style="color:var(--muted); margin:0 0 14px;">Saved, resumable case files. Launch one from any insight's <b>Investigate</b> button on the Overview tab.</p>
+      <div id="casesList"><div class="empty">no cases yet — open an insight on Overview and click "Investigate"</div></div>
+    </div>
+
+    <!-- =================== HEALTH =================== -->
+    <div id="page-health" class="page">
+      <h2 style="margin-bottom:4px;">System health</h2>
+      <p style="color:var(--muted); margin:0 0 14px;">Per-source circuit-breaker state + record counts. A source showing <code>open</code> or zero records is failing to warm.</p>
+      <div id="health" class="health-grid"><div class="empty">loading…</div></div>
+    </div>
+
+    <!-- =================== LICENCES (resources) =================== -->
+    <div id="page-licences" class="page">
+      <h2 style="margin-bottom:4px;">Licences, registration &amp; resources</h2>
+      <p style="color:var(--muted); margin:0 0 14px;">
+        Guidelines, portals and registries for the licences Hong Kong issues —
+        curated highlights first, then the full directory by issuing department.
+        Every entry links to an official HK source.
+      </p>
+
+      <!-- scenario wizard: "I want to..." returns the recommended licence bundle in apply-order -->
+      <div class="wiz">
+        <label for="wizSelect"><b>I want to…</b> pick what you want to do — we'll show the licences you typically need, in the order to apply, with prerequisites and timing.</label>
+        <div class="wiz-row">
+          <select id="wizSelect" aria-label="Choose a scenario">
+            <option value="">— choose what you want to do —</option>
+          </select>
+          <button class="go-btn" onclick="runWizard()">Show my licence plan</button>
+        </div>
+        <div class="wiz-hint">Each step links to the official HK page for exact forms, fees and document checklists.</div>
+        <div class="wiz-result" id="wizResult"></div>
       </div>
+
+      <div id="licencesKey" class="lic-keyrow"></div>
+      <h3>Most common licences</h3>
+      <div id="licencesHighlights" class="lic-highlights"></div>
+      <h3>Full directory by issuing department</h3>
+      <input id="licSearch" placeholder="filter by department or licence…" oninput="renderLicences()" aria-label="Filter the licence directory" />
+      <div id="licencesDir" class="lic-grid"></div>
+      <div class="lic-note" id="licencesNote"></div>
     </div>
   </main>
 
+  <!-- citation modal (DUX-02) -->
+  <div class="modal-bg" id="citeModal" onclick="if(event.target===this)closeCite()" role="dialog" aria-modal="true" aria-label="Citation">
+    <div class="modal">
+      <div class="modal-head">
+        <span class="t">Cite this finding</span>
+        <button onclick="closeCite()" aria-label="Close"><i class="ri-close-line"></i></button>
+      </div>
+      <div class="modal-body">
+        <div class="fmt-tabs" id="fmtTabs">
+          <button class="active" data-fmt="bibtex" onclick="setFmt('bibtex')">BibTeX</button>
+          <button data-fmt="ris" onclick="setFmt('ris')">RIS</button>
+          <button data-fmt="apa" onclick="setFmt('apa')">APA</button>
+          <button data-fmt="chicago" onclick="setFmt('chicago')">Chicago</button>
+          <button data-fmt="markdown" onclick="setFmt('markdown')">Markdown</button>
+        </div>
+        <div id="citeOut" class="cite-out">loading…</div>
+        <div class="cite-actions">
+          <button class="icon-btn" onclick="copyCite()"><i class="ri-file-copy-line"></i> Copy</button>
+          <button class="icon-btn" onclick="citeBundle()"><i class="ri-download-line"></i> JSON bundle + manifest</button>
+        </div>
+        <div class="manifest" id="citeManifest"></div>
+      </div>
+    </div>
+  </div>
+
   <script>
-    // ---- connection state + persistence ----
+    // ============ connection state + persistence ============
     const LS_BASE = 'hkgov.base', LS_KEY = 'hkgov.key';
     function api() {
-      let base = document.getElementById('baseUrl').value.replace(/\/$/, '') || 'http://localhost:8080';
+      let base = (document.getElementById('baseUrl').value || 'http://localhost:8080').replace(/\/$/, '');
       const key = document.getElementById('apiKey').value;
       return { base, headers: key ? { 'X-API-Key': key } : {} };
     }
@@ -198,21 +462,31 @@
         const k = localStorage.getItem(LS_KEY); if (k) document.getElementById('apiKey').value = k;
       } catch (e) {}
     }
-    function setConnection(ok) {
+    function setConnection(ok, partial) {
       const dot = document.getElementById('statusDot');
-      dot.className = 'status-dot ' + (ok ? 'ok' : 'err');
-      dot.title = ok ? 'connected' : 'cannot reach API';
+      dot.className = 'status-dot ' + (partial ? 'warn' : (ok ? 'ok' : 'err'));
+      dot.title = partial ? 'reachable — some sources degraded' : (ok ? 'connected' : 'cannot reach API');
     }
-    async function get(path) {
+    async function getJSON(path) {
       const { base, headers } = api();
       try {
         const r = await fetch(base + path, { headers });
         setConnection(r.ok);
-        if (!r.ok) return null;
+        if (!r.ok) return { __error: r.status };
         return await r.json();
-      } catch (e) { setConnection(false); return null; }
+      } catch (e) { setConnection(false); return { __error: 0 }; }
     }
-    function escapeHtml(s) { return String(s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+    async function postJSON(path, body) {
+      const { base, headers } = api();
+      try {
+        const r = await fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+        setConnection(r.ok);
+        if (!r.ok) return { __error: r.status, __text: await r.text() };
+        return await r.json();
+      } catch (e) { setConnection(false); return { __error: 0 }; }
+    }
+    // DUX-09: escapeHtml also escapes single quote (was a latent XSS seed).
+    function escapeHtml(s) { return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
     function relTime(iso) {
       if (!iso) return '—';
       const d = new Date(iso), now = new Date(), ms = now - d;
@@ -256,27 +530,156 @@
           <span>by ${escapeHtml(i.producer)}</span>
         </div>
         ${ev ? `<details class="evidence"><summary>evidence (${(i.evidence||[]).length})</summary>${ev}</details>` : ''}
-        ${fb}
+        <details class="history" id="hist-${cssEsc(i.id)}" style="display:none"></details>
+        ${actions}
       </div>`;
     }
+    function cssEsc(id) { return String(id).replace(/[^a-zA-Z0-9_-]/g, m => '_' + m.charCodeAt(0)); }
 
-    // ---- brief hero ----
+    // ============ brief + DUX-03 dedup/diversity ============
+    // Collapses repeated-series echoes but never starves the brief: when the
+    // underlying feed is genuinely one series (the default scan config only
+    // covers hibor_overnight), we still show maxN findings — just spaced out
+    // so the user sees "5 different dates" rather than "5 adjacent echoes".
+    function dedupDiversify(items, maxN) {
+      const key = it => it.source + '/' + it.dataset + '/' + ((it.evidence && it.evidence[0] && it.evidence[0].field) || '');
+      const groups = {};
+      for (const it of items) { (groups[key(it)] = groups[key(it)] || []).push(it); }
+      const groupKeys = Object.keys(groups);
+      const out = [];
+      // Round-robin across groups first (diversity), then fill from whichever remains.
+      let added = true, idx = 0;
+      const pointers = {};
+      while (added && out.length < maxN) {
+        added = false;
+        // take up to 2 per group in the first pass, then keep going if room
+        for (const gk of groupKeys) {
+          const cap = idx < 2 ? 2 : 999;  // first 2 per series round-robin, then uncap
+          if ((pointers[gk] || 0) < groups[gk].length && (pointers[gk] || 0) < cap) {
+            out.push(groups[gk][pointers[gk]||0]);
+            pointers[gk] = (pointers[gk]||0) + 1;
+            added = true;
+            if (out.length >= maxN) break;
+          }
+        }
+        idx++;
+      }
+      return out;
+    }
     async function loadBrief() {
-      const b = await get('/v1/brief?limit=5');
+      const b = await getJSON('/v1/brief?limit=50');
       const el = document.getElementById('brief');
-      if (!b || !b.items || !b.items.length) {
-        el.innerHTML = '<div class="empty">No brief yet. Enable the agent (<code>HKGOV_AGENT__ENABLED=true</code>) and insights will appear here within ~30s.</div>';
+      if (!b || b.__error || !b.items || !b.items.length) {
+        el.innerHTML = await degradedEmpty('No brief yet.');
         document.getElementById('briefCount').textContent = '';
+        document.getElementById('briefFilters').style.display = 'none';
         return;
       }
-      document.getElementById('briefCount').textContent = `(${b.items.length})`;
-      // BriefItem flattens the Insight fields (severity/title/evidence/…) to the
-      // top level alongside `rank`/`score` (see brief.rs #[serde(flatten)]), so
-      // pass the item itself to insightCard — not a non-existent `.insight`.
-      el.innerHTML = b.items.map(it => insightCard(it, true)).join('');
+      // Cache the full (deduped) set so filters re-render without a refetch.
+      briefAll = dedupDiversify(b.items, 20);
+      briefFilters = {};  // reset selections on reload
+      document.getElementById('briefCount').textContent = `(${briefAll.length})`;
+      renderBriefFilters();
+      renderBrief();
     }
 
-    // ---- insights feed (severity-filtered) ----
+    // ---- brief facets: data-driven tag filter ----
+    // Chips are built from whatever dimensions ACTUALLY VARY in the loaded set,
+    // so today (one series) the user gets useful direction/magnitude filters,
+    // and tomorrow (more detectors/sources) severity/kind/source/field appear
+    // automatically. No chip is shown for a dimension with only one value.
+    let briefAll = [], briefFilters = {};
+    const BRIEF_PCT_RE = /moved\s*([+\-])\s*([\d.]+)\s*%/;
+    function briefFacets(it) {
+      const field = (it.evidence && it.evidence[0] && it.evidence[0].field) || '';
+      let direction = '', magnitude = '';
+      const m = BRIEF_PCT_RE.exec(it.title || it.summary || '');
+      if (m) {
+        const pct = parseFloat(m[2]);
+        direction = m[1] === '+' ? 'up' : 'down';
+        magnitude = pct >= 30 ? 'major' : pct >= 15 ? 'moderate' : 'small';
+      }
+      return {
+        severity: it.severity || '',
+        kind: it.kind || '',
+        source: it.source + '/' + it.dataset,
+        field,
+        direction,
+        magnitude
+      };
+    }
+    function buildBriefFacetOptions(items) {
+      // For each facet, collect {value, label, count}; drop facets with <=1 distinct value.
+      const facets = ['severity', 'kind', 'source', 'field', 'direction', 'magnitude'];
+      const out = {};
+      for (const f of facets) {
+        const counts = {};
+        for (const it of items) {
+          const v = briefFacets(it)[f];
+          if (!v) continue;
+          counts[v] = (counts[v] || 0) + 1;
+        }
+        const opts = Object.keys(counts).sort().map(v => ({ value: v, count: counts[v] }));
+        if (opts.length > 1) out[f] = opts;  // only show facets that actually discriminate
+      }
+      return out;
+    }
+    const FACET_LABELS = {
+      severity: 'severity', kind: 'detector', source: 'series', field: 'field',
+      direction: 'direction', magnitude: 'size'
+    };
+    const FACET_VALUE_LABELS = {
+      direction: { up: 'rising', down: 'falling' },
+      magnitude: { major: 'major (>=30%)', moderate: 'moderate (15-30%)', small: 'small (<15%)' },
+      severity: { critical: 'critical', warning: 'warning', info: 'info' }
+    };
+    function renderBriefFilters() {
+      const wrap = document.getElementById('briefFilters');
+      const options = buildBriefFacetOptions(briefAll);
+      const facetKeys = Object.keys(options);
+      if (!facetKeys.length) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+      wrap.style.display = 'flex';
+      let html = '';
+      for (const f of facetKeys) {
+        html += `<span style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:0.4px;align-self:center;margin-right:2px;">${escapeHtml(FACET_LABELS[f]||f)}:</span>`;
+        for (const o of options[f]) {
+          const active = briefFilters[f] === o.value;
+          const lbl = (FACET_VALUE_LABELS[f] && FACET_VALUE_LABELS[f][o.value]) || o.value;
+          html += `<button class="${active?'active':''}" onclick="toggleBriefFilter('${f}','${escapeHtml(o.value)}')">${escapeHtml(lbl)} <span style="opacity:0.7">${o.count}</span></button>`;
+        }
+      }
+      if (Object.keys(briefFilters).length) {
+        html += `<span class="filter-clear" onclick="clearBriefFilters()" role="button">clear <i class="ri-close-line"></i></span>`;
+      }
+      wrap.innerHTML = html;
+    }
+    function toggleBriefFilter(facet, value) {
+      if (briefFilters[facet] === value) delete briefFilters[facet];
+      else briefFilters[facet] = value;
+      renderBriefFilters();
+      renderBrief();
+    }
+    function clearBriefFilters() {
+      briefFilters = {};
+      renderBriefFilters();
+      renderBrief();
+    }
+    function renderBrief() {
+      const el = document.getElementById('brief');
+      let shown = briefAll;
+      const active = Object.keys(briefFilters);
+      if (active.length) {
+        shown = briefAll.filter(it => {
+          const f = briefFacets(it);
+          return active.every(k => f[k] === briefFilters[k]);
+        });
+      }
+      const top = shown.slice(0, 8);
+      if (!top.length) { el.innerHTML = '<div class="empty">no findings match these filters</div>'; return; }
+      el.innerHTML = top.map(it => insightCard(it, true)).join('');
+    }
+
+    // ============ insights feed ============
     let allInsights = [], sevFilter = 'all';
     function setSevFilter(s) {
       sevFilter = s;
@@ -287,72 +690,244 @@
       const el = document.getElementById('insights');
       const filtered = sevFilter === 'all' ? allInsights : allInsights.filter(i => i.severity === sevFilter);
       if (!filtered.length) { el.innerHTML = '<div class="empty">no insights at this severity</div>'; return; }
-      el.innerHTML = filtered.map(i => insightCard(i, true)).join('');
+      el.innerHTML = filtered.slice(0, 60).map(i => insightCard(i, true)).join('');
+      anchorFromHash();
     }
     async function loadInsights() {
-      const ins = await get('/v1/insights?limit=50');
-      if (!ins) return;
+      const ins = await getJSON('/v1/insights?limit=100');
+      if (!ins || ins.__error) return;
       allInsights = ins;
       renderInsights();
     }
 
-    // ---- feedback (success metric) ----
-    async function vote(id, useful) {
+    // ============ degraded-state honesty (DUX-04) ============
+    let cachedHealth = null;
+    async function loadHealthQuiet() {
+      const hs = await getJSON('/v1/health/sources');
+      if (hs && !hs.__error) { cachedHealth = hs; return hs; }
+      const alt = await getJSON('/health/sources');
+      if (alt && !alt.__error) { cachedHealth = alt; return alt; }
+      return [];
+    }
+    async function degradedEmpty(message) {
+      const hs = cachedHealth || await loadHealthQuiet();
+      const failing = (hs || []).filter(s => s.circuit && s.circuit !== 'closed');
+      if (failing.length) {
+        return `<div class="empty">${escapeHtml(message)} <span style="color:var(--warn)">— upstream source(s) degraded: ${failing.map(f=>escapeHtml(f.source)).join(', ')}. Retry via <i class="ri-refresh-line"></i>.</span></div>`;
+      }
+      // DUX-04: do NOT blame the agent when agent is enabled and sources are fine.
+      return `<div class="empty">${escapeHtml(message)} The agent scans periodically — new findings appear within ~6h.</div>`;
+    }
+    async function renderDegradedBanner() {
+      const hs = cachedHealth || await loadHealthQuiet();
+      const el = document.getElementById('degradedBanner');
+      const failing = (hs || []).filter(s => s.circuit && s.circuit !== 'closed');
+      if (failing.length) {
+        el.innerHTML = `<div class="banner warn"><i class="ri-alert-line"></i> Upstream degraded: ${failing.map(f => '<b>' + escapeHtml(f.source) + '</b> (' + escapeHtml(f.circuit) + ')').join(', ')}. Some sections may show stale or empty data. <button onclick="loadAll()">retry now</button></div>`;
+      } else {
+        el.innerHTML = '';
+      }
+    }
+
+    // ============ feedback (DUX-09: checks r.ok) ============
+    async function vote(id, useful, btn) {
       const { base, headers } = api();
+      let ok = false;
       try {
-        await fetch(base + '/v1/insights/' + encodeURIComponent(id) + '/feedback', {
+        const r = await fetch(base + '/v1/insights/' + encodeURIComponent(id) + '/feedback', {
           method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
           body: JSON.stringify({ useful })
         });
-        const note = document.getElementById('fb-' + id);
-        if (note) note.textContent = useful ? 'thanks — marked useful' : 'thanks — marked not useful';
-      } catch (e) {}
+        ok = r.ok;
+      } catch (e) { ok = false; }
+      const note = document.getElementById('fb-' + id);
+      if (note) note.textContent = ok ? (useful ? 'thanks — marked useful' : 'thanks — marked not useful') : ('failed (HTTP) — not recorded');
     }
 
-    // ---- chat rail (conversation history, not single-turn) ----
-    const chatLog = [];
-    async function askAgent() {
-      const input = document.getElementById('askInput');
-      const q = input.value.trim();
-      if (!q) return;
-      input.value = '';
-      chatLog.push({ q, loading: true });
-      renderChat();
+    // ============ Cite-It modal (DUX-02) ============
+    let citeId = null, citeFmt = 'bibtex', citeManifestObj = null;
+    async function openCite(id) {
+      citeId = id;
+      document.getElementById('citeModal').classList.add('open');
+      setFmt('bibtex');
+    }
+    function closeCite() { document.getElementById('citeModal').classList.remove('open'); }
+    async function setFmt(fmt) {
+      citeFmt = fmt;
+      document.querySelectorAll('#fmtTabs button').forEach(b => b.classList.toggle('active', b.dataset.fmt === fmt));
+      document.getElementById('citeOut').textContent = 'loading…';
+      const r = await getJSON('/v1/insights/' + encodeURIComponent(citeId) + '/cite?format=' + fmt);
+      if (!r || r.__error) { document.getElementById('citeOut').textContent = 'error: HTTP ' + (r && r.__error); return; }
+      // format=bibtex|ris|apa|chicago|markdown returns text/plain rendered string; getJSON parsed as JSON may fail -> fetch raw
+      const txt = await fetchText('/v1/insights/' + encodeURIComponent(citeId) + '/cite?format=' + fmt);
+      document.getElementById('citeOut').textContent = txt || JSON.stringify(r);
+      // load the bundle for the manifest panel
+      const bundle = await getJSON('/v1/insights/' + encodeURIComponent(citeId) + '/cite');
+      citeManifestObj = (bundle && !bundle.__error) ? bundle.manifest : null;
+      const m = citeManifestObj;
+      document.getElementById('citeManifest').innerHTML = m
+        ? `Reproducibility manifest · detector <code>${escapeHtml(m.detector)}</code> · data SHA-256 <code>${escapeHtml(m.data_sha256).slice(0,16)}…</code>${m.experimental ? ' · <i class="ri-alert-line" style="color:var(--crit)"></i> experimental finding' : ''}`
+        : '';
+    }
+    async function fetchText(path) {
       const { base, headers } = api();
-      try {
-        const r = await fetch(base + '/v1/ask', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
-          body: JSON.stringify({ question: q })
-        });
-        const a = r.ok ? await r.json() : { text: 'error: ' + r.status, confidence: 0 };
-        chatLog[chatLog.length - 1] = { q, a };
-      } catch (e) {
-        chatLog[chatLog.length - 1] = { q, a: { text: 'request failed', confidence: 0 } };
-      }
-      renderChat();
+      try { const r = await fetch(base + path, { headers }); return r.ok ? await r.text() : null; } catch (e) { return null; }
     }
-    function renderChat() {
-      const el = document.getElementById('chatLog');
-      document.getElementById('chatEmpty')?.remove();
-      el.innerHTML = chatLog.map(m => {
-        if (m.loading) return `<div class="chat-msg"><div class="q">you: ${escapeHtml(m.q)}</div><div class="a muted">thinking…</div></div>`;
-        const conf = m.a.confidence !== undefined ? ` <span class="conf">${Math.round(m.a.confidence*100)}%</span>` : '';
-        const trace = (m.a.trace && m.a.trace.length) ? `<details><summary>${m.a.trace.length} tool call(s)</summary><pre>${escapeHtml(JSON.stringify(m.a.trace, null, 1))}</pre></details>` : '';
-        return `<div class="chat-msg"><div class="q">you: ${escapeHtml(m.q)}</div><div class="a">${escapeHtml(m.a.text)}${conf}${trace}</div></div>`;
-      }).join('');
-      el.scrollTop = el.scrollHeight;
+    async function copyCite() {
+      try { await navigator.clipboard.writeText(document.getElementById('citeOut').textContent); }
+      catch (e) { const ta = document.createElement('textarea'); ta.value = document.getElementById('citeOut').textContent; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+      const b = event.target; const orig = b.innerHTML; b.innerHTML = '<i class="ri-check-line"></i> copied'; setTimeout(() => b.innerHTML = orig, 1500);
     }
-    document.getElementById('askInput').addEventListener('keydown', e => { if (e.key === 'Enter') askAgent(); });
+    async function citeBundle() {
+      const bundle = await getJSON('/v1/insights/' + encodeURIComponent(citeId) + '/cite');
+      if (!bundle || bundle.__error) return;
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'cite-' + cssEsc(citeId).slice(0, 40) + '.json';
+      a.click();
+    }
 
-    // ---- datasets (filterable, color cats, tag chips) ----
-    function catColorClass(cat) { return CAT_COLORS.includes(cat) ? 'cat-' + cat : 'cat-other'; }
-    function catBadge(cat) { return `<span class="cat-badge" style="background:var(--${catColorClass(cat)})">${escapeHtml(cat||'other')}</span>`; }
+    // ============ insight history / lifeline (DUX-06) ============
+    async function loadHistory(id, btn) {
+      const det = document.getElementById('hist-' + cssEsc(id));
+      const open = det.style.display === 'none';
+      det.style.display = open ? 'block' : 'none';
+      if (!open) return;
+      det.innerHTML = '<summary style="cursor:pointer;color:var(--accent);font-size:12px">loading…</summary>';
+      const h = await getJSON('/v1/insights/' + encodeURIComponent(id) + '/history');
+      if (!h || h.__error) { det.innerHTML = '<span style="color:var(--muted);font-size:12px">error</span>'; return; }
+      if (!h.length) { det.innerHTML = '<div style="color:var(--muted);font-size:12px;margin-top:6px">No prior versions — insights are regenerated each scan pass and not yet persisted to a historical tier.</div>'; return; }
+      det.innerHTML = '<summary style="cursor:pointer;color:var(--accent);font-size:12px">history (' + h.length + ')</summary>' +
+        h.map(v => `<div style="font-size:12px;color:var(--muted);margin-top:6px">${escapeHtml(v.generated_at||'')} · ${escapeHtml(v.severity)} · ${escapeHtml(v.summary||v.title||'')}</div>`).join('');
+    }
+
+    // ============ investigations (DUX-05) ============
+    async function investigate(id, source, dataset, title) {
+      const inv = await postJSON('/v1/investigations', {
+        seed_insight_id: id, seed_source: source, seed_dataset: dataset, seed_title: title
+      });
+      if (!inv || inv.__error) { alert('Could not create case: ' + (inv && inv.__text ? inv.__text : 'HTTP ' + (inv && inv.__error))); return; }
+      go('cases');
+    }
+    async function loadCases() {
+      const list = await getJSON('/v1/investigations?limit=50');
+      const el = document.getElementById('casesList');
+      if (!list || list.__error || !list.length) { el.innerHTML = '<div class="empty">no cases yet — open an insight on Overview and click "Investigate"</div>'; return; }
+      document.getElementById('navCases').textContent = list.length;
+      el.innerHTML = list.map(c => `<div class="case-card">
+        <div class="ct">${escapeHtml(c.title || '(untitled)')}</div>
+        <div class="cm">seed: ${escapeHtml(c.seed_source||'?')}/${escapeHtml(c.seed_dataset||'?')} · ${escapeHtml(c.status||'open')} · ${(c.steps||[]).length} step(s) · ${escapeHtml(relTime(c.updated_at||c.created_at))}</div>
+        <div class="cm" style="margin-top:6px">${escapeHtml(c.seed_title||'')}</div>
+      </div>`).join('');
+    }
+
+    // ============ signals (DUX-07) ============
+    async function sigSourceFill() {
+      const sel = document.getElementById('sigSource');
+      if (sel.options.length) return;
+      const srcs = await getJSON('/v1/sources');
+      if (!srcs || srcs.__error) return;
+      const seen = {};
+      for (const s of srcs) if (!seen[s.source]) { seen[s.source] = true; const o = document.createElement('option'); o.value = s.source; o.textContent = s.source; sel.appendChild(o); }
+      sel.value = 'hkma';
+      sigDatasetFill();
+    }
+    async function sigDatasetFill() {
+      const src = document.getElementById('sigSource').value;
+      const sel = document.getElementById('sigDataset');
+      const field = (document.getElementById('sigField').value || '').trim();
+      sel.innerHTML = '';
+      const srcs = await getJSON('/v1/sources?source=' + encodeURIComponent(src));
+      if (!srcs || srcs.__error) return;
+      for (const s of srcs) { const o = document.createElement('option'); o.value = s.dataset; o.textContent = s.dataset + ' (' + s.record_count + ')'; sel.appendChild(o); }
+      // D-012: auto-select a dataset that actually carries the configured field.
+      // Without this the default field (hibor_overnight) landed on the first
+      // listed dataset — which after the catalog widening does NOT have that
+      // field — so a fresh user's first Preview returned 0 findings. When a
+      // field is set we probe one record of each dataset and prefer the first
+      // match; otherwise we keep the first dataset (preserve prior behaviour).
+      if (field) {
+        const preferred = src === 'hkma' && field === 'hibor_overnight'
+          ? 'daily-figures-interbank-liquidity'  // the canonical HIBOR feed
+          : null;
+        let chosen = null;
+        if (preferred && [...sel.options].some(o => o.value === preferred)) {
+          chosen = preferred;
+        } else {
+          // Probe datasets in order until one carries the field.
+          for (const s of srcs.slice(0, 12)) {
+            try {
+              const r = await getJSON('/v1/datasets/' + encodeURIComponent(s.source) + '/' + encodeURIComponent(s.dataset) + '/records?limit=1');
+              if (r && !r.__error && r.records && r.records[0] && (field in (r.records[0].fields || {}))) {
+                chosen = s.dataset; break;
+              }
+            } catch (e) { /* keep probing */ }
+          }
+        }
+        if (chosen) sel.value = chosen;
+      }
+    }
+    function buildScanTarget() {
+      return {
+        source: document.getElementById('sigSource').value,
+        dataset: document.getElementById('sigDataset').value,
+        detector: document.getElementById('sigDetector').value,
+        field: document.getElementById('sigField').value || null,
+        threshold: parseFloat(document.getElementById('sigThreshold').value) || null,
+        comparison: 'period_over_period',
+        cadence: 'unknown',
+        direction: document.getElementById('sigDirection').value
+      };
+    }
+    async function previewSignal() {
+      const box = document.getElementById('sigPreview');
+      box.textContent = 'previewing (deterministic, last 90 days)…';
+      const compiled = buildScanTarget();
+      const p = await postJSON('/v1/signals/preview', { compiled, window_days: 90 });
+      if (!p || p.__error) { box.innerHTML = '<span style="color:var(--crit)">preview error: ' + escapeHtml((p && p.__text) || ('HTTP ' + (p && p.__error))) + '</span>'; return; }
+      const n = p.count == null ? (p.findings || []).length : p.count;
+      box.innerHTML = `<b>This signal would have fired ${n} time${n===1?'':'s'} in the last ${p.window_days||90} days.</b> Detector: <code>${escapeHtml(p.compiled.detector)}</code> on <code>${escapeHtml(p.compiled.source)}/${escapeHtml(p.compiled.dataset)}</code>${p.compiled.field?'/'+escapeHtml(p.compiled.field):''}.<br>` +
+        (n ? '<span style="color:var(--muted)">most recent: ' + ((p.findings||[]).slice(0,3).map(f => escapeHtml(f.record_id || f.title || '?')).join(', ')) + '</span>' : '<span style="color:var(--ok)">none — try widening the threshold or changing direction.</span>');
+    }
+    async function saveSignal() {
+      const q = document.getElementById('sigQuestion').value.trim();
+      const compiled = buildScanTarget();
+      const s = await postJSON('/v1/signals', { question: q || null, compiled, channels: [], owner: 'dashboard' });
+      if (!s || s.__error) { alert('Could not save: ' + ((s && s.__text) || ('HTTP ' + (s && s.__error)))); return; }
+      document.getElementById('sigQuestion').value = '';
+      loadSignals();
+    }
+    async function loadSignals() {
+      const list = await getJSON('/v1/signals?limit=50');
+      const el = document.getElementById('signalsList');
+      if (!list || list.__error || !list.length) { el.innerHTML = '<div class="empty">no signals yet — create one above</div>'; document.getElementById('navSignals').textContent = '0'; return; }
+      document.getElementById('navSignals').textContent = list.length;
+      el.innerHTML = list.map(s => `<div class="case-card">
+        <div class="ct">${escapeHtml(s.question || (s.compiled.detector + ' on ' + s.compiled.source + '/' + s.compiled.dataset))}</div>
+        <div class="cm"><code>${escapeHtml(s.compiled.detector)}</code> · ${escapeHtml(s.compiled.source)}/${escapeHtml(s.compiled.dataset)}${s.compiled.field?'/'+escapeHtml(s.compiled.field):''}${s.compiled.threshold!=null?' · threshold '+escapeHtml(s.compiled.threshold):''} · ${s.enabled?'enabled':'paused'}</div>
+        <div class="actions" style="margin-top:8px"><button onclick="toggleSignal('${escapeHtml(s.id)}', ${!s.enabled})">${s.enabled?'pause':'enable'}</button><button onclick="delSignal('${escapeHtml(s.id)}')">delete</button></div>
+      </div>`).join('');
+    }
+    async function toggleSignal(id, en) {
+      const cur = await getJSON('/v1/signals/' + encodeURIComponent(id));
+      if (!cur || cur.__error) return;
+      cur.enabled = en;
+      await fetch(api().base + '/v1/signals/' + encodeURIComponent(id), { method:'PATCH', headers:{'Content-Type':'application/json', ...api().headers}, body: JSON.stringify(cur) });
+      loadSignals();
+    }
+    async function delSignal(id) {
+      await fetch(api().base + '/v1/signals/' + encodeURIComponent(id), { method:'DELETE', headers: api().headers });
+      loadSignals();
+    }
+
+    // ============ datasets page ============
     async function loadCategories() {
-      const cats = await get('/v1/categories');
+      const cats = await getJSON('/v1/categories');
       const sel = document.getElementById('catFilter');
       const cur = sel.value;
       sel.innerHTML = '<option value="">all categories</option>';
-      if (cats) for (const c of cats) { const o = document.createElement('option'); o.value = c.category; o.textContent = `${c.category} (${c.count})`; sel.appendChild(o); }
+      if (cats && !cats.__error) for (const c of cats) { const o = document.createElement('option'); o.value = c.category; o.textContent = `${c.category} (${c.count})`; sel.appendChild(o); }
       sel.value = cur;
     }
     async function loadSources() {

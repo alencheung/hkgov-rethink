@@ -87,15 +87,15 @@
 | ID | Feature | Expected behaviour (from code) | How to verify | Phase 2 | Phase 4 |
 |----|---------|--------------------------------|---------------|---------|---------|
 | F-037 | Agent disabled by default | No insights produced; `agent supervisor disabled` log. (`main.rs:84`) | boot without env | ✅ pass — log confirmed | — |
-| F-038 | Agent enabled, heuristic mode | First pass after 20s delay, then every `run_interval_secs` (≥300s). Produces Insights from `default_scan_targets`. (`main.rs:67`, `scheduler.rs:51`) | `HKGOV_AGENT__ENABLED=true` | ✅ pass — 241 insights after 20s | — |
-| F-039 | `series_jump` detector (PoP) | Flags field moving > threshold% between consecutive periods; default targets hibor_overnight (25%), closing_balance (15%), eq_mkt_hs_index (10%). (`config.rs:314-357`, `analysis.rs:513`) | insights appear post-warm | ✅ pass — series_jump findings present | — |
+| F-038 | Agent enabled, heuristic mode | First pass after 20s delay, then every `run_interval_secs` (≥300s). Produces Insights from `default_scan_targets`. (`main.rs:67`, `scheduler.rs:51`) | `HKGOV_AGENT__ENABLED=true` | ✅ pass — 241 insights after 20s | ✅ pass — **D-012 fixed**: 242 insights on a real boot (was 4 — agent ran before data warmed; fixed via `wait_for_scan_readiness`). README's "241" now genuinely reachable. |
+| F-039 | `series_jump` detector (PoP) | Flags field moving > threshold% between consecutive periods; default targets hibor_overnight (25%), closing_balance (15%), eq_mkt_hs_index (10%). (`config.rs:314-357`, `analysis.rs:513`) | insights appear post-warm | ✅ pass — series_jump findings present | ✅ pass — **D-012 fixed**: HIBOR series_jump now fires (238 findings incl. "+99.3% Feb 16"); was dead — default target pointed at a renamed-away slug. |
 | F-040 | `series_jump` cadence-aware | Cadence scales the per-period threshold (daily/weekly/monthly/…). (`scheduler.rs:221`) | config scan w/ cadence | ✅ pass — code path unit-tested | — |
 | F-041 | `series_jump` YoY comparison | `comparison=year_over_year` delegates to YoY detector. (`scheduler.rs:203`) | config scan w/ comparison | ✅ pass — code path unit-tested | — |
 | F-042 | `year_over_year` detector | Compares period vs same period `cadence.periods_per_year()` ago. (`analysis.rs:541`) | config scan | ✅ pass — unit-tested | — |
 | F-043 | `outlier` detector | MAD-based robust z; default threshold 3.5. (`analysis.rs:275`, const 244) | config scan | ✅ pass — unit-tested | — |
 | F-044 | `seasonality` detector | Autocorrelation at monthly/quarterly lag; default 0.6; experimental. (`analysis.rs:352`) | config scan experimental=true | ✅ pass — unit-tested | — |
 | F-045 | `correlation` detector | Pearson r decoupling between two fields; default 0.3; experimental. (`analysis.rs:414`) | config scan | ✅ pass — unit-tested | — |
-| F-046 | `cross_source_gap` detector | Dates in press but not in companion data (or vice versa). (`analysis.rs:185`, `scheduler.rs:300`) | default scan target #4 | ✅ pass — runs in default pass | — |
+| F-046 | `cross_source_gap` detector | Dates in press but not in companion data (or vice versa). (`analysis.rs:185`, `scheduler.rs:300`) | default scan target #4 | ✅ pass — runs in default pass | ✅ pass — **D-012 fixed**: companion dataset slug + record_id date-keys fixed; the join (press dates vs data record_ids) now compares like-for-like. |
 | F-047 | `proxy_divergence` detector | Two proxies diverge in latest value or decouple over history. (`analysis.rs:625`) | config scan | ✅ pass — unit-tested | — |
 | F-048 | `benchmark_deviation` detector | Actual vs benchmark; default 10% deviation. (`analysis.rs:771`) | config scan | ✅ pass — unit-tested | — |
 | F-049 | Experimental badge | `experimental=true` scan target → Insight.experimental=true, discounted ×0.7 in brief. (`scheduler.rs:139`, `brief.rs:100`) | brief ranking | ✅ pass — field present; discount unit-tested | — |
@@ -131,7 +131,7 @@
 | F-064 | Connection status dot | Green when any fetch returns ok, red on network error. (`index.html:201`) | load page | ⚠️ partial — **D-004** dashboard not served by API; logic unit-sim ok | ✅ pass — **D-004 fixed**: dashboard served at `/dashboard`; logic verified |
 | F-065 | Base URL + API key config | Inputs persist to `localStorage` (`hkgov.base`/`hkgov.key`). Auto-fills from `location` if served over http w/ port. (`index.html:189-204,401`) | reload page | ⚠️ partial — **D-004** auto-fill only works when served over http w/ port | ✅ pass — **D-004 fixed**: served via `/dashboard`, auto-fill triggers |
 | F-066 | Refresh-all button (↻) | Persists config + reloads brief + insights. (`index.html:111,396`) | click ↻ | ⚠️ partial — **D-004** reachable only if dashboard served | ✅ pass — **D-004 fixed**: dashboard served; button reachable |
-| F-067 | Today's brief hero | Loads `/v1/brief?limit=5`; shows count; empty-state prompts to enable agent. (`index.html:264`) | brief section | ❌ fail — **D-002** renders nothing (`it.insight` undefined) | ✅ pass — **D-002 fixed**: `insightCard(it)` renders ranked cards |
+| F-067 | Today's brief hero | Loads `/v1/brief?limit=5`; shows count; empty-state prompts to enable agent. (`index.html:264`) | brief section | ❌ fail — **D-002** renders nothing (`it.insight` undefined) | ✅ pass — **D-002 fixed**: `insightCard(it)` renders ranked cards. **D-012 (Phase 9)**: re-verified live — brief now renders 8 diversified HIBOR findings (was 3 capital-market only because HIBOR detection was dead). |
 | F-068 | Insights feed + severity filter | Loads `/v1/insights?limit=50`; buttons all/critical/warning/info filter client-side. (`index.html:276-294`) | click filter buttons | ✅ pass — data shape correct; filter logic sound | — |
 | F-069 | Insight card rendering | Card shows sev icon + badge, experimental badge, title, relative time, summary, meta (source/dataset, kind, conf%, producer), collapsible evidence. (`index.html:231-261`) | inspect a card | ✅ pass — used by insights feed; renders correctly | — |
 | F-070 | Evidence rendered (not JSON dump) | Each evidence item: `field @ record_id = value (context)`. (`index.html:232-235`) | expand evidence | ✅ pass — code path verified | — |
@@ -141,7 +141,7 @@
 | F-074 | Category filter dropdown | Filters sources table by category. (`index.html:146,355-356`) | select a category | ✅ pass — endpoint works | — |
 | F-075 | Dataset search box | `q=` filters sources live on input. (`index.html:149,357`) | type in search | ✅ pass — endpoint works | — |
 | F-076 | Category color badges | Each category gets its CSS color var. (`index.html:228,345-346`) | visual | ✅ pass — CSS verified | — |
-| F-077 | Tag chips clickable | Clicking a tag searches it. (`index.html:368,373`) | click a tag chip | ⚠️ partial — triggers `?q=tag` (works), not `?tag=` | ✅ pass — `?q=` path works (was never broken; `?tag=` now also works via D-001) |
+| F-077 | Tag chips clickable | Clicking a tag searches it. (`index.html:368,373`) | click a tag chip | ⚠️ partial — triggers `?q=tag` (works), not `?tag=` | ✅ pass — **D-012 (Phase 9)**: `?tag=hibor` was returning 0 (tag dropped in catalog rewrite); restored on 4 interbank datasets, now returns 4. Dashboard tag-click path verified. |
 | F-078 | System health (collapsible) | Toggle loads `/health/sources` then `/v1/health/sources`; green=closed, red=else. (`index.html:158-161,376-384`) | click ▸ System health | ✅ pass — fallback works; final dot green | — |
 | F-079 | Auto-poll brief + insights | Every 30s reloads brief + insights only. (`index.html:407`) | wait 30s | ✅ pass — setInterval wired | — |
 | F-080 | Collapsible sections default closed | dataBody + healthBody hidden until toggled. (`index.html:84-85,143,158`) | initial load | ✅ pass — CSS `.collapse-body` hidden by default | — |
@@ -169,7 +169,7 @@
 
 | ID | Feature | Expected behaviour (from code) | How to verify | Phase 2 | Phase 4 |
 |----|---------|--------------------------------|---------------|---------|---------|
-| F-089 | `GET /v1/silence-index` | Returns versioned `SilenceIndex{label, methodology_version:"1.0", source:hkma, period, score:0-100, raw_score, signals[], total_events}`. Score is a pure-Rust rollup of `cross_source_gap` + unattributed `series_jump` + missing-data days, squashed to 0-100. (`routes.rs` `silence_index`, `agent/silence.rs`) | `curl 'localhost:8080/v1/silence-index?period=2026-Q2'` | ✅ pass — route test `silence_index_returns_versioned_hkma_scoped_score` | — |
+| F-089 | `GET /v1/silence-index` | Returns versioned `SilenceIndex{label, methodology_version:"1.0", source:hkma, period, score:0-100, raw_score, signals[], total_events}`. Score is a pure-Rust rollup of `cross_source_gap` + unattributed `series_jump` + missing-data days, squashed to 0-100. (`routes.rs` `silence_index`, `agent/silence.rs`) | `curl 'localhost:8080/v1/silence-index?period=2026-Q2'` | ✅ pass — route test `silence_index_returns_versioned_hkma_scoped_score` | ✅ pass — **D-012 (Phase 9)**: live score was 0.0 (no HIBOR findings to roll up because detection was dead); now 75.76 with 25 unattributed jumps on a real boot. |
 | F-090 | Silence Index v1 is HKMA-scoped | Per Phase-5 D-5: v1 explicitly covers `DataSource::Hkma` only; non-HKMA insights excluded; label = "HKMA Silence Index". Widens as data.gov.hk coverage expands without a methodology bump. (`silence.rs` `COVERED_SOURCE`) | route test `non_hkma_insights_excluded` | ✅ pass — unit-tested | — |
 | F-091 | Silence Index score construction | `raw_score = Σ(count × weight)`; weights: press-only gap 3, data-only gap 1, unattributed jump 5, missing-data day 2. Score = `100·(1 − 1/(1 + raw/40))`. (`silence.rs` `weights`, `squash`) | unit test `squash_is_monotonic_and_bounded` | ✅ pass — unit-tested | — |
 | F-092 | Silence Index methodology versioned | `METHODOLOGY_VERSION="1.0"`; a weight/squash/signal-set change bumps it so a v1.x score is never silently compared to v1.y. (`silence.rs`) | unit test asserts `methodology_version == "1.0"` | ✅ pass — unit-tested | — |
@@ -203,6 +203,7 @@
 | **6 (P-100/P-103 product layer)** | **99** | **99** | **0** | **0** | **0** | **3** |
 | **7 (P-101 Cite-It)** | **107** | **107** | **0** | **0** | **0** | **3** |
 | **8 (P-102/P-104/P-105/P-106/P-108 + threshold fix)** | **149** | **149** | **0** | **0** | **0** | **3** |
+| **9 (D-012 live re-audit: flagship HIBOR + Silence Index restored)** | **149** | **149** | **0** | **0** | **0** | **3** |
 
 **Phase 2 failures (3) → all fixed in Phase 3:** F-006 (D-001 tag filter),
 F-067 (D-002 brief hero), F-084 (D-003 empty prefix panic).
@@ -215,6 +216,19 @@ the first pass missed; fixed in `auth.rs` with exact-path matching + 4 new
 regression tests. No other defects found.
 **n/a (3):** F-019 (needs live LLM key), F-061 (email sink, compiles).
 **Phase 5 outcome:** 0 failures, 0 partials — every reachable behaviour passes.
+
+**Phase 9 (fourth independent re-audit — D-012):** the prior passes verified
+the agent surface through unit tests (which seed their own stores with the
+old dataset slug) and by inspecting JS logic — neither path exercises the
+real connector → live HKGOV data → agent-scheduler chain. This pass **booted
+against live data and asserted on served output**, which exposed that the
+HKMA catalog widening (5 → 151 datasets) had silently broken the flagship:
+the HIBOR scan target pointed at a renamed-away slug, record-ids had become
+hashes (breaking cross_source_gap), the `hibor` tag was dropped, and the
+agent ran its first pass before the data warmed. Result: 4 insights (not
+241) and a Silence Index of 0.0 on a real boot — the project's thesis,
+unverified. Fixed in 4 parts + 7 regression tests; live boot now yields 242
+insights and Silence Index 75.76. Details in [DEFECTS.md](DEFECTS.md) D-012.
 
 ### Second independent re-audit (this pass)
 
@@ -271,13 +285,16 @@ Defect details: [DEFECTS.md](DEFECTS.md).
 |------|--------|
 | `cargo build --release -p hkgov-api` | ✅ clean |
 | `cargo build --release -p hkgov-api --features alerts,llm` | ✅ clean |
-| `cargo test --workspace` | ✅ **178 passed**, 0 failed (+88 since v6: P-100..P-108 + threshold fix) |
+| `cargo test --workspace` | ✅ **200 passed**, 0 failed (+7 since Phase 8: D-012 regression guards) |
 | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ no warnings |
 | `cargo fmt --all -- --check` | ✅ clean |
 | Python `pytest tests/` | ✅ 14 passed |
 | Live server regression (17 endpoints) | ✅ all pass |
 | Live server regression (independent re-audit) | ✅ all pass |
 | Live server regression (second re-audit, D-005) | ✅ all pass |
+| Live server regression (fourth re-audit, D-012 — open/key/empty-prefix instances) | ✅ all pass |
+| Headless dashboard harness (executes every page's JS vs live API) | ✅ no throws |
+| Live flagship proof (agent enabled, real HKGOV data) | ✅ 242 insights; Silence Index 75.76 (was 4 / 0.0 pre-D-012) |
 
 ---
 
