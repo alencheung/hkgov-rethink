@@ -497,26 +497,74 @@
       if (hrs < 24) return hrs + 'h ago';
       return Math.floor(hrs/24) + 'd ago';
     }
-    const SEV_ICON = { critical: '🔴', warning: '🟡', info: '🔵' };
+    const SEV_ICON = { critical: '<i class="ri-error-warning-fill" style="color:var(--crit)"></i>', warning: '<i class="ri-alert-line" style="color:var(--warn)"></i>', info: '<i class="ri-information-line" style="color:var(--info)"></i>' };
     const SEV_BADGE = { critical: 'badge-crit', warning: 'badge-warn', info: 'badge-info' };
     const CAT_COLORS = ['monetary','fiscal','property','trade','population','livability','government','other'];
+    function catColorClass(cat) { return CAT_COLORS.includes(cat) ? 'cat-' + cat : 'cat-other'; }
+    function catBadge(cat) { return `<span class="cat-badge" style="background:var(--${catColorClass(cat)})">${escapeHtml(cat||'other')}</span>`; }
 
-    // ---- insight card renderer (rendered evidence, not JSON dump) ----
-    function insightCard(i, withFeedback) {
+    // ============ multi-page routing (DUX-08 deep-links) ============
+    let lastTab = 'overview';
+    function go(tab) {
+      lastTab = tab;
+      document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+      document.getElementById('page-' + tab).classList.add('active');
+      document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+      if (location.hash !== '#' + tab) history.replaceState(null, '', '#' + tab);
+      if (tab === 'datasets') { loadCategories(); loadSources(); }
+      if (tab === 'signals') { sigSourceFill(); loadSignals(); }
+      if (tab === 'cases') loadCases();
+      if (tab === 'health') loadHealth();
+      if (tab === 'licences') { renderLicences(); loadMarketPlayers().then(renderLicences); }
+      window.scrollTo(0, 0);
+    }
+
+    // ============ Silence Index hero (DUX-01) ============
+    async function loadSilence() {
+      // Current quarter label, e.g. 2026-Q2
+      const now = new Date();
+      const q = Math.floor(now.getUTCMonth()/3) + 1;
+      const period = now.getUTCFullYear() + '-Q' + q;
+      const idx = await getJSON('/v1/silence-index?period=' + period);
+      if (!idx || idx.__error) {
+        document.getElementById('silenceTitle').textContent = 'Silence Index unavailable';
+        document.getElementById('silenceSub').textContent = idx && idx.__error ? ('HTTP ' + idx.__error) : 'cannot reach /v1/silence-index';
+        return;
+      }
+      const score = Math.round(idx.score);
+      const num = document.getElementById('silenceNum');
+      num.textContent = score;
+      num.style.color = score >= 60 ? 'var(--crit)' : score >= 30 ? 'var(--warn)' : 'var(--ok)';
+      document.getElementById('silenceLbl').textContent = (idx.label || 'Silence Index') + ' · ' + (idx.period || period);
+      document.getElementById('silenceTitle').textContent = idx.total_events + ' unexplained event' + (idx.total_events === 1 ? '' : 's') + ' this period';
+      document.getElementById('silenceSub').textContent = 'methodology v' + idx.methodology_version + ' · HKMA-scoped · deterministic';
+      document.getElementById('silenceBar').style.width = score + '%';
+      const sigWrap = document.getElementById('silenceSignals');
+      sigWrap.innerHTML = (idx.signals || []).filter(s => s.count > 0).map(s => {
+        const dot = s.contribution > 50 ? 'var(--crit)' : s.contribution > 10 ? 'var(--warn)' : 'var(--ok)';
+        return `<span class="silence-signal"><span class="dot" style="background:${dot}"></span>${escapeHtml(s.kind.replace(/_/g,' '))}: ${s.count} (${Math.round(s.contribution)}%)</span>`;
+      }).join('') || '<span style="color:var(--muted);font-size:12px;">no opacity signals this period</span>';
+    }
+
+    // ============ insight card ============
+    function insightCard(i, withActions) {
       const ev = (i.evidence || []).map(e => {
-        const ctx = e.context ? ` <span class="muted">(${escapeHtml(e.context)})</span>` : '';
-        return `<div><b>${escapeHtml(e.field)}</b> @ ${escapeHtml(e.record_id)} = <code>${escapeHtml(JSON.stringify(e.value))}</code>${ctx}</div>`;
+        const ctx = e.context ? ` <span style="color:var(--muted)">(${escapeHtml(e.context)})</span>` : '';
+        return `<div class="ev"><b>${escapeHtml(e.field)}</b> @ ${escapeHtml(e.record_id)} = <code>${escapeHtml(JSON.stringify(e.value))}</code>${ctx}</div>`;
       }).join('');
-      const exp = i.experimental ? ' <span class="badge badge-exp" title="Detector not yet validated on real data — see EXAMPLES.md">experimental</span>' : '';
-      const fb = withFeedback ? `
-        <div class="fb">
-          <button onclick="vote('${escapeHtml(i.id)}', true)" aria-label="Mark useful">👍 useful</button>
-          <button onclick="vote('${escapeHtml(i.id)}', false)" aria-label="Mark not useful">👎 not</button>
+      const exp = i.experimental ? ' <span class="badge badge-exp" title="Detector not yet validated on real data">experimental</span>' : '';
+      const actions = withActions ? `
+        <div class="actions">
+          <button onclick="openCite('${escapeHtml(i.id)}')" aria-label="Cite this finding"><i class="ri-bookmark-line"></i> Cite</button>
+          <button onclick="investigate('${escapeHtml(i.id)}','${escapeHtml(i.source)}','${escapeHtml(i.dataset)}',${JSON.stringify(i.title).replace(/'/g,"&#39;")})" aria-label="Start investigation"><i class="ri-search-line"></i> Investigate</button>
+          <button onclick="loadHistory('${escapeHtml(i.id)}', this)" aria-label="Show history"><i class="ri-time-line"></i> History</button>
+          <button onclick="vote('${escapeHtml(i.id)}', true, this)" aria-label="Mark useful"><i class="ri-thumb-up-line"></i></button>
+          <button onclick="vote('${escapeHtml(i.id)}', false, this)" aria-label="Mark not useful"><i class="ri-thumb-down-line"></i></button>
           <span class="note" id="fb-${escapeHtml(i.id)}"></span>
         </div>` : '';
-      return `<div class="card sev-${i.severity}" data-kind="${escapeHtml(i.kind)}">
+      return `<div class="card sev-${i.severity}" id="card-${cssEsc(i.id)}" data-kind="${escapeHtml(i.kind)}" data-field="${escapeHtml((i.evidence&&i.evidence[0]&&i.evidence[0].field)||'')}" data-sd="${escapeHtml(i.source+'/'+i.dataset)}">
         <div class="card-head">
-          <span class="sev-icon" aria-hidden="true">${SEV_ICON[i.severity]||'ℹ️'}</span>
+          <span class="sev-icon" aria-hidden="true">${SEV_ICON[i.severity]||'<i class="ri-information-line"></i>'}</span>
           <span class="badge ${SEV_BADGE[i.severity]||'badge-info'}">${escapeHtml(i.severity)}</span>
           ${exp}
           <span class="title">${escapeHtml(i.title)}</span>
@@ -937,52 +985,492 @@
       if (cat) params.set('category', cat);
       if (q) params.set('q', q);
       const qs = params.toString() ? ('?' + params.toString()) : '';
-      const src = await get('/v1/sources' + qs);
+      const src = await getJSON('/v1/sources' + qs);
       const sb = document.getElementById('sources');
-      if (src && src.length) {
+      if (src && !src.__error && src.length) {
         sb.innerHTML = src.map(s => `<tr>
           <td>${catBadge(s.category)}</td>
-          <td>${escapeHtml(s.source)}/${escapeHtml(s.dataset)}<br><span class="muted">${escapeHtml(s.title)}</span></td>
+          <td>${escapeHtml(s.source)}/${escapeHtml(s.dataset)}<br><span style="color:var(--muted)">${escapeHtml(s.title)}</span></td>
           <td>${(s.tags||[]).map(t => `<span class="tag-chip" onclick="tagSearch('${escapeHtml(t)}')">${escapeHtml(t)}</span>`).join('') || '—'}</td>
-          <td class="muted">${escapeHtml(s.cadence||'—')}</td>
+          <td style="color:var(--muted)">${escapeHtml(s.cadence||'—')}</td>
           <td>${s.record_count}</td></tr>`).join('');
       } else { sb.innerHTML = '<tr><td class="empty" colspan="5">no datasets match</td></tr>'; }
     }
-    function tagSearch(t) { document.getElementById('srcSearch').value = t; loadSources(); document.getElementById('dataBody').classList.add('open'); }
+    function tagSearch(t) {
+      document.getElementById('srcSearch').value = t;
+      loadSources();
+    }
 
-    // ---- system health (demoted) ----
+    // ============ health page ============
     async function loadHealth() {
-      const hs = await get('/health/sources') || await get('/v1/health/sources');
+      const hs = await loadHealthQuiet();
       const el = document.getElementById('health');
-      if (!hs) { el.innerHTML = '<span class="empty">unavailable</span>'; return; }
+      if (!hs || hs.__error || !hs.length) { el.innerHTML = '<span class="empty">unavailable</span>'; return; }
+      // also pull record counts so a silently-empty source is visible
+      const srcs = await getJSON('/v1/sources');
+      const counts = {};
+      if (srcs && !srcs.__error) for (const s of srcs) counts[s.source] = (counts[s.source]||0) + (s.record_count||0);
       el.innerHTML = hs.map(s => {
-        const color = s.circuit === 'closed' ? 'var(--ok)' : 'var(--crit)';
-        return `<div class="health-pill">${escapeHtml(s.source)}: <span style="color:${color}">${escapeHtml(s.circuit)}</span></div>`;
+        const closed = s.circuit === 'closed';
+        const color = closed ? 'var(--ok)' : 'var(--crit)';
+        const zero = (counts[s.source] || 0) === 0;
+        return `<div class="health-card">
+          <div class="src">${escapeHtml(s.source)}</div>
+          <div class="state">circuit: <span style="color:${color}">${escapeHtml(s.circuit)}</span></div>
+          <div class="recs">${counts[s.source]||0} records ingested ${zero ? '<span style="color:var(--crit)">(empty — not warming)</span>' : ''}</div>
+        </div>`;
       }).join('');
     }
 
-    // ---- collapse toggle ----
-    function toggleCollapse(id) {
-      const el = document.getElementById(id);
-      el.classList.toggle('open');
-      const needsLoad = el.classList.contains('open');
-      if (id === 'dataBody' && needsLoad) { loadCategories(); loadSources(); }
-      if (id === 'healthBody' && needsLoad) loadHealth();
+    // ============ chat rail ============
+    const chatLog = [];
+    async function askAgent() {
+      const input = document.getElementById('askInput');
+      const q = input.value.trim();
+      if (!q) return;
+      input.value = '';
+      chatLog.push({ q, loading: true });
+      renderChat();
+      const a = await postJSON('/v1/ask', { question: q });
+      chatLog[chatLog.length - 1] = { q, a: (a && !a.__error) ? a : { text: 'error: ' + ((a && a.__error) || 'request failed'), confidence: 0 } };
+      renderChat();
+    }
+    function renderChat() {
+      const el = document.getElementById('chatLog');
+      document.getElementById('chatEmpty')?.remove();
+      el.innerHTML = chatLog.map(m => {
+        if (m.loading) return `<div class="chat-msg"><div class="q">you: ${escapeHtml(m.q)}</div><div class="a" style="color:var(--muted)">thinking…</div></div>`;
+        const conf = m.a.confidence !== undefined ? ` <span class="conf">${Math.round(m.a.confidence*100)}%</span>` : '';
+        const trace = (m.a.trace && m.a.trace.length) ? `<details><summary>${m.a.trace.length} tool call(s)</summary><pre>${escapeHtml(JSON.stringify(m.a.trace, null, 1))}</pre></details>` : '';
+        return `<div class="chat-msg"><div class="q">you: ${escapeHtml(m.q)}</div><div class="a">${escapeHtml(m.a.text)}${conf}${trace}</div></div>`;
+      }).join('');
+      el.scrollTop = el.scrollHeight;
+    }
+    document.getElementById('askInput').addEventListener('keydown', e => { if (e.key === 'Enter') askAgent(); });
+
+    // ============ deep-link anchoring (DUX-08) ============
+    function anchorFromHash() {
+      const h = location.hash;
+      const i = h.indexOf('-');
+      if (i > 0 && h.startsWith('#insight-')) {
+        // not used (ids have colons); alternative: #card-<cssEsc>
+      }
+      const m = h.match(/^#card-(.+)$/);
+      if (m) {
+        const card = document.getElementById('card-' + m[1]);
+        if (card) {
+          card.classList.add('anchored');
+          card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }
     }
 
-    // ---- targeted polling: insights refresh frequently, rest on-demand ----
+    // ============ licences directory (resources page) ============
+    // Curated reference, not API-served data: every URL is an official HK source
+    // (gov.hk / statutory body). No third-party links, no fabricated deep paths.
+    //
+    // Outbound links: we keep a real href (so middle-click / right-click / "open in
+    // new tab" / keyboard all work natively) but drive the click ourselves. A plain
+    // target="_blank" is the most aggressively blocked action — popup blockers and
+    // sandboxed preview iframes swallow it silently. So we try a new tab, and if that
+    // is blocked we fall back to same-tab navigation. A click always goes somewhere.
+    function openExt(url) {
+      const w = window.open(url, '_blank', 'noopener,noreferrer');
+      if (!w) window.location.href = url;   // popup blocked: fall back to same tab
+      return false;                          // suppress the default target=_blank nav
+    }
+    function extBtn(url, label) {
+      return `<a class="ext-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" onclick="return openExt('${escapeHtml(url)}')"><i class="ri-arrow-right-up-line"></i> ${escapeHtml(label)}</a>`;
+    }
+
+    // ============ scenario wizard ============
+    // Each scenario is an ordered bundle of steps. A step carries the licence/permit,
+    // the issuing authority, a short "why/when" note (prerequisite + timing, verified
+    // against the official source where possible), and the official link for the exact
+    // form, fee and document checklist. Where I could not verify a per-licence deep
+    // page, the step links to the verified department root and the note says so.
+    //
+    // NOTE on accuracy: apply-order, authorities and the big prerequisites below are
+    // confirmed against official sources (FEHD guide, CR money-lenders page, SFC/IA/
+    // HKMA landing pages). Exact form numbers, fees and full document lists live on
+    // the linked official pages and change over time — this wizard tells you WHICH
+    // licences in WHAT order and WHERE to read the detail, not the detail itself.
+    const LIC_SCENARIOS = [
+      { id: 'restaurant', label: 'Open a restaurant / food business',
+        summary: 'Food Business Licence is the core. Company + premises come first; fire and ventilation certs are obtained after fit-out; a Liquor Licence is added only if you sell alcohol.',
+        steps: [
+          { lic: 'Certificate of Incorporation', who: 'Companies Registry', when: 'first — register your company', url: 'https://www.cr.gov.hk/' },
+          { lic: 'Business Registration Certificate', who: 'Inland Revenue Dept', when: 'with incorporation (issued jointly)', url: 'https://www.gov.hk/en/business/registration/license/index.htm' },
+          { lic: 'Confirm premises: Occupation Permit allows food business', who: 'Buildings Dept / landlord', when: 'before signing the lease — blocks everything', url: 'https://www.bd.gov.hk/' },
+          { lic: 'Food Business Licence (general / light refreshment)', who: 'FEHD', when: 'core licence — apply with scaled layout plans; FEHD inspects after fit-out', url: 'https://www.fehd.gov.hk/english/licensing/guide.html' },
+          { lic: 'Fire Safety Certificate (fire service installations)', who: 'Fire Services Dept', when: 'after fit-out — FSD certifies the fire installations are installed', url: 'https://www.hkfsd.gov.hk/eng/fire_protection/licensing/premises_food.html' },
+          { lic: 'Ventilation certificate', who: 'Registered ventilation contractor', when: 'after fit-out — required before FEHD issues the licence', url: 'https://www.fehd.gov.hk/english/licensing/guide.html' },
+          { lic: 'Liquor Licence / Club Liquor Licence', who: 'Liquor Licensing Board', when: 'only if selling alcohol (>1.2% ABV)', url: 'https://www.fehd.gov.hk/english/licensing/index.html' },
+        ] },
+
+      { id: 'moneylender', label: 'Start a money-lending business',
+        summary: 'Money Lender\'s Licence is granted by the Licensing Court under Cap. 163. You must be a registered company first; the Police investigate and the application is gazetted. Valid 12 months.',
+        steps: [
+          { lic: 'Certificate of Incorporation', who: 'Companies Registry', when: 'first — must be a registered company before the Court can consider you', url: 'https://www.cr.gov.hk/' },
+          { lic: 'Business Registration Certificate', who: 'Inland Revenue Dept', when: 'with incorporation', url: 'https://www.gov.hk/en/business/registration/license/index.htm' },
+          { lic: 'Money Lender\'s Licence', who: 'Licensing Court (admin by Companies Registry)', when: 'apply to the Registrar; Police investigates applicant; notice gazetted + 2 newspapers; Court grants if "fit & proper"', url: 'https://www.cr.gov.hk/en/services/money-lenders/application/licence-renewal.htm' },
+          { lic: 'Renewal (every 12 months)', who: 'Companies Registry', when: 'apply within 3 months before expiry; re-gazette required', url: 'https://www.cr.gov.hk/en/services/money-lenders/application/licence-renewal.htm' },
+        ] },
+
+      { id: 'securities', label: 'Run a securities / asset-management firm',
+        summary: 'An SFC licence for the regulated activities (Types 1–9). Incorporate first, then satisfy capital, RO and fitness requirements. A financial-services employer also owes MPF + ECS registration.',
+        steps: [
+          { lic: 'Certificate of Incorporation + Business Registration', who: 'Companies Registry / IRD', when: 'first', url: 'https://www.cr.gov.hk/' },
+          { lic: 'SFC Licensed Corporation (regulated activities)', who: 'Securities & Futures Commission', when: 'core — needs Responsible Officers, paid-up capital & client assets rules per activity type', url: 'https://www.sfc.hk/en/Regulatory-functions/Intermediaries/Licensing' },
+          { lic: 'SFC Licensed Representative / Responsible Officer', who: 'Securities & Futures Commission', when: 'for each individual conducting regulated activity', url: 'https://www.sfc.hk/en/Regulatory-functions/Intermediaries/Licensing' },
+          { lic: 'MPF employer registration + Employees Compensation Insurance', who: 'MPFA / insurer', when: 'once you hire staff — mandatory employer obligations', url: 'https://www.mpfa.org.hk/' },
+          { lic: 'SFC notification: client assets / bank accounts', who: 'Securities & Futures Commission', when: 'ongoing post-licence compliance', url: 'https://www.sfc.hk/en/Regulatory-functions/Intermediaries/Licensing' },
+        ] },
+
+      { id: 'insurance', label: 'Become an insurance intermediary',
+        summary: 'Insurance intermediary licensing moved to the Insurance Authority. Choose agent (tied to an insurer) or broker (independent); individuals and companies are licensed separately.',
+        steps: [
+          { lic: 'Certificate of Incorporation + Business Registration', who: 'Companies Registry / IRD', when: 'first (for a broker company)', url: 'https://www.cr.gov.hk/' },
+          { lic: 'Insurance intermediary licence (agent / broker company / technical rep)', who: 'Insurance Authority', when: 'core — requirements differ for individual agent, broker company and technical representative', url: 'https://www.ia.org.hk/en/supervision/reg_ins_intermediaries/licence_application.html' },
+          { lic: 'MPF + Employees Compensation Insurance', who: 'MPFA / insurer', when: 'once you hire staff', url: 'https://www.mpfa.org.hk/' },
+        ] },
+
+      { id: 'employmentagency', label: 'Open an employment agency',
+        summary: 'Employment Agency Licence from the Labour Department under the Employment Agency Regulations. Issued per premises; renewal every 12 months.',
+        steps: [
+          { lic: 'Certificate of Incorporation + Business Registration', who: 'Companies Registry / IRD', when: 'first', url: 'https://www.cr.gov.hk/' },
+          { lic: 'Employment Agency Licence', who: 'Labour Department', when: 'core — per premises; comply with the Code of Practice; 12-month renewal', url: 'https://www.labour.gov.hk/' },
+          { lic: 'MPF + Employees Compensation Insurance', who: 'MPFA / insurer', when: 'once you hire staff', url: 'https://www.mpfa.org.hk/' },
+        ] },
+
+      { id: 'telecom', label: 'Operate a telecom / carrier service',
+        summary: 'OFCA issues carrier and apparatus licences under Cap. 106. The Unified Carrier Licence (UCL) is the main one for network operators; apparatus/class licences for devices.',
+        steps: [
+          { lic: 'Certificate of Incorporation + Business Registration', who: 'Companies Registry / IRD', when: 'first', url: 'https://www.cr.gov.hk/' },
+          { lic: 'Unified Carrier Licence (UCL)', who: 'Office of the Communications Authority', when: 'core for network operators offering mobile/fixed services', url: 'https://www.ofca.gov.hk/en/industry_focus/regulations_licensing/index.html' },
+          { lic: 'Radio / apparatus licence (if using radio apparatus)', who: 'Office of the Communications Authority', when: 'as needed for spectrum and equipment use', url: 'https://www.ofca.gov.hk/en/industry_focus/regulations_licensing/index.html' },
+        ] },
+
+      { id: 'electrician', label: 'Work as a registered electrical worker / contractor',
+        summary: 'EMSD registration under the Electricity Ordinance. Individuals register as workers (grades by qualification); businesses register as contractors.',
+        steps: [
+          { lic: 'Qualification evidence (recognized diploma + experience)', who: '—', when: 'pre-requisite — must hold before applying', url: 'https://www.emsd.gov.hk/m/en/electricity_safety/how_to_apply/' },
+          { lic: 'Registered Electrical Worker registration', who: 'EMSD', when: 'core for individuals; graded registration', url: 'https://www.emsd.gov.hk/m/en/electricity_safety/how_to_apply/' },
+          { lic: 'Registered Electrical Contractor (if running a firm)', who: 'EMSD', when: 'in addition, for businesses undertaking prescribed electrical work', url: 'https://www.emsd.gov.hk/m/en/electricity_safety/how_to_apply/' },
+        ] },
+
+      { id: 'importexport', label: 'Import / export dutiable or controlled goods',
+        summary: 'Customs & Excise licences for dutiable commodities (liquor, tobacco, hydrocarbon oil, methanol); other controlled goods may need additional permits.',
+        steps: [
+          { lic: 'Certificate of Incorporation + Business Registration', who: 'Companies Registry / IRD', when: 'first', url: 'https://www.cr.gov.hk/' },
+          { lic: 'Dutiable Commodities Licence (import/export/store)', who: 'Customs & Excise', when: 'core for dutiable goods', url: 'https://www.customs.gov.hk/en/service-enforcement-information/trade-facilitation/dutiable-commodities/about-licences/index.html' },
+          { lic: 'Liquor Licence (if selling liquor to consumers)', who: 'Liquor Licensing Board', when: 'separate from import — for retail sale', url: 'https://www.fehd.gov.hk/english/licensing/index.html' },
+        ] },
+
+      // ----- newer economy: digital, online, IT, fintech, content -----
+      { id: 'ecommerce', label: 'Run an online store / e-commerce',
+        summary: 'There is no single "e-commerce licence" in HK. You need a Business Registration Certificate, then sector-specific licences only for what you sell (food, medicine, etc.). Two non-licence regimes still bite: the Trade Descriptions Ordinance (fair advertising) and the Personal Data (Privacy) Ordinance (customer data).',
+        steps: [
+          { lic: 'Business Registration Certificate (+ Company Incorporation if a limited company)', who: 'Inland Revenue Dept / Companies Registry', when: 'first — even under-18 internet businesses may need a BR', url: 'https://www.gov.hk/en/business/registration/license/index.htm' },
+          { lic: 'Sector licence only if goods are regulated', who: 'varies (FEHD food, DH pharmacy, Customs dutiable)', when: 'e.g. food, restricted medicines, alcohol, tobacco — most ordinary goods need none', url: 'https://www.success.tid.gov.hk/tid/eng/blics/index.jsp' },
+          { lic: 'Trade Descriptions Ordinance compliance (no false/misleading ads, no bait pricing)', who: 'Customs & Excise (enforces)', when: 'applies fully to online retail — compliance, not a permit', url: 'https://www.customs.gov.hk/' },
+          { lic: 'Personal Data (Privacy) Ordinance compliance', who: 'Privacy Commissioner (PCPD)', when: 'mandatory for any customer data — prescribed consent + opt-out for direct marketing', url: 'https://www.pcpd.org.hk/english/data_privacy_law/ordinance_at_a_Glance/ordinance.html' },
+          { lic: 'GovHK e-commerce topic page (orientation + .hk domain)', who: 'GovHK', when: 'reference — start here for the online-business overview', url: 'https://www.gov.hk/en/business/ecommerce/' },
+        ] },
+
+      { id: 'itservices', label: 'Run an IT / software / SaaS company',
+        summary: 'The good news: pure software, SaaS and cloud services do NOT need an OFCA telecoms licence. You only cross into telecoms licensing if you provide carriage (network/internet access). A data centre has no OFCA licence either, but watch PDPO for customer data.',
+        steps: [
+          { lic: 'Business Registration Certificate (+ Incorporation)', who: 'Inland Revenue Dept / Companies Registry', when: 'first', url: 'https://www.gov.hk/en/business/registration/license/index.htm' },
+          { lic: 'OFCA telecoms licence — usually NOT required', who: 'Office of the Communications Authority', when: 'only if you provide carriage (network/internet access). Pure software/SaaS/cloud are exempt', url: 'https://www.ofca.gov.hk/en/industry_focus/regulations_licensing/index.html' },
+          { lic: 'Personal Data (Privacy) Ordinance compliance', who: 'Privacy Commissioner (PCPD)', when: 'mandatory if you handle customer/user data', url: 'https://www.pcpd.org.hk/english/data_privacy_law/ordinance_at_a_Glance/ordinance.html' },
+          { lic: 'Data centre (if applicable) — facilitation, not OFCA licence', who: 'Digital Policy Office (Data Centre Facilitation Unit)', when: 'no telecoms licence to operate a DC; building/land/EPD rules still apply', url: 'https://www.digitalpolicy.gov.hk/' },
+          { lic: 'MPF + Employees Compensation Insurance', who: 'MPFA / insurer', when: 'once you hire staff', url: 'https://www.mpfa.org.hk/' },
+        ] },
+
+      { id: 'telecom_carrier', label: 'Provide telecoms carriage / ISP / mobile network',
+        summary: 'This is where OFCA licensing DOES bite. A company registered under the Companies Ordinance can apply; the licence type depends on whether you own network (UCL) or just resell services (SBO / class licence).',
+        steps: [
+          { lic: 'Certificate of Incorporation + Business Registration', who: 'Companies Registry / IRD', when: 'first — mandatory for any OFCA licence applicant', url: 'https://www.cr.gov.hk/' },
+          { lic: 'Unified Carrier Licence (UCL) — own mobile/fixed network', who: 'Office of the Communications Authority', when: 'core for network operators', url: 'https://www.ofca.gov.hk/en/industry_focus/regulations_licensing/index.html' },
+          { lic: 'Services-Based Operator (SBO) licence — resell without own network', who: 'Office of the Communications Authority', when: 'lighter route for service-based providers', url: 'https://www.ofca.gov.hk/en/electronic_services/licence/index.html' },
+          { lic: 'Class Licence for Offer of Telecommunications Services (CLOTS)', who: 'Office of the Communications Authority', when: 'automatic — comply-with-conditions, no individual application', url: 'https://www.ofca.gov.hk/en/industry_focus/regulations_licensing/index.html' },
+          { lic: 'Radio / apparatus licence (if using radio apparatus)', who: 'Office of the Communications Authority', when: 'as needed for spectrum/equipment', url: 'https://www.ofca.gov.hk/en/industry_focus/regulations_licensing/index.html' },
+        ] },
+
+      { id: 'ewallet', label: 'Launch an e-wallet / payment / stored-value facility',
+        summary: 'Issuing stored value (e-wallets, prepaid cards) needs an HKMA licence under Cap. 584. The bar is high: HK$25M minimum paid-up capital, fit-and-proper controllers. An SVF register is published by the HKMA.',
+        steps: [
+          { lic: 'Certificate of Incorporation + Business Registration', who: 'Companies Registry / IRD', when: 'first', url: 'https://www.cr.gov.hk/' },
+          { lic: 'Stored Value Facility (SVF) licence', who: 'Hong Kong Monetary Authority', when: 'core — Cap. 584; min. HK$25M paid-up capital; controllers must be fit & proper', url: 'https://www.hkma.gov.hk/eng/regulatory-resources/authorization-licensing-and-approval/' },
+          { lic: 'Register of SVF Licensees (check the bar)', who: 'Hong Kong Monetary Authority', when: 'reference — see who is already licensed', url: 'https://www.hkma.gov.hk/eng/regulatory-resources/registers/register-of-svf-licensees/' },
+          { lic: 'Personal Data (Privacy) Ordinance compliance', who: 'Privacy Commissioner (PCPD)', when: 'mandatory — payment data is sensitive', url: 'https://www.pcpd.org.hk/english/data_privacy_law/ordinance_at_a_Glance/ordinance.html' },
+        ] },
+
+      { id: 'vasp', label: 'Run a virtual-asset (crypto) exchange / platform',
+        summary: 'Since 1 June 2023 Hong Kong has a formal SFC licensing regime for Virtual Asset Trading Platforms (VATPs). New platforms cannot trade until licensed. This is a dual-licensing regime (Type 1 + Type 7 regulated activities).',
+        steps: [
+          { lic: 'Certificate of Incorporation + Business Registration', who: 'Companies Registry / IRD', when: 'first', url: 'https://www.cr.gov.hk/' },
+          { lic: 'VATP licence (SFC dual regime: Type 1 + Type 7)', who: 'Securities & Futures Commission', when: 'core — regime from 1 June 2023; new entrants cannot trade until licensed', url: 'https://www.sfc.hk/en/Welcome-to-the-Fintech-Contact-Point/Virtual-assets/Virtual-asset-trading-platforms-operators/Lists-of-virtual-asset-trading-platforms' },
+          { lic: 'Fintech Contact Point / swift licensing track', who: 'Securities & Futures Commission', when: 'engage early — SFC runs a swift licensing process for new VATP applicants', url: 'https://www.sfc.hk/en/Welcome-to-the-Fintech-Contact-Point' },
+          { lic: 'Personal Data (Privacy) Ordinance + AML compliance', who: 'PCPD / SFC (AML conditions)', when: 'mandatory — KYC/AML is a licence condition', url: 'https://www.pcpd.org.hk/english/data_privacy_law/ordinance_at_a_Glance/ordinance.html' },
+        ] },
+
+      { id: 'digitalcontent', label: 'Produce / stream digital content, OTT or online media',
+        summary: 'Producing and streaming content online does not need a broadcasting licence if you are an internet-only OTT service. A broadcasting/telecoms licence only applies if you deliver linear TV/radio to the public. Watch the Trade Descriptions Ordinance (paid endorsements) and PDPO.',
+        steps: [
+          { lic: 'Business Registration Certificate (+ Incorporation)', who: 'Inland Revenue Dept / Companies Registry', when: 'first', url: 'https://www.gov.hk/en/business/registration/license/index.htm' },
+          { lic: 'Broadcasting / telecoms licence — usually NOT required for OTT', who: 'Office of the Communications Authority', when: 'only for linear broadcast TV/radio to the public; internet streaming is exempt', url: 'https://www.ofca.gov.hk/en/industry_focus/regulations_licensing/index.html' },
+          { lic: 'Trade Descriptions Ordinance (paid promotions & endorsements)', who: 'Customs & Excise (enforces)', when: 'mandatory — disclose paid endorsements, no misleading claims', url: 'https://www.customs.gov.hk/' },
+          { lic: 'Personal Data (Privacy) Ordinance compliance', who: 'Privacy Commissioner (PCPD)', when: 'mandatory for viewer/creator personal data', url: 'https://www.pcpd.org.hk/english/data_privacy_law/ordinance_at_a_Glance/ordinance.html' },
+          { lic: 'Copyright — clear rights for any third-party content', who: 'Intellectual Property Dept', when: 'compliance, not a licence — but the main legal risk', url: 'https://www.ipd.gov.hk/' },
+        ] },
+    ];
+
+    function runWizard() {
+      const sel = document.getElementById('wizSelect');
+      const sc = LIC_SCENARIOS.find(s => s.id === sel.value);
+      const box = document.getElementById('wizResult');
+      if (!sc) { box.innerHTML = '<div class="empty">choose a scenario above</div>'; return; }
+      const steps = sc.steps.map((s, i) => `
+        <div class="wiz-step">
+          <div class="num">${i + 1}</div>
+          <div class="body">
+            <div class="lic">${escapeHtml(s.lic)}</div>
+            <div class="meta"><b>${escapeHtml(s.who)}</b></div>
+            <div class="why">${escapeHtml(s.when)}</div>
+            <div class="actions">${extBtn(s.url, 'Official page')}</div>
+          </div>
+        </div>`).join('');
+      box.innerHTML = `
+        <div class="wiz-bundle-title">${escapeHtml(sc.label)} — your licence plan</div>
+        <div style="color:var(--muted); font-size:12px; margin-bottom:10px;">${escapeHtml(sc.summary)}</div>
+        <div class="wiz-steps">${steps}</div>
+        <div class="wiz-disc">
+          <i class="ri-information-line"></i> Apply-order, issuing authority and the major prerequisites are confirmed against official HK sources.
+          Exact form numbers, fees, and the full document checklist live on each official page and change over time — always confirm on the linked page before submitting.
+          For a definitive licence list for any other activity, use BLIS.
+        </div>`;
+    }
+
+    // The three top-level portals every applicant should know about.
+    const LIC_KEY = [
+      { t: 'BLIS — Business Licence Information Service', u: 'https://www.success.tid.gov.hk/tid/eng/blics/index.jsp',
+        d: 'The authoritative, exhaustive search: generate the exact licence/permit/certificate/approval list for any business activity in HK. Run by SUCCESS / Trade & Industry Dept.' },
+      { t: 'Online Licence Services', u: 'https://www.licensing.gov.hk/',
+        d: 'Centralised portal to apply for, renew and check the status of licences across multiple departments online.' },
+      { t: 'GovHK — Licensing & Permits', u: 'https://www.gov.hk/en/business/registration/license/index.htm',
+        d: 'The gateway topic page linking to every department\'s licensing section plus registration & regulations.' },
+    ];
+
+    // {name, dept, url} — most common licences a typical business needs first.
+    const LIC_HIGHLIGHTS = [
+      { name: 'Business Registration', dept: 'Inland Revenue Dept (BR)', url: 'https://www.gov.hk/en/business/registration/license/index.htm' },
+      { name: 'Company Incorporation', dept: 'Companies Registry', url: 'https://www.cr.gov.hk/' },
+      { name: 'Food Business Licence', dept: 'FEHD', url: 'https://www.fehd.gov.hk/english/licensing/index.html' },
+      { name: 'Liquor / Club Liquor Licence', dept: 'Liquor Licensing Board', url: 'https://www.fehd.gov.hk/english/licensing/index.html' },
+      { name: 'Money Lender\'s Licence', dept: 'Companies Registry (Court)', url: 'https://www.cr.gov.hk/' },
+      { name: 'Securities & futures (regulated activities)', dept: 'SFC', url: 'https://www.sfc.hk/en/Regulatory-functions/Intermediaries/Licensing' },
+      { name: 'Insurance intermediary licence', dept: 'Insurance Authority', url: 'https://www.ia.org.hk/en/supervision/reg_ins_intermediaries/licence_application.html' },
+      { name: 'Authorized Institution (banking)', dept: 'HKMA', url: 'https://www.hkma.gov.hk/eng/regulatory-resources/authorization-licensing-and-approval/' },
+      { name: 'Employment Agency Licence', dept: 'Labour Department', url: 'https://www.labour.gov.hk/' },
+      { name: 'Import/Export of dutiable goods', dept: 'Customs & Excise', url: 'https://www.customs.gov.hk/en/service-enforcement-information/trade-facilitation/dutiable-commodities/about-licences/index.html' },
+    ];
+
+    // {dept, deptUrl, desc, licences:[name...], portal:{label,url}?}
+    // Every entry links out to the department; `portal` is a direct apply/guide page where verified.
+    const LIC_DEPARTMENTS = [
+      { dept: 'Companies Registry (CR)', deptUrl: 'https://www.cr.gov.hk/',
+        desc: 'Company incorporation & public registers.',
+        licences: ['Certificate of Incorporation', 'Business Registration (joint)', 'Money Lender\'s Licence (issue of)', 'Trust / Company Service Provider Licence (TCSP)'] },
+
+      { dept: 'Inland Revenue Department (IRD)', deptUrl: 'https://www.gov.hk/en/business/registration/license/index.htm',
+        desc: 'Business Registration + tax.',
+        licences: ['Business Registration Certificate (BR)', 'Profits tax filing'],
+        portal: { label: 'Business Registration', url: 'https://www.gov.hk/en/business/registration/license/index.htm' } },
+
+      { dept: 'Food & Environmental Hygiene Dept (FEHD)', deptUrl: 'https://www.fehd.gov.hk/english/licensing/index.html',
+        desc: 'Largest trade-licence issuer — food, market stalls, pool/PEP.',
+        code: 'FEHD',
+        licences: ['Food Business Licence', 'Restricted Food Permit', 'Light Refreshment Restaurant', 'Bakery Licence', 'Factory Canteen', 'Swimming Pool Licence', 'Place of Public Entertainment (PEP)'],
+        portal: { label: 'Licensing & permits', url: 'https://www.fehd.gov.hk/english/licensing/index.html' } },
+
+      { dept: 'Liquor Licensing Board (LLB)', deptUrl: 'https://www.fehd.gov.hk/english/licensing/index.html',
+        desc: 'Sale of liquor (>1.2% ABV). Administered by FEHD.',
+        licences: ['Liquor Licence', 'Club Liquor Licence'],
+        portal: { label: 'Application guide', url: 'https://www.fehd.gov.hk/english/licensing/index.html' } },
+
+      { dept: 'Leisure & Cultural Services Dept (LCSD)', deptUrl: 'https://www.lcsd.gov.hk/en/',
+        desc: 'Amusement/game, swimming pool, PECP licences.',
+        licences: ['Amusement Game Centre Licence', 'Mahjong/Tin Kau Licence', 'Billiard Establishment Licence', 'Place of Public Convenience (PECP)'] },
+
+      { dept: 'Securities & Futures Commission (SFC)', deptUrl: 'https://www.sfc.hk/en/',
+        desc: 'Securities & futures regulated activities (Cap. 571).',
+        code: 'SFC',
+        licences: ['Licensed Corporation (Types 1–9 regulated activities)', 'Licensed Representative', 'Responsible Officer', 'Registered Institution'],
+        portal: { label: 'Licensing', url: 'https://www.sfc.hk/en/Regulatory-functions/Intermediaries/Licensing' } },
+
+      { dept: 'Insurance Authority (IA)', deptUrl: 'https://www.ia.org.hk/',
+        desc: 'Insurance intermediaries & authorized insurers.',
+        code: 'IA',
+        licences: ['Licensed Insurance Agent (individual)', 'Licensed Insurance Broker Company', 'Technical Representative', 'Authorized Insurer'],
+        portal: { label: 'Licence application', url: 'https://www.ia.org.hk/en/supervision/reg_ins_intermediaries/licence_application.html' } },
+
+      { dept: 'Hong Kong Monetary Authority (HKMA)', deptUrl: 'https://www.hkma.gov.hk/eng/',
+        desc: 'The three-tier banking system + stored value facilities.',
+        code: 'HKMA',
+        licences: ['Licensed Bank', 'Restricted Licence Bank', 'Deposit-taking Company', 'Money Broker', 'Stored Value Facility (SVF) issuer', 'Authorized Institution (digital bank)'],
+        portal: { label: 'Authorization & licensing', url: 'https://www.hkma.gov.hk/eng/regulatory-resources/authorization-licensing-and-approval/' } },
+
+      { dept: 'Office of the Communications Authority (OFCA)', deptUrl: 'https://www.ofca.gov.hk/',
+        desc: 'Telecommunications & broadcasting licences (Cap. 106).',
+        code: 'OFCA',
+        licences: ['Unified Carrier Licence (UCL)', 'Satellite Master Antenna TV (SMATV)', 'Self-Provided External Telecoms System (SPETS)', 'Broadcasting service licence', 'Class / radio apparatus licence'],
+        portal: { label: 'Regulations & licensing', url: 'https://www.ofca.gov.hk/en/industry_focus/regulations_licensing/index.html' } },
+
+      { dept: 'Electrical & Mechanical Services Dept (EMSD)', deptUrl: 'https://www.emsd.gov.hk/',
+        desc: 'Electrical worker / contractor, gas, lifts & escalators, amusement rides.',
+        licences: ['Registered Electrical Worker', 'Registered Electrical Contractor', 'Registered Gas Installer', 'Gas Supply Company', 'Registered Lift/Escalator Engineer', 'Registered Amusement Ride Engineer'],
+        portal: { label: 'How to apply', url: 'https://www.emsd.gov.hk/m/en/electricity_safety/how_to_apply/' } },
+
+      { dept: 'Fire Services Department (FSD)', deptUrl: 'https://www.hkfsd.gov.hk/',
+        desc: 'Fire safety certificates & dangerous goods.',
+        licences: ['Fire Safety Certificate (FSC)', 'Dangerous Goods Licence', 'License for Operation of Fire Service Installation Contractor', 'Open Flame Permit'],
+        portal: { label: 'Licensing & Certification Command', url: 'https://www.hkfsd.gov.hk/eng/aboutus/organization/lccmd.html' } },
+
+      { dept: 'Customs & Excise Department (C&ED)', deptUrl: 'https://www.customs.gov.hk/',
+        desc: 'Dutiable commodities, import/export, controlled goods.',
+        licences: ['Dutiable Commodities Licence (import/export/store)', 'Liquor / Tobacco / Hydrocarbon Oil / Methanol permits', 'Trader Registration (Textiles)', 'Licence under Import & Export Ordinance'],
+        portal: { label: 'About licences', url: 'https://www.customs.gov.hk/en/service-enforcement-information/trade-facilitation/dutiable-commodities/about-licences/index.html' } },
+
+      { dept: 'Hong Kong Police Force (HKPF)', deptUrl: 'https://www.police.gov.hk/',
+        desc: 'Miscellaneous licences & permits.',
+        licences: ['Pawnbroker\'s Licence', 'Security Workers Permit (Type A/B/C/D/E)', 'Firearms & Ammunition Licence', 'Society Registration (no objection)'],
+        portal: { label: 'Licensing office', url: 'https://www.police.gov.hk/ppp_en/11_useful_info/licences/general.html' } },
+
+      { dept: 'Environmental Protection Dept (EPD)', deptUrl: 'https://www.epd.gov.hk/',
+        desc: 'Pollution control, waste & EIA permits.',
+        licences: ['Specified Process Licence (air)', 'Noise Permit / Construction Noise', 'Waste Disposal Licence', 'Water Pollution Control discharge licence', 'EIA permit'] },
+
+      { dept: 'Labour Department (LD)', deptUrl: 'https://www.labour.gov.hk/',
+        desc: 'Employment agencies & childcare/elderly home staffing.',
+        licences: ['Employment Agency Licence', 'Code of Practice compliance (EAS)'] },
+
+      { dept: 'Transport Department (TD)', deptUrl: 'https://www.td.gov.hk/',
+        desc: 'Vehicle, driving & operator licensing.',
+        code: 'TD',
+        licences: ['Vehicle Registration & Licence', 'Driving Licence', 'Public / Hire Car (PSV) permit', 'Cross-boundary Road Permit', 'Vehicle examiner approval'] },
+
+      { dept: 'Marine Department (MD)', deptUrl: 'https://www.mardep.gov.hk/',
+        desc: 'Vessels, ports & seafarer certification.',
+        licences: ['Pleasure Vessel Operator Certificate', 'Certificate of Registry (vessel)', 'Local Vessel Licence', 'Seafarer Certificate of Competency'] },
+
+      { dept: 'Agriculture, Fisheries & Conservation Dept (AFCD)', deptUrl: 'https://www.afcd.gov.hk/',
+        desc: 'Animals, plants, country parks & fisheries.',
+        licences: ['Animal Trader Licence', 'Pet Shop / Boarding Licence', 'Dangerous Dog Permit', 'CITES import/export permit', 'Fish Culture Licence'] },
+
+      { dept: 'Travel Industry Authority (TIA)', deptUrl: 'https://www.tia.gov.hk/',
+        desc: 'Travel agents, tourist guides & escorts (post-TIRO reform).',
+        code: 'TIA',
+        licences: ['Travel Agent Licence', 'Tourist Guide Licence', 'Tour Escort (Outbound)'] },
+
+      { dept: 'Social Welfare Department (SWD)', deptUrl: 'https://www.swd.gov.hk/',
+        desc: 'Residential care & welfare service homes.',
+        licences: ['Residential Care Home for the Elderly (RCHE) Licence', 'Child Care Centre Registration', 'Residential Care Home for Persons with Disabilities'] },
+    ];
+
+    // Related market players — keyed by department code, fetched once from the
+    // /v1/market-players endpoint on first Licences-tab entry. `null` = fetched
+    // (even if empty/failed) so we don't re-fetch on every re-render while
+    // typing in the search box; `{}` is the empty-but-not-yet-fetched marker.
+    let MARKET_PLAYERS = {};
+    let marketPlayersLoaded = false;
+    async function loadMarketPlayers() {
+      if (marketPlayersLoaded) return;
+      marketPlayersLoaded = true; // set now so a slow/failed fetch doesn't retry per keystroke
+      const groups = await getJSON('/v1/market-players');
+      if (groups && !groups.__error && Array.isArray(groups)) {
+        for (const g of groups) {
+          if (g && g.dept && Array.isArray(g.players)) MARKET_PLAYERS[g.dept.toUpperCase()] = g;
+        }
+      }
+    }
+
+    // Render the per-department players panel for a card. Returns '' when the
+    // department has no players (clean degradation — no empty UI).
+    function playersPanel(code) {
+      if (!code) return '';
+      const g = MARKET_PLAYERS[(code || '').toUpperCase()];
+      if (!g || !g.players || !g.players.length) return '';
+      const items = g.players.slice(0, 10).map((p, i) => {
+        const nm = `<span class="nm">${escapeHtml(p.name)}</span>`;
+        const nt = p.note ? ` <span class="nt">— ${escapeHtml(p.note)}</span>` : '';
+        return `<div class="player"><div class="rank">${i + 1}</div><div>${nm}${nt}</div></div>`;
+      }).join('');
+      const head = `<div class="players-hd"><i class="ri-building-line"></i> Related market players (${g.category || 'HK market'})</div>`;
+      const disc = `<div class="players-disc">Top named operators in this stream — directional, compiled from 2024–25 public sources.</div>`;
+      return `<div class="players">${head}${items}${disc}</div>`;
+    }
+
+    function renderLicences() {
+      // populate the scenario wizard <select> (idempotent — safe to re-run)
+      const sel = document.getElementById('wizSelect');
+      if (sel && sel.options.length <= 1) {
+        for (const s of LIC_SCENARIOS) sel.options.add(new Option(s.label, s.id));
+      }
+
+      // key portals
+      document.getElementById('licencesKey').innerHTML = LIC_KEY.map(k =>
+        `<div class="lic-key"><div class="kt">${escapeHtml(k.t)}</div><div class="kd">${escapeHtml(k.d)}</div>${extBtn(k.u, 'Open portal')}</div>`).join('');
+
+      // highlights (never filtered — they are the "start here" shortlist)
+      document.getElementById('licencesHighlights').innerHTML = LIC_HIGHLIGHTS.map(h =>
+        `<div class="lic-hl"><div class="name">${escapeHtml(h.name)}</div><div class="who">${escapeHtml(h.dept)}</div>${extBtn(h.url, 'How to apply')}</div>`).join('');
+
+      // directory, optionally filtered
+      const q = (document.getElementById('licSearch').value || '').trim().toLowerCase();
+      const rows = LIC_DEPARTMENTS.filter(d => {
+        if (!q) return true;
+        const hay = (d.dept + ' ' + d.desc + ' ' + d.licences.join(' ')).toLowerCase();
+        return hay.includes(q);
+      });
+      const cards = rows.map(d => {
+        const lics = d.licences.map(l => `<div>${escapeHtml(l)}</div>`).join('');
+        const portal = d.portal ? `<div class="portal">${extBtn(d.portal.url, d.portal.label)}</div>` : '';
+        const players = playersPanel(d.code);
+        const dept = `<a class="ext-link" href="${escapeHtml(d.deptUrl)}" target="_blank" rel="noopener noreferrer" onclick="return openExt('${escapeHtml(d.deptUrl)}')"><i class="ri-arrow-right-up-line"></i> ${escapeHtml(d.dept)}</a>`;
+        return `<div class="lic-card"><div class="dept">${dept}</div><div class="desc">${escapeHtml(d.desc)}</div><div class="lics"><b>Licences:</b> ${lics}</div>${portal}${players}</div>`;
+      }).join('');
+      const dir = document.getElementById('licencesDir');
+      dir.innerHTML = cards || '<div class="empty">no department matches your filter</div>';
+
+      // catch-all note — points to BLIS for anything not individually enumerated
+      document.getElementById('licencesNote').innerHTML =
+        `<i class="ri-information-line"></i> This is a curated directory of the major issuing departments, not every individual licence. ` +
+        `For an exhaustive licence-by-licence list for a specific activity, ` +
+        `<a class="ext-link" style="display:inline-flex" href="${LIC_KEY[0].u}" target="_blank" rel="noopener noreferrer" onclick="return openExt('${LIC_KEY[0].u}')"><i class="ri-arrow-right-up-line"></i> search BLIS</a>.`;
+    }
+
+    // ============ boot ============
     async function loadAll() {
       persistConfig();
-      await Promise.all([loadBrief(), loadInsights()]);
+      await loadHealthQuiet();
+      await Promise.all([loadSilence(), loadBrief(), loadInsights()]);
+      renderDegradedBanner();
+      // refresh the counts shown in the nav
+      loadSignals(); loadCases();
     }
     // Auto-fill base URL from this server if served from one.
     if (location.protocol.startsWith('http') && location.port) {
       document.getElementById('baseUrl').value = `${location.protocol}//${location.host}`;
     }
     restoreConfig();
+    // route from hash
+    const initTab = (location.hash || '').replace('#', '');
+    if (['overview','datasets','signals','cases','health','licences'].includes(initTab)) go(initTab);
     loadAll();
-    // Targeted poll: only the time-sensitive feeds, not the whole page.
-    setInterval(() => { loadBrief(); loadInsights(); }, 30000);
+    // Targeted poll: silence + brief + insights + health (DUX-09: includes the new surfaces).
+    setInterval(() => { if (lastTab === 'overview') { loadSilence(); loadBrief(); loadInsights(); loadHealthQuiet().then(renderDegradedBanner); } }, 30000);
   </script>
 </body>
 </html>

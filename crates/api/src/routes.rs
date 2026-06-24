@@ -4,6 +4,7 @@
 //!   GET  /health                      — liveness
 //!   GET  /health/sources              — per-source circuit breaker state
 //!   GET  /sources                     — list ingested datasets
+//!   GET  /market-players?dept=&category= — curated related-market-players directory
 //!   GET  /datasets/{source}/{dataset} — dataset metadata
 //!   GET  /datasets/{source}/{dataset}/records?offset=&limit=
 //!                                    — paginated records from cache
@@ -41,6 +42,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health/sources", get(health_sources))
         .route("/sources", get(list_sources))
         .route("/categories", get(list_categories))
+        .route("/market-players", get(list_market_players))
         .route("/datasets/{source}/{dataset}", get(dataset_meta))
         .route("/datasets/{source}/{dataset}/records", get(dataset_records))
         .route("/insights", get(list_insights))
@@ -354,6 +356,53 @@ async fn dataset_meta(
     let source = parse_source(&source)?;
     let id = DatasetId::new(source, dataset);
     Ok(Json(state.store.meta(&id).await?))
+}
+
+/// Filter params for `/v1/market-players`. Both optional and case-insensitive:
+/// `?dept=HKMA` joins to the dashboard directory; `?category=monetary` slices by
+/// business stream. Either, both, or neither may be set.
+#[derive(Deserialize)]
+struct PlayerQuery {
+    #[serde(default)]
+    dept: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+}
+
+/// `GET /v1/market-players` — the curated "related market players" directory.
+///
+/// Serves the configured `[reference]` set, falling back to
+/// [`hkgov_common::default_market_players`] when none are configured (same
+/// empty-means-defaults contract as `agent.scan`). Used by the Licences page
+/// to show the named private-sector players holding each department's licences.
+async fn list_market_players(
+    State(state): State<AppState>,
+    Query(q): Query<PlayerQuery>,
+) -> Result<Json<Vec<hkgov_common::MarketPlayerGroup>>, ApiError> {
+    // Empty config → ship the defaults so out-of-the-box behavior is unchanged.
+    let groups: Vec<hkgov_common::MarketPlayerGroup> = if state
+        .settings
+        .reference
+        .market_players
+        .is_empty()
+    {
+        hkgov_common::default_market_players()
+    } else {
+        state.settings.reference.market_players.clone()
+    };
+
+    let dept = q.dept.as_deref().map(|s| s.to_ascii_uppercase());
+    let category = q.category.as_deref().map(|s| s.to_ascii_lowercase());
+    let filtered: Vec<_> = groups
+        .into_iter()
+        .filter(|g| dept.as_deref().is_none_or(|d| g.dept.eq_ignore_ascii_case(d)))
+        .filter(|g| {
+            category
+                .as_deref()
+                .is_none_or(|c| g.category.as_str().eq_ignore_ascii_case(c))
+        })
+        .collect();
+    Ok(Json(filtered))
 }
 
 #[derive(Deserialize)]

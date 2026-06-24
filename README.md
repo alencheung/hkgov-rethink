@@ -376,6 +376,7 @@ All data endpoints are under `/v1` (configurable via `api.api_prefix`).
 | `GET` | `/v1/health/sources` | Per-source circuit-breaker state (closed/open/half-open) |
 | `GET` | `/v1/sources?category=&tag=&cadence=&source=&q=` | Datasets, filterable by domain/category, tags, cadence, and free text (v8) |
 | `GET` | `/v1/categories` | The domain taxonomy with dataset counts — the browse entry point (v8) |
+| `GET` | `/v1/market-players?dept=&category=` | **Related Market Players** — curated directory of the named private-sector operators holding each department's licences; shown on the Licences page. Filter by `?dept=HKMA` or `?category=monetary`. Shipped defaults are overridable via `[[reference.market_player]]` (v9) |
 | `GET` | `/v1/datasets/{source}/{dataset}` | Metadata for one dataset |
 | `GET` | `/v1/datasets/{source}/{dataset}/records?offset=&limit=` | Paginated records from cache |
 | `GET` | `/v1/insights?limit=` | AI-agent generated insights with evidence |

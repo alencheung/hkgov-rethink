@@ -171,3 +171,23 @@ webhook_token = ""
 [log]
 format = "plain"
 filter = "info,hkgov=debug"
+
+[reference]
+# Curated "related market players" directory served from
+# GET /v1/market-players and shown on the Licences page when a user browses a
+# license-issuing department. OMITTING this block (or leaving it empty) ships
+# the built-in defaults (the 7 departments with a clear private market). Set
+# entries here only to override or extend.
+#
+# `dept` is a short stable code joining to the dashboard directory (HKMA, IA,
+# SFC, OFCA, TD, TIA, FEHD). `category` is one of the domain slugs (monetary,
+# fiscal, property, trade, population, livability, government, other).
+#
+# Uncomment to override the defaults:
+# [[reference.market_player]]
+# dept = "HKMA"
+# category = "monetary"
+# players = [
+#   { name = "HSBC", note = "Largest HK bank, ~HK$10.5T assets" },
+#   { name = "Bank of China (Hong Kong)", note = "#2 by assets, ~HK$3.9T" },
+# ]

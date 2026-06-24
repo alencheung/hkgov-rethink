@@ -5,6 +5,54 @@ All notable changes to this project are documented here. The format is based on
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for its
 public API surface (the HTTP API + the `hkgov-py` client).
 
+## [Unreleased] — Dataset coverage expansion
+
+> Exhaustive coverage of the HKSAR Gov open-data APIs. The HKMA connector now
+> serves the entire public catalog; the data.gov.hk connector now serves every
+> resource the v2 filter API actually accepts. All endpoints probe-verified
+> live (HTTP 200 + `header.success`) during this work.
+
+### Added
+- **Related market players (`GET /v1/market-players`).** A curated directory of
+  the named private-sector operators in each license-issuing department's stream
+  (HKMA → HSBC/BOCHK/…; IA → AIA/Prudential/…; OFCA → PCCW/SmarTone/…; plus
+  SFC, TD, TIA, FEHD). Surfaced as a per-department "Related market players"
+  panel on the Licences page so users browsing a department's licences also see
+  who holds them. Served from a new read-only endpoint, filterable by
+  `?dept=` and `?category=`; shipped defaults (7 departments × 10 players, from
+  2024–25 public sources) are overridable via `[[reference.market_player]]` in
+  `config.toml` — the same empty-means-defaults contract as `agent.scan`.
+  (`crates/common/src/config.rs`, `crates/api/src/routes.rs`, `dashboard/index.html`)
+- **HKMA connector: full catalog (151 datasets).** Replaced the 2-dataset
+  hand-written mapping with a data-driven `DATASETS` table holding every
+  dataset listed under `apidocs.hkma.gov.hk/documentation`, across all 14
+  sections (Monthly Statistical Bulletin ×9, Daily Monetary Statistics, Other,
+  Bank & SVF Info, Debt Securities Settlement System, Trade Repository).
+  Per-row `segment` / `lang` param flags are honored at fetch time — 13
+  datasets need a `segment` (tender tenors, bond pricings, SVF licensees, HKTR
+  disclosures) and 14 (the bank-svf-info family) need `lang=en`.
+  (`crates/connectors/src/hkma.rs`)
+- **data.gov.hk connector: 33 verified resources.** Extended the resources
+  table from 1 to 33, covering Companies Registry (11), Correctional Services
+  (6), Dept. of Health/CHP (5), OFCA (4), Education Bureau (3), Tramways (2),
+  Water Supplies (1), and Centaline property (1). Each `resource_url` was
+  probe-verified against `api.data.gov.hk/v2/filter` — the historical archive
+  lists 376 datasets but the filter API only accepts a registered PSI subset.
+  (`crates/connectors/src/datagovhk.rs`)
+
+### Changed
+- HKMA/DataGovHk `datasets()` now derive `DatasetSpec`s lazily from the table
+  via a `OnceLock` projection (the table is the single source of truth).
+- `docs/DATA_SOURCES.md` rewritten with the verified endpoint table, the
+  segment/lang param matrix, and the registered-subset note for data.gov.hk.
+- `README.md` dataset counts updated (151 HKMA / 33 data.gov.hk).
+
+### Fixed
+- DSSI path correction — the Debt Securities Settlement System datasets live at
+  `/public/debt-securities-settlement-system/...`, not under
+  `financial-market-infra/` (the docs URL differs from the API path; verified
+  live).
+
 ## [v8] — 2026-06-22 — Product layer: Lifeline + Signals + Investigations + Bilingual + Identity
 
 > Completes the PM strategy feature set (P-100..P-108). All 8 planned features
