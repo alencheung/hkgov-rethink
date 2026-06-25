@@ -39,10 +39,27 @@ pub struct ApiSettings {
     /// URL prefix for all API routes, e.g. `/v1`. Empty = no prefix.
     pub api_prefix: String,
     /// Optional API key. When set, every request must send it via the
-    /// `X-API-Key` header (or `?api_key=` query). Empty = anonymous access.
+    /// `X-API-Key` header. Empty = anonymous access.
+    ///
+    /// V-002: the `?api_key=` query fallback was removed — the key is now
+    /// header-only so it never lands in access logs / browser history / Referer.
     pub api_key: Option<String>,
     /// Per-IP request rate limit, requests/sec. 0 = unlimited.
     pub rate_per_sec: u32,
+    /// CORS allow-list of origins. Empty (the default) keeps the API
+    /// same-origin only (no `Access-Control-Allow-Origin`). V-007 fix: the
+    /// router previously used `CorsLayer::permissive()` (`ACAO: *`), which
+    /// widened the blast radius of cross-origin data-driving. Operators who
+    /// need cross-origin access add their exact origins here.
+    pub cors_origins: Vec<String>,
+    /// DEV ONLY. When true, `POST /v1/auth/request-token` returns the one-time
+    /// token in the response body so local/CI flows can redeem it without an
+    /// email sink. V-005 fix: in production the token must be delivered
+    /// out-of-band (email); returning it in the body meant anyone who could
+    /// read the response (logs/MITM) could impersonate the email owner.
+    /// Default false.
+    #[serde(default)]
+    pub dev_return_auth_token: bool,
 }
 
 impl Default for ApiSettings {
@@ -55,6 +72,8 @@ impl Default for ApiSettings {
             api_prefix: "/v1".to_string(),
             api_key: None,
             rate_per_sec: 0,
+            cors_origins: Vec::new(),
+            dev_return_auth_token: false,
         }
     }
 }
@@ -462,14 +481,23 @@ pub fn default_market_players() -> Vec<MarketPlayerGroup> {
             category: Category::Monetary,
             players: vec![
                 pe("HSBC", "Largest HK bank by assets, ~HK$10.5T (KPMG 2024)"),
-                pe("Bank of China (Hong Kong)", "#2 by assets, ~HK$3.9T; RMB clearing bank"),
-                pe("Hang Seng Bank", "#3 by assets, ~HK$1.8T; HSBC-group domestic leader"),
+                pe(
+                    "Bank of China (Hong Kong)",
+                    "#2 by assets, ~HK$3.9T; RMB clearing bank",
+                ),
+                pe(
+                    "Hang Seng Bank",
+                    "#3 by assets, ~HK$1.8T; HSBC-group domestic leader",
+                ),
                 pe("Standard Chartered (HK)", "Major note-issuing bank"),
                 pe("ICBC (Asia)", "Mainland-backed universal bank"),
                 pe("DBS Bank (HK)", "Leading foreign bank"),
                 pe("Citibank (HK)", "Major retail + corporate bank"),
                 pe("Bank of East Asia", "Largest locally-rooted bank"),
-                pe("Virtual banks (ZA Bank, Mox, livi)", "Eight licensed virtual banks"),
+                pe(
+                    "Virtual banks (ZA Bank, Mox, livi)",
+                    "Eight licensed virtual banks",
+                ),
                 pe("Octopus Cards", "Leading SVF licensee"),
             ],
         },
@@ -482,7 +510,10 @@ pub fn default_market_players() -> Vec<MarketPlayerGroup> {
                 pe("Prudential plc", "#2 life insurer, HK$65.3B premium"),
                 pe("HSBC Life (International)", "#3 by premium"),
                 pe("Manulife (International)", "Top-tier life insurer"),
-                pe("China Life Insurance (Overseas)", "Major mainland-backed insurer"),
+                pe(
+                    "China Life Insurance (Overseas)",
+                    "Major mainland-backed insurer",
+                ),
                 pe("AXA Hong Kong & Macau", "Leading general + life insurer"),
                 pe("FWD Group", "Fast-growing pan-Asian insurer"),
                 pe("BOC Group Life Assurance", "Mainland-backed life insurer"),
@@ -499,11 +530,17 @@ pub fn default_market_players() -> Vec<MarketPlayerGroup> {
                 pe("AIA Investments", "Major insurance-linked asset manager"),
                 pe("Hang Seng Investment Management", "Index + fund leader"),
                 pe("Value Partners", "Largest home-grown asset manager"),
-                pe("BOCI International / CCB International", "Mainland-backed IBs"),
+                pe(
+                    "BOCI International / CCB International",
+                    "Mainland-backed IBs",
+                ),
                 pe("Goldman Sachs Asia", "Leading global IB"),
                 pe("Morgan Stanley Asia", "Major global IB"),
                 pe("UBS AG Hong Kong", "Wealth management leader"),
-                pe("Futu Securities / Tiger Brokers", "Retail brokerage disruptors"),
+                pe(
+                    "Futu Securities / Tiger Brokers",
+                    "Retail brokerage disruptors",
+                ),
                 pe("China Cheng Xin (Asia)", "Leading credit-rating agency"),
             ],
         },
@@ -513,11 +550,20 @@ pub fn default_market_players() -> Vec<MarketPlayerGroup> {
             category: Category::Livability,
             players: vec![
                 pe("PCCW / HKT", "Largest telecom operator, ~US$5.2B revenue"),
-                pe("Hutchison Telecom HK ('3')", "Major mobile operator (CK Hutchison)"),
-                pe("SmarTone Telecommunications", "Major mobile operator (HKBN)"),
+                pe(
+                    "Hutchison Telecom HK ('3')",
+                    "Major mobile operator (CK Hutchison)",
+                ),
+                pe(
+                    "SmarTone Telecommunications",
+                    "Major mobile operator (HKBN)",
+                ),
                 pe("HKBN", "Major broadband + enterprise telecom"),
                 pe("China Mobile Hong Kong", "Mainland-backed mobile operator"),
-                pe("CITIC Telecom International", "~US$1.2B revenue; carrier services"),
+                pe(
+                    "CITIC Telecom International",
+                    "~US$1.2B revenue; carrier services",
+                ),
                 pe("Now TV (PCCW Media)", "Leading pay-TV operator"),
                 pe("Television Broadcasts (TVB)", "Free-to-air leader"),
                 pe("HK01 / Orange News", "Top digital news operator"),
@@ -529,16 +575,25 @@ pub fn default_market_players() -> Vec<MarketPlayerGroup> {
             dept: "TD".into(),
             category: Category::Livability,
             players: vec![
-                pe("MTR Corporation", "Rail operator + property; HSI constituent"),
+                pe(
+                    "MTR Corporation",
+                    "Rail operator + property; HSI constituent",
+                ),
                 pe("Kowloon Motor Bus (KMB)", "Largest franchised bus operator"),
                 pe("Citybus / Cityflyer", "Franchised bus operator (HK Island)"),
                 pe("Long Win Bus", "Franchised bus operator (N.T./Lantau)"),
                 pe("New World First Bus", "Franchised bus operator"),
                 pe("New Lantao Bus", "Lantau franchised operator"),
-                pe("Hong Kong Tramways", "Tram operator (also a data provider here)"),
+                pe(
+                    "Hong Kong Tramways",
+                    "Tram operator (also a data provider here)",
+                ),
                 pe("Peak Tramways", "Tourist tram operator"),
                 pe("Star Ferry", "Iconic harbour ferry operator"),
-                pe("Taxi fleets (urban / NT / Lantau)", "Franchised PSV permit holders"),
+                pe(
+                    "Taxi fleets (urban / NT / Lantau)",
+                    "Franchised PSV permit holders",
+                ),
             ],
         },
         // ── Travel Industry Authority: agents / guides / escorts ───────────────
@@ -546,7 +601,10 @@ pub fn default_market_players() -> Vec<MarketPlayerGroup> {
             dept: "TIA".into(),
             category: Category::Trade,
             players: vec![
-                pe("China Travel Service (HK)", "Largest outbound/inbound operator"),
+                pe(
+                    "China Travel Service (HK)",
+                    "Largest outbound/inbound operator",
+                ),
                 pe("Wing On Travel", "Major outbound operator"),
                 pe("Hong Thai Travel Services", "Major outbound operator"),
                 pe("EGL Tours", "Leading package-tour operator"),
@@ -572,7 +630,10 @@ pub fn default_market_players() -> Vec<MarketPlayerGroup> {
                 pe("Yoshinoya Hong Kong", "Leading Japanese QSR"),
                 pe("Sushi Revolution / Genki Sushi", "Major Japanese chains"),
                 pe("Habitat (Tsui Wah Group)", "Cha chaan teng chain"),
-                pe("The Chairman / Ho Lee Fook", "Acclaimed independent restaurants"),
+                pe(
+                    "The Chairman / Ho Lee Fook",
+                    "Acclaimed independent restaurants",
+                ),
             ],
         },
     ]

@@ -138,8 +138,51 @@ impl InvestigationStore {
             .collect()
     }
 
+    /// Like [`list`](Self::list), but never treats an empty owner as "all".
+    /// V-004 fix: the bare `list("", …)` returned every user's investigations.
+    /// The authenticated surface scopes strictly to the caller (empty
+    /// principal → empty result, not a dump).
+    pub async fn list_owned(&self, owner: &str, limit: usize) -> Vec<Investigation> {
+        if owner.is_empty() {
+            return Vec::new();
+        }
+        self.inner
+            .read()
+            .await
+            .values()
+            .filter(|i| i.owner == owner)
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// Fetch an investigation owned by `owner`. V-004 fix: the bare `get`
+    /// returned any id with no ownership check.
+    pub async fn get_owned(&self, id: &str, owner: &str) -> Option<Investigation> {
+        self.inner
+            .read()
+            .await
+            .get(id)
+            .filter(|i| owner.is_empty() || i.owner == owner)
+            .cloned()
+    }
+
     pub async fn delete(&self, id: &str) -> bool {
         self.inner.write().await.remove(id).is_some()
+    }
+
+    /// Delete an investigation owned by `owner`. V-004 fix: the bare `delete`
+    /// removed any id with no ownership check.
+    pub async fn delete_owned(&self, id: &str, owner: &str) -> bool {
+        let mut w = self.inner.write().await;
+        match w.get(id) {
+            Some(i) if owner.is_empty() || i.owner == owner => {
+                w.remove(id);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub async fn count(&self) -> usize {
@@ -164,6 +207,20 @@ impl InvestigationStore {
         Some(inv.clone())
     }
 
+    /// Owner-scoped [`append_step`](Self::append_step). V-004 fix: the bare
+    /// variant mutated any id with no ownership check, so an attacker could
+    /// inject steps into another user's case file by id. This refuses unless
+    /// the caller owns the record.
+    pub async fn append_step_owned(
+        &self,
+        id: &str,
+        owner: &str,
+        step: InvestigationStep,
+    ) -> Option<Investigation> {
+        self.assert_owned(id, owner).await?;
+        self.append_step(id, step).await
+    }
+
     /// Add a case-level note.
     pub async fn add_note(&self, id: &str, body: String) -> Option<Investigation> {
         let mut w = self.inner.write().await;
@@ -176,6 +233,31 @@ impl InvestigationStore {
         inv.notes.push(note);
         inv.updated_at = Utc::now();
         Some(inv.clone())
+    }
+
+    /// Owner-scoped [`add_note`](Self::add_note). V-004 fix: the bare variant
+    /// mutated any id with no ownership check. This refuses unless the caller
+    /// owns the record.
+    pub async fn add_note_owned(
+        &self,
+        id: &str,
+        owner: &str,
+        body: String,
+    ) -> Option<Investigation> {
+        self.assert_owned(id, owner).await?;
+        self.add_note(id, body).await
+    }
+
+    /// Returns `Some(())` iff the record exists AND (owner is empty OR the
+    /// record's owner matches). The single gate every owned_* method shares.
+    async fn assert_owned(&self, id: &str, owner: &str) -> Option<()> {
+        let r = self.inner.read().await;
+        let inv = r.get(id)?;
+        if owner.is_empty() || inv.owner == owner {
+            Some(())
+        } else {
+            None
+        }
     }
 }
 

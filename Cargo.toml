@@ -23,7 +23,12 @@ description = "Consolidated, AI-infused insights from Hong Kong Government publi
 tokio = { version = "1.45", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "stream"] }
 tower = { version = "0.5", features = ["limit", "timeout", "retry", "util"] }
-tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip", "timeout"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip", "timeout", "set-header"] }
+# V-003: per-IP inbound rate limiting. `tower-governor` does not yet support
+# axum 0.8's body type, so we drive `governor` directly from a tiny axum
+# `from_fn` middleware (see `crate::ratelimit`). `governor` is tower-version-
+# agnostic at this layer.
+governor = "0.6"
 hyper = { version = "1.6", features = ["full"] }
 axum = { version = "0.8", features = ["macros"] }
 
@@ -50,6 +55,14 @@ async-trait = "0.1"
 # must hash identically, or the cite drawer surfaces a "reproduces as of {ts}"
 # warning rather than false-claiming reproducibility.
 sha2 = "0.10"
+# CSPRNG for security-critical token generation (V-006 fix). Tokens were
+# previously SHA-256 over a timestamp + counter — deterministic and forgeable.
+# `rand` gives us a proper OS-entropy source for one-time tokens + sessions.
+rand = "0.8"
+# Constant-time comparison for secret strings (V-011 fix). The API-key guard
+# compared the supplied key with `==`, leaking length + prefix via a timing
+# side-channel. `subtle` provides `ConstantTimeEq` for byte slices.
+subtle = "2"
 
 # Internal crates
 hkgov-common = { path = "crates/common" }

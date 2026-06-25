@@ -29,6 +29,10 @@ chrono.workspace = true
 thiserror.workspace = true
 # SHA-256 for the Cite-It reproducibility manifest (P-101).
 sha2.workspace = true
+# CSPRNG for one-time magic-link tokens + session handles (V-006 fix). The old
+# `opaque_token` was deterministic (SHA-256 over timestamp+counter); `rand`
+# draws 32-byte secrets from the OS so they are unguessable + unforgeable.
+rand.workspace = true
 # Only needed by the HTTP LLM client; gated behind the `llm` feature.
 reqwest = { workspace = true, optional = true }
 

@@ -16,9 +16,11 @@
 //!   returned on redemption. [`UserStore::lookup_session`] resolves it to a
 //!   `User`.
 //!
-//! Token + session ids are 32-byte random hex strings (the `sha2` crate's
-//! `Sha256` over a timestamp + email + a per-store counter — deterministic
-//! enough for a single-node v1; a real deployment would use `rand`).
+//! Token + session ids are 32-byte CSPRNG hex strings. V-006 fix: they were
+//! previously `Sha256(timestamp + counter + email)` — deterministic, with no
+//! real entropy, so forgeable within a known issue window. They now draw from
+//! the OS CSPRNG via the `rand` crate, so two tokens for the same email in the
+//! same nanosecond are still unrelated 256-bit secrets.
 //!
 //! ## Scope
 //!
@@ -220,19 +222,33 @@ pub fn user_id_for(email: &str) -> String {
     format!("u:{hex}")
 }
 
-/// An opaque, unguessable token string (32 bytes hex). Deterministic in the
-/// inputs but mixed with a per-store counter + a domain tag so two tokens for
-/// the same email differ. A production deployment would use `rand`; this is
-/// sufficient for single-node v1 and keeps the workspace dependency-free.
+/// An opaque, unguessable token string (32 bytes hex) drawn from the OS
+/// CSPRNG. V-006 fix: previously this was `Sha256(timestamp + counter +
+/// domain + subject)` — a deterministic hash with **no real entropy**, so
+/// within a known issue window an attacker who could narrow the timestamp had
+/// a computationally attackable token space. With OS-entropy bytes there is
+/// nothing to predict: two tokens minted in the same nanosecond for the same
+/// email are independent 256-bit secrets. The `subject`/`domain`/`seq` params
+/// are kept in the signature (callers still pass them) but are no longer the
+/// entropy source — they are mixed in only to avoid shrinking the input space
+/// below the random bytes (defense-in-depth, not the secret).
 fn opaque_token(subject: &str, seq: u64, domain: &str) -> String {
+    use rand::RngCore;
+    // 32 bytes of OS entropy = the secret. This is what makes the token
+    // unguessable; everything below only adds (never subtracts) entropy.
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    // Mix the caller context in too — belt-and-braces so the hex is never
+    // *less* identifying than the old hash, while the random bytes remain the
+    // unforgeable core.
     let mut h = Sha256::new();
+    h.update(bytes);
+    h.update(b"\x00");
     h.update(subject.as_bytes());
     h.update(b"\x00");
     h.update(seq.to_le_bytes());
     h.update(b"\x00");
     h.update(domain.as_bytes());
-    h.update(b"\x00");
-    h.update(Utc::now().to_rfc3339().as_bytes());
     let hash = h.finalize();
     hash.iter().map(|b| format!("{:02x}", b)).collect()
 }
@@ -304,6 +320,40 @@ mod tests {
         let t1 = store.issue_token("dave@example.com").await;
         let t2 = store.issue_token("dave@example.com").await;
         assert_ne!(t1.token, t2.token, "per-issue tokens must differ");
+    }
+
+    // ---- V-006: tokens must be CSPRNG-generated, not timestamp-derived ------
+    //
+    // Before V-006, `opaque_token` was `Sha256(subject + seq + domain + now)`.
+    // That hash had no real entropy: given the same (subject, seq, domain,
+    // nanosecond timestamp) it reproduced the same token, and over a known
+    // window the space was brute-forceable. The fix draws 32 bytes from the OS
+    // CSPRNG first, so the token is a genuine 256-bit secret. These guards lock
+    // the property: (1) two rapid issues for the same email never collide, and
+    // (2) the token is not a pure function of public inputs.
+
+    #[tokio::test]
+    async fn v006_rapid_tokens_are_distinct_and_long() {
+        // 50 back-to-back issues in the same nanosecond window — under the old
+        // deterministic scheme many would share prefixes/structure; with OS
+        // entropy every one is an independent 256-bit secret (64 hex chars).
+        let store = UserStore::new();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            let t = store.issue_token("v006@example.com").await;
+            assert_eq!(t.token.len(), 64, "token is 32-byte hex (64 chars)");
+            assert!(seen.insert(t.token.clone()), "token must be unique");
+        }
+        assert_eq!(seen.len(), 50);
+    }
+
+    #[test]
+    fn v006_token_is_not_a_pure_function_of_public_inputs() {
+        // Same (subject, seq, domain) twice → different outputs, because the
+        // OS-random 32 bytes are the entropy source, not the public args.
+        let a = opaque_token("x@y.z", 1, "token");
+        let b = opaque_token("x@y.z", 1, "token");
+        assert_ne!(a, b, "V-006: identical public inputs must not mint the same token");
     }
 
     #[tokio::test]

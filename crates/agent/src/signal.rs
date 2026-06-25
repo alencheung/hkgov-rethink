@@ -88,6 +88,26 @@ fn default_enabled() -> bool {
     true
 }
 
+/// The mutable overlay applied by [`SignalStore::update_owned`]. V-010 fix:
+/// `PATCH /v1/signals/{id}` used to accept the full `Signal` body and persist
+/// it verbatim, so a caller could rewrite `owner` / `created_at` / `id` and
+/// hijack another user's signal. This struct is an **explicit allow-list** of
+/// the fields a client may change (`question`, `compiled`, `channels`,
+/// `enabled`); every field is `Option` (omitted = leave unchanged) and the
+/// immutable fields (`owner`, `id`, `created_at`) are simply absent — there is
+/// no way for a request body to set them, by construction.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SignalPatch {
+    #[serde(default)]
+    pub question: Option<String>,
+    #[serde(default)]
+    pub compiled: Option<hkgov_common::ScanTarget>,
+    #[serde(default)]
+    pub channels: Option<Vec<SignalChannel>>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
 /// The preview result for one signal: "this would have fired N times in the
 /// last window". Deterministic — produced by running the real detector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +194,38 @@ impl SignalStore {
             .collect()
     }
 
+    /// Like [`list`](Self::list), but **never** treats an empty owner as "all".
+    /// V-004 fix: the bare `list("", …)` returned every user's signals because
+    /// an empty owner matched the `owner.is_empty()` bypass. The authenticated
+    /// surface must scope strictly to the caller, so callers pass a resolved
+    /// principal here and receive only their own records (empty principal →
+    /// empty result, not a dump).
+    pub async fn list_owned(&self, owner: &str, limit: usize) -> Vec<Signal> {
+        if owner.is_empty() {
+            return Vec::new();
+        }
+        let r = self.inner.read().await;
+        r.values()
+            .filter(|s| s.owner == owner)
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// Fetch a signal, but only if `owner` owns it. V-004 fix: the bare `get`
+    /// returned any signal by id with no ownership check, enabling cross-tenant
+    /// reads/deletes. `None` for unknown OR not-owned — both look the same to
+    /// the caller (no existence oracle for another tenant's ids).
+    pub async fn get_owned(&self, id: &str, owner: &str) -> Option<Signal> {
+        self.inner
+            .read()
+            .await
+            .get(id)
+            .filter(|s| owner.is_empty() || s.owner == owner)
+            .cloned()
+    }
+
     pub async fn update(&self, signal: Signal) -> Option<Signal> {
         let mut w = self.inner.write().await;
         if w.contains_key(&signal.id) {
@@ -186,8 +238,61 @@ impl SignalStore {
         }
     }
 
+    /// Update a signal owned by `owner`. V-010 fix: [`update`](Self::update)
+    /// replaced the stored record wholesale with the caller's body — so a
+    /// caller could rewrite `owner`, `created_at`, or `enabled` and hijack the
+    /// signal. This variant (a) refuses to mutate a signal the caller doesn't
+    /// own, and (b) preserves the immutable fields (`owner`, `id`,
+    /// `created_at`) from the stored record, applying only the mutable
+    /// overlay (`question`, `compiled`, `channels`, `enabled`).
+    pub async fn update_owned(
+        &self,
+        id: &str,
+        owner: &str,
+        patch: SignalPatch,
+    ) -> Option<Signal> {
+        let mut w = self.inner.write().await;
+        let existing = w.get_mut(id)?;
+        // Ownership gate: a caller who doesn't own the record gets `None`,
+        // identical to "not found" (no cross-tenant existence leak).
+        if !owner.is_empty() && existing.owner != owner {
+            return None;
+        }
+        // Apply only the allow-listed mutable fields. Immutable fields
+        // (owner/id/created_at) are never taken from the request body.
+        if let Some(question) = patch.question {
+            existing.question = question;
+        }
+        if let Some(compiled) = patch.compiled {
+            existing.compiled = compiled;
+        }
+        if let Some(channels) = patch.channels {
+            existing.channels = channels;
+        }
+        if let Some(enabled) = patch.enabled {
+            existing.enabled = enabled;
+        }
+        existing.updated_at = Some(Utc::now());
+        Some(existing.clone())
+    }
+
     pub async fn delete(&self, id: &str) -> bool {
         self.inner.write().await.remove(id).is_some()
+    }
+
+    /// Delete a signal owned by `owner`. V-004 fix: the bare `delete` removed
+    /// any id with no ownership check, so an attacker who learned another
+    /// user's signal id (id format is enumerable) could destroy it. This
+    /// variant refuses unless the caller owns the record.
+    pub async fn delete_owned(&self, id: &str, owner: &str) -> bool {
+        let mut w = self.inner.write().await;
+        match w.get(id) {
+            Some(s) if owner.is_empty() || s.owner == owner => {
+                w.remove(id);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub async fn count(&self) -> usize {

@@ -11,9 +11,22 @@ request_timeout_ms = 15000
 # All API routes nest under this prefix (health stays at root for probes).
 api_prefix = "/v1"
 # Set HKGOV_API__API_KEY to require X-API-Key on every non-health request.
+# V-002: the key is header-only (the ?api_key= query path was removed — it
+# leaked into access logs / browser history / Referer).
 api_key = ""
-# Per-IP rate limit, req/s. 0 = unlimited.
+# Per-IP rate limit, req/s. 0 = unlimited. V-003: this is now wired to a
+# tower-governor limiter on the router (previously dead config).
 rate_per_sec = 0
+# CORS allow-list. Empty (default) = same-origin only — no ACAO header. V-007:
+# the router previously used CorsLayer::permissive() (ACAO: *). Add exact
+# origins here if a browser client on another origin needs API access, e.g.
+#   cors_origins = ["https://hkgov-rethink.example"]
+cors_origins = []
+# DEV ONLY. Returns the magic-link token in POST /v1/auth/request-token so
+# local/CI flows can redeem it without an email sink. V-005: must be false in
+# production — the token is a credential; returning it in the body meant anyone
+# who could read the response (logs/MITM) could impersonate the email owner.
+dev_return_auth_token = false
 
 [upstream]
 hkma_base_url = "https://api.hkma.gov.hk/public"

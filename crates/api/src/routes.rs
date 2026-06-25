@@ -16,17 +16,21 @@ use crate::auth::{guard, make_guard};
 use crate::error::ApiError;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
-use axum::middleware::from_fn;
+use axum::http::{header, HeaderMap, HeaderValue};
+use axum::middleware::{from_fn, from_fn_with_state};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use hkgov_agent::{heuristic_answer, run_agent_loop, Answer, HeuristicClient, LlmClient, ToolBelt};
+use hkgov_agent::{
+    heuristic_answer, run_agent_loop, Answer, HeuristicClient, LlmClient, ToolBelt, UserStore,
+};
 use hkgov_common::DataSource;
 use hkgov_store::{DatasetId, RecordStore};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
@@ -114,15 +118,121 @@ pub fn router(state: AppState) -> Router {
             .nest(&format!("/{prefix}"), api_routes)
     };
 
-    router
-        .with_state(state)
+    let router = router
+        .with_state(state.clone())
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             timeout,
         ))
-        .layer(CompressionLayer::new())
-        .layer(CorsLayer::permissive())
+        .layer(CompressionLayer::new());
+
+    // V-003: per-IP inbound rate limiting. `api.rate_per_sec` was previously
+    // dead config — defined in config.rs but never wired to the router, so
+    // there was no throttle on anonymous request floods. When the operator
+    // sets a non-zero rate, attach a per-IP token-bucket middleware. When 0
+    // (the default, for back-compat) we skip it to keep local dev unlimited.
+    let router = if state.settings.api.rate_per_sec > 0 {
+        let limiter = crate::ratelimit::IpRateLimiter::new(state.settings.api.rate_per_sec);
+        router.layer(from_fn_with_state(limiter, crate::ratelimit::limit))
+    } else {
+        router
+    };
+
+    router
+        // V-007: CORS is now an operator allow-list, not permissive. Empty
+        // `cors_origins` (the default) ⇒ same-origin only (no ACAO). Each
+        // configured origin is matched exactly.
+        .layer(cors_layer(&state.settings.api.cors_origins))
+        // V-007: CORS is now an operator allow-list, not permissive. Empty
+        // `cors_origins` (the default) ⇒ same-origin only (no ACAO). Each
+        // configured origin is matched exactly.
+        .layer(cors_layer(&state.settings.api.cors_origins))
+        // V-008: security headers on every response — defense-in-depth behind
+        // the (already-correct) output escaping. See `security_header_layers`.
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                // Dashboard loads uPlot + remixicon from jsdelivr; everything
+                // else is 'self'. No 'unsafe-eval'. frame-ancestors blocks
+                // clickjacking. This blocks injected third-party loads even if
+                // a future code change introduces an unescaped DOM sink.
+                "default-src 'self'; \
+                 script-src 'self' https://cdn.jsdelivr.net; \
+                 style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; \
+                 img-src 'self' data:; \
+                 font-src 'self' https://cdn.jsdelivr.net; \
+                 connect-src 'self'; \
+                 frame-ancestors 'none'",
+            ),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            // `Permissions-Policy` has no const in axum's header module; use the
+            // literal name. Deny the high-risk device/browser features by default.
+            axum::http::HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static("geolocation=(), microphone=(), camera=()"),
+        ))
         .layer(TraceLayer::new_for_http())
+}
+
+/// Build the CORS layer from the configured allow-list. V-007: replaced
+/// `CorsLayer::permissive()` (`Access-Control-Allow-Origin: *`). Empty list ⇒
+/// same-origin only (no ACAO emitted). Non-empty ⇒ exact-origin matching.
+fn cors_layer(origins: &[String]) -> CorsLayer {
+    if origins.is_empty() {
+        // No cross-origin access by default. A `CorsLayer` with no allowed
+        // origin suppresses the ACAO header.
+        CorsLayer::new()
+    } else {
+        let parsed: Vec<HeaderValue> = origins
+            .iter()
+            .filter_map(|o| HeaderValue::from_str(o).ok())
+            .collect();
+        CorsLayer::new().allow_origin(AllowOrigin::list(parsed))
+    }
+}
+
+/// Resolve the authenticated principal's stable id from the request's
+/// `Authorization: Bearer {session}` header. V-004/V-005 fix: the per-user
+/// features (signals, investigations) used to take `owner` from the request
+/// BODY — so any caller could claim to be any user, and an empty owner listed
+/// every user's records. The owner is now derived from the authenticated
+/// session; there is no way for the body to set it.
+async fn principal_id(users: &UserStore, headers: &HeaderMap) -> Option<String> {
+    let token = bearer_token(headers)?;
+    let user = users.lookup_session(&token).await?;
+    Some(user.id)
+}
+
+/// Require an authenticated principal, returning its id, or a 401. Used by the
+/// mutating routes so they can never operate without a resolved owner.
+fn require_principal(id: Option<String>) -> Result<String, ApiError> {
+    id.ok_or_else(|| {
+        ApiError(hkgov_common::Error::BadRequest(
+            "authentication required: send a valid Authorization: Bearer {session} \
+             (obtain one from POST /v1/auth/request-token + /v1/auth/redeem)"
+                .into(),
+        ))
+    })
 }
 
 #[derive(Serialize)]
@@ -380,22 +490,21 @@ async fn list_market_players(
     Query(q): Query<PlayerQuery>,
 ) -> Result<Json<Vec<hkgov_common::MarketPlayerGroup>>, ApiError> {
     // Empty config → ship the defaults so out-of-the-box behavior is unchanged.
-    let groups: Vec<hkgov_common::MarketPlayerGroup> = if state
-        .settings
-        .reference
-        .market_players
-        .is_empty()
-    {
-        hkgov_common::default_market_players()
-    } else {
-        state.settings.reference.market_players.clone()
-    };
+    let groups: Vec<hkgov_common::MarketPlayerGroup> =
+        if state.settings.reference.market_players.is_empty() {
+            hkgov_common::default_market_players()
+        } else {
+            state.settings.reference.market_players.clone()
+        };
 
     let dept = q.dept.as_deref().map(|s| s.to_ascii_uppercase());
     let category = q.category.as_deref().map(|s| s.to_ascii_lowercase());
     let filtered: Vec<_> = groups
         .into_iter()
-        .filter(|g| dept.as_deref().is_none_or(|d| g.dept.eq_ignore_ascii_case(d)))
+        .filter(|g| {
+            dept.as_deref()
+                .is_none_or(|d| g.dept.eq_ignore_ascii_case(d))
+        })
         .filter(|g| {
             category
                 .as_deref()
@@ -731,16 +840,17 @@ struct CreateSignalRequest {
     /// Where to push when it fires. v1 stores these; dispatch waits on P-108.
     #[serde(default)]
     channels: Vec<hkgov_agent::SignalChannel>,
-    /// Pseudo-identity: a client-generated UUID. Real identity arrives with P-108.
-    #[serde(default)]
-    owner: Option<String>,
 }
 
 async fn create_signal(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<CreateSignalRequest>,
-) -> Json<hkgov_agent::Signal> {
-    let owner = req.owner.unwrap_or_default();
+) -> Result<Json<hkgov_agent::Signal>, ApiError> {
+    // V-004: owner comes from the authenticated session, NOT the request body.
+    // The request no longer even carries an `owner` field — there is no way
+    // for a caller to claim another user's identity.
+    let owner = require_principal(principal_id(&state.users, &headers).await)?;
     let id = hkgov_agent::signal_id(&owner, &req.compiled);
     let signal = hkgov_agent::Signal {
         id,
@@ -752,52 +862,61 @@ async fn create_signal(
         created_at: chrono::Utc::now(),
         updated_at: None,
     };
-    Json(state.signals.create(signal).await)
+    Ok(Json(state.signals.create(signal).await))
 }
 
 #[derive(Deserialize, Default)]
 struct ListSignalsQuery {
-    /// Filter to one owner. Empty/omitted = all (the trust model is one shared key).
-    #[serde(default)]
-    owner: Option<String>,
     #[serde(default = "default_limit")]
     limit: usize,
 }
 
 async fn list_signals(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<ListSignalsQuery>,
-) -> Json<Vec<hkgov_agent::Signal>> {
-    Json(
-        state
-            .signals
-            .list(&q.owner.unwrap_or_default(), q.limit)
-            .await,
-    )
+) -> Result<Json<Vec<hkgov_agent::Signal>>, ApiError> {
+    // V-004: scope to the authenticated caller only. The old `?owner=` filter
+    // let anyone list every user's signals (empty owner = all). `list_owned`
+    // returns ONLY the caller's records.
+    let owner = require_principal(principal_id(&state.users, &headers).await)?;
+    Ok(Json(state.signals.list_owned(&owner, q.limit).await))
 }
 
 async fn get_signal(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
-) -> Json<Option<hkgov_agent::Signal>> {
-    Json(state.signals.get(&id).await)
+) -> Result<Json<Option<hkgov_agent::Signal>>, ApiError> {
+    // V-004: ownership-gated read.
+    let owner = require_principal(principal_id(&state.users, &headers).await)?;
+    Ok(Json(state.signals.get_owned(&id, &owner).await))
 }
 
 async fn delete_signal(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
-) -> Json<serde_json::Value> {
-    let ok = state.signals.delete(&id).await;
-    Json(serde_json::json!({ "deleted": ok }))
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // V-004: ownership-gated delete. A caller can no longer destroy another
+    // user's signal by guessing/enumerating its id.
+    let owner = require_principal(principal_id(&state.users, &headers).await)?;
+    let ok = state.signals.delete_owned(&id, &owner).await;
+    Ok(Json(serde_json::json!({ "deleted": ok })))
 }
 
 async fn update_signal(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
-    Json(mut signal): Json<hkgov_agent::Signal>,
+    Json(patch): Json<hkgov_agent::SignalPatch>,
 ) -> Result<Json<hkgov_agent::Signal>, ApiError> {
-    signal.id = id;
-    match state.signals.update(signal).await {
+    // V-010: the body is now a SignalPatch (an explicit allow-list of mutable
+    // fields: question/compiled/channels/enabled). The immutable fields —
+    // owner, id, created_at — are absent from the struct, so they can never be
+    // rewritten by a request body. V-004: the update is ownership-gated.
+    let owner = require_principal(principal_id(&state.users, &headers).await)?;
+    match state.signals.update_owned(&id, &owner, patch).await {
         Some(s) => Ok(Json(s)),
         None => Err(ApiError(hkgov_common::Error::NotFound(
             "signal not found".into(),
@@ -844,15 +963,15 @@ struct CreateInvestigationRequest {
     /// Optional human-authored title; defaults to the seed title.
     #[serde(default)]
     title: Option<String>,
-    /// Pseudo-identity (P-108 lands real identity later).
-    #[serde(default)]
-    owner: Option<String>,
 }
 
 async fn create_investigation(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<CreateInvestigationRequest>,
 ) -> Result<Json<hkgov_agent::Investigation>, ApiError> {
+    // V-004: owner from the session, not the body.
+    let owner = require_principal(principal_id(&state.users, &headers).await)?;
     let source = parse_source(&req.seed_source)?;
     let now = chrono::Utc::now();
     let id = hkgov_agent::investigation_id(&req.seed_insight_id, now);
@@ -863,7 +982,7 @@ async fn create_investigation(
         seed_dataset: req.seed_dataset,
         seed_title: req.seed_title.clone(),
         title: req.title.unwrap_or(req.seed_title),
-        owner: req.owner.unwrap_or_default(),
+        owner,
         steps: Vec::new(),
         notes: Vec::new(),
         created_at: now,
@@ -874,37 +993,41 @@ async fn create_investigation(
 
 #[derive(Deserialize, Default)]
 struct ListInvestigationsQuery {
-    #[serde(default)]
-    owner: Option<String>,
     #[serde(default = "default_limit")]
     limit: usize,
 }
 
 async fn list_investigations(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<ListInvestigationsQuery>,
-) -> Json<Vec<hkgov_agent::Investigation>> {
-    Json(
-        state
-            .investigations
-            .list(&q.owner.unwrap_or_default(), q.limit)
-            .await,
-    )
+) -> Result<Json<Vec<hkgov_agent::Investigation>>, ApiError> {
+    // V-004: scope to the authenticated caller only.
+    let owner = require_principal(principal_id(&state.users, &headers).await)?;
+    Ok(Json(
+        state.investigations.list_owned(&owner, q.limit).await,
+    ))
 }
 
 async fn get_investigation(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
-) -> Json<Option<hkgov_agent::Investigation>> {
-    Json(state.investigations.get(&id).await)
+) -> Result<Json<Option<hkgov_agent::Investigation>>, ApiError> {
+    // V-004: ownership-gated read.
+    let owner = require_principal(principal_id(&state.users, &headers).await)?;
+    Ok(Json(state.investigations.get_owned(&id, &owner).await))
 }
 
 async fn delete_investigation(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
-) -> Json<serde_json::Value> {
-    let ok = state.investigations.delete(&id).await;
-    Json(serde_json::json!({ "deleted": ok }))
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // V-004: ownership-gated delete.
+    let owner = require_principal(principal_id(&state.users, &headers).await)?;
+    let ok = state.investigations.delete_owned(&id, &owner).await;
+    Ok(Json(serde_json::json!({ "deleted": ok })))
 }
 
 #[derive(Deserialize)]
@@ -921,9 +1044,12 @@ struct AppendStepRequest {
 
 async fn append_investigation_step(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(req): Json<AppendStepRequest>,
 ) -> Result<Json<hkgov_agent::Investigation>, ApiError> {
+    // V-004: ownership-gated mutation.
+    let owner = require_principal(principal_id(&state.users, &headers).await)?;
     let kind = match req.kind.as_str() {
         "chip" => hkgov_agent::StepKind::Chip,
         "qa" => hkgov_agent::StepKind::Qa,
@@ -943,7 +1069,7 @@ async fn append_investigation_step(
         executed_at: chrono::Utc::now(),
         annotation: req.annotation,
     };
-    match state.investigations.append_step(&id, step).await {
+    match state.investigations.append_step_owned(&id, &owner, step).await {
         Some(inv) => Ok(Json(inv)),
         None => Err(ApiError(hkgov_common::Error::NotFound(
             "investigation not found".into(),
@@ -958,10 +1084,13 @@ struct AddNoteRequest {
 
 async fn add_investigation_note(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(req): Json<AddNoteRequest>,
 ) -> Result<Json<hkgov_agent::Investigation>, ApiError> {
-    match state.investigations.add_note(&id, req.body).await {
+    // V-004: ownership-gated mutation.
+    let owner = require_principal(principal_id(&state.users, &headers).await)?;
+    match state.investigations.add_note_owned(&id, &owner, req.body).await {
         Some(inv) => Ok(Json(inv)),
         None => Err(ApiError(hkgov_common::Error::NotFound(
             "investigation not found".into(),
@@ -984,9 +1113,13 @@ struct RequestTokenRequest {
 
 #[derive(Serialize)]
 struct TokenResponse {
-    /// The one-time token. In dev/CI this is returned directly; in production
-    /// it's emailed and this field is omitted.
-    token: String,
+    /// The one-time token. V-005: **only** present when `api.dev_return_auth_token`
+    /// is set (dev/CI). In production the token is delivered out-of-band (email)
+    /// and this field is `None` (serialized as `null` / omitted) — returning it
+    /// in the body meant anyone who could read the response (logs/MITM) could
+    /// impersonate the email owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
     /// When the token expires (RFC 3339). The client should re-request after.
     expires_at: chrono::DateTime<chrono::Utc>,
 }
@@ -996,8 +1129,18 @@ async fn request_auth_token(
     Json(req): Json<RequestTokenRequest>,
 ) -> Json<TokenResponse> {
     let t = state.users.issue_token(req.email.trim()).await;
+    // V-005: only return the credential in the body when the operator has
+    // explicitly opted into the dev/CI mode. Otherwise the token must be
+    // delivered out-of-band (the email sink the identity tier is designed
+    // around); the body just confirms the request was accepted + when it
+    // expires.
+    let token = if state.settings.api.dev_return_auth_token {
+        Some(t.token)
+    } else {
+        None
+    };
     Json(TokenResponse {
-        token: t.token,
+        token,
         expires_at: t.expires_at,
     })
 }
@@ -2034,5 +2177,335 @@ mod tests {
         )
         .await;
         assert_eq!(a, b, "same insight + records → byte-identical citation");
+    }
+
+    // =========================================================================
+    // Phase 5 — security regression + bypass tests for the V-004 / V-005 / V-010
+    // fixes. These re-simulate the Phase 3 payloads against the hardened code
+    // and assert the attack now fails (and that legitimate use still works).
+    // =========================================================================
+
+    use axum::http::Request;
+    use hkgov_agent::Signal;
+
+    /// Mint a real session for an email and return the bearer token. Mirrors
+    /// the production flow: request-token → redeem → session_token.
+    async fn session_for(state: &AppState, email: &str) -> String {
+        let t = state.users.issue_token(email).await;
+        let s = state.users.redeem_token(&t.token).await.expect("redeem");
+        s.session_token
+    }
+
+    /// A valid `Authorization: Bearer` header value for `email`.
+    fn auth_header(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        h
+    }
+
+    /// Build a minimal compiled scan target (the only fields `signal_id`
+    /// hashes over that we care about here).
+    fn sample_target() -> hkgov_common::ScanTarget {
+        hkgov_common::ScanTarget {
+            source: "hkma".into(),
+            dataset: "daily-interbank-liquidity".into(),
+            detector: "series_jump".into(),
+            field: Some("hibor_overnight".into()),
+            threshold: Some(25.0),
+            ..Default::default()
+        }
+    }
+
+    // ---- V-005: the magic-link token must NOT be returned by default -------
+    //
+    // Phase 3 payload: POST /auth/request-token {email} → the token came back
+    // in the body, so anyone reading the response could impersonate the owner.
+    // Fix: the token field is omitted unless `dev_return_auth_token` is set.
+
+    #[tokio::test]
+    async fn v005_token_omitted_from_response_by_default() {
+        let state = test_state().await;
+        let req = RequestTokenRequest {
+            email: "eve@example.com".into(),
+        };
+        let resp = request_auth_token(State(state), Json(req)).await.0;
+        // Default config ⇒ no token in the body (skip_serializing_if = None).
+        assert!(
+            resp.token.is_none(),
+            "V-005: token must not be in the response body by default"
+        );
+        assert!(resp.expires_at > chrono::Utc::now());
+    }
+
+    #[tokio::test]
+    async fn v005_token_returned_only_in_dev_mode() {
+        let mut state = test_state().await;
+        let mut settings = (*state.settings).clone();
+        settings.api.dev_return_auth_token = true;
+        state.settings = Arc::new(settings);
+        let req = RequestTokenRequest {
+            email: "eve@example.com".into(),
+        };
+        let resp = request_auth_token(State(state), Json(req)).await.0;
+        assert!(resp.token.is_some(), "dev mode returns the token for CI");
+    }
+
+    // ---- V-004: signals are scoped to the authenticated caller -------------
+    //
+    // Phase 3 payload A: GET /v1/signals?owner= → returned every user's signals.
+    // Fix: list_signals derives the owner from the session and `list_owned`
+    // never treats an empty principal as "all".
+
+    #[tokio::test]
+    async fn v004_list_without_session_is_rejected() {
+        let state = test_state().await;
+        let empty = HeaderMap::new();
+        let q = ListSignalsQuery { limit: 100 };
+        let res = list_signals(State(state), empty, Query(q)).await;
+        assert!(res.is_err(), "V-004: no session ⇒ rejected, not a dump");
+    }
+
+    #[tokio::test]
+    async fn v004_list_returns_only_callers_own_signals() {
+        let state = test_state().await;
+        // Plant two signals owned by two different principals directly in the
+        // store (bypassing create so we don't need two sessions up front).
+        let alice = hkgov_agent::user_id_for("alice@example.com");
+        let bob = hkgov_agent::user_id_for("bob@example.com");
+        state
+            .signals
+            .create(hkgov_agent::Signal {
+                id: "sig:alice:1".into(),
+                owner: alice.clone(),
+                question: "alice's secret".into(),
+                compiled: sample_target(),
+                channels: vec![],
+                enabled: true,
+                created_at: chrono::Utc::now(),
+                updated_at: None,
+            })
+            .await;
+        state
+            .signals
+            .create(hkgov_agent::Signal {
+                id: "sig:bob:1".into(),
+                owner: bob.clone(),
+                question: "bob's secret".into(),
+                compiled: sample_target(),
+                channels: vec![],
+                enabled: true,
+                created_at: chrono::Utc::now(),
+                updated_at: None,
+            })
+            .await;
+
+        // Alice lists → sees only her own.
+        let token = session_for(&state, "alice@example.com").await;
+        let got = list_signals(
+            State(state),
+            auth_header(&token),
+            Query(ListSignalsQuery { limit: 100 }),
+        )
+        .await
+        .expect("alice authenticated");
+        assert_eq!(got.0.len(), 1, "alice sees only her signal");
+        assert_eq!(got.0[0].owner, alice);
+        assert!(got.0.iter().all(|s| s.question != "bob's secret"));
+    }
+
+    #[tokio::test]
+    async fn v004_delete_other_users_signal_fails() {
+        // Phase 3 payload B: DELETE /v1/signals/{victim-id} destroyed any
+        // signal by id. Fix: delete_owned checks the caller owns it.
+        let state = test_state().await;
+        state
+            .signals
+            .create(hkgov_agent::Signal {
+                id: "sig:bob:victim".into(),
+                owner: hkgov_agent::user_id_for("bob@example.com"),
+                question: "bob's".into(),
+                compiled: sample_target(),
+                channels: vec![],
+                enabled: true,
+                created_at: chrono::Utc::now(),
+                updated_at: None,
+            })
+            .await;
+
+        // Alice (a different user) tries to delete bob's signal.
+        let alice_token = session_for(&state, "alice@example.com").await;
+        let res = delete_signal(
+            State(state.clone()),
+            auth_header(&alice_token),
+            Path("sig:bob:victim".into()),
+        )
+        .await
+        .expect("handler ok");
+        let deleted = res.0["deleted"].as_bool().unwrap();
+        assert!(!deleted, "V-004: cross-tenant delete must fail");
+        // And the record still exists.
+        assert!(
+            state.signals.get("sig:bob:victim").await.is_some(),
+            "victim's signal survives the cross-tenant delete attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn v004_owner_can_delete_own_signal() {
+        // Regression: the fix must not break legitimate self-delete.
+        let state = test_state().await;
+        let token = session_for(&state, "alice@example.com").await;
+        let owner = hkgov_agent::user_id_for("alice@example.com");
+        state
+            .signals
+            .create(hkgov_agent::Signal {
+                id: "sig:alice:mine".into(),
+                owner,
+                question: "mine".into(),
+                compiled: sample_target(),
+                channels: vec![],
+                enabled: true,
+                created_at: chrono::Utc::now(),
+                updated_at: None,
+            })
+            .await;
+        let res = delete_signal(
+            State(state.clone()),
+            auth_header(&token),
+            Path("sig:alice:mine".into()),
+        )
+        .await
+        .expect("handler ok");
+        assert!(
+            res.0["deleted"].as_bool().unwrap(),
+            "owner can delete their own signal"
+        );
+    }
+
+    // ---- V-010: mass-assignment cannot rewrite immutable fields ------------
+    //
+    // Phase 3 payload: PATCH /v1/signals/{id} with {owner:"attacker"} took over
+    // the signal. Fix: the body is a SignalPatch (allow-list of mutable
+    // fields); owner/id/created_at are absent from the struct by construction.
+
+    #[tokio::test]
+    async fn v010_patch_cannot_steal_ownership() {
+        let state = test_state().await;
+        let victim = hkgov_agent::user_id_for("victim@example.com");
+        state
+            .signals
+            .create(Signal {
+                id: "sig:victim:1".into(),
+                owner: victim.clone(),
+                question: "original".into(),
+                compiled: sample_target(),
+                channels: vec![],
+                enabled: true,
+                created_at: chrono::Utc::now(),
+                updated_at: None,
+            })
+            .await;
+
+        // Attacker has their OWN session but tries to PATCH the victim's signal.
+        // The request can only carry a SignalPatch (no `owner` field exists on
+        // the struct), AND the ownership gate rejects the mutation anyway.
+        let attacker_token = session_for(&state, "attacker@example.com").await;
+        let res = update_signal(
+            State(state.clone()),
+            auth_header(&attacker_token),
+            Path("sig:victim:1".into()),
+            Json(hkgov_agent::SignalPatch {
+                question: Some("hijacked".into()),
+                enabled: Some(false),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert!(res.is_err(), "V-010: cross-tenant patch must fail");
+        // The victim's signal is unchanged.
+        let after = state.signals.get("sig:victim:1").await.unwrap();
+        assert_eq!(after.owner, victim, "ownership not rewritten");
+        assert_eq!(after.question, "original", "content not mutated");
+        assert!(after.enabled, "enabled not flipped");
+    }
+
+    #[tokio::test]
+    async fn v010_owner_can_patch_own_signal_mutable_fields() {
+        // Regression: the patch allow-list must still let an owner edit the
+        // mutable fields (question/enabled) of their own signal.
+        let state = test_state().await;
+        let token = session_for(&state, "alice@example.com").await;
+        let owner = hkgov_agent::user_id_for("alice@example.com");
+        state
+            .signals
+            .create(Signal {
+                id: "sig:alice:1".into(),
+                owner: owner.clone(),
+                question: "old".into(),
+                compiled: sample_target(),
+                channels: vec![],
+                enabled: true,
+                created_at: chrono::Utc::now(),
+                updated_at: None,
+            })
+            .await;
+        let updated = update_signal(
+            State(state),
+            auth_header(&token),
+            Path("sig:alice:1".into()),
+            Json(hkgov_agent::SignalPatch {
+                question: Some("new".into()),
+                enabled: Some(false),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("owner can patch");
+        assert_eq!(updated.0.question, "new");
+        assert!(!updated.0.enabled);
+        // Immutable fields preserved.
+        assert_eq!(updated.0.owner, owner);
+    }
+
+    // ---- V-004: investigations get the same ownership treatment ------------
+
+    #[tokio::test]
+    async fn v004_investigation_list_scoped_to_owner() {
+        let state = test_state().await;
+        // Two investigations, two owners.
+        for (owner, id) in [
+            ("alice@example.com", "inv:alice:1"),
+            ("bob@example.com", "inv:bob:1"),
+        ] {
+            state
+                .investigations
+                .create(hkgov_agent::Investigation {
+                    id: id.into(),
+                    seed_insight_id: "seed".into(),
+                    seed_source: hkgov_common::DataSource::Hkma,
+                    seed_dataset: "x".into(),
+                    seed_title: "t".into(),
+                    title: "t".into(),
+                    owner: hkgov_agent::user_id_for(owner),
+                    steps: vec![],
+                    notes: vec![],
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                })
+                .await;
+        }
+        let token = session_for(&state, "alice@example.com").await;
+        let got = list_investigations(
+            State(state),
+            auth_header(&token),
+            Query(ListInvestigationsQuery { limit: 100 }),
+        )
+        .await
+        .expect("alice authenticated");
+        assert_eq!(got.0.len(), 1, "alice sees only her own investigation");
+        assert_eq!(got.0[0].id, "inv:alice:1");
     }
 }

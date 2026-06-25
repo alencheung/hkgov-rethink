@@ -58,7 +58,7 @@ pub use loop_mod::{run_agent_loop, AgentOutcome, Answer, TraceStep};
 pub use qa::heuristic_answer;
 pub use scheduler::AgentSupervisor;
 pub use signal::{
-    preview_signal, signal_id, FindingDto as SignalFindingDto, Signal, SignalChannel,
+    preview_signal, signal_id, FindingDto as SignalFindingDto, Signal, SignalChannel, SignalPatch,
     SignalPreview, SignalStore,
 };
 pub use silence::{

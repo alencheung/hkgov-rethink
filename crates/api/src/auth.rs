@@ -1,14 +1,25 @@
 //! Optional API-key auth middleware.
 //!
 //! When `api.api_key` is set in config, every request must carry the key in the
-//! `X-API-Key` header (or `?api_key=` query). `/health` and `/health/*`
-//! are always exempt so liveness probes work unauthenticated.
+//! `X-API-Key` header. `/health` and `/health/*` are always exempt so liveness
+//! probes work unauthenticated.
 //!
 //! When no key is configured, the middleware passes everything through — this
 //! keeps local dev zero-config.
+//!
+//! ## Security notes
+//!
+//! - **V-002:** the key is accepted **only** from the `X-API-Key` header. It
+//!   used to also be read from `?api_key=` in the URL query, where it leaks
+//!   into server access logs, reverse-proxy logs, browser history, and the
+//!   `Referer` header on any cross-origin navigation. Header-only closes that
+//!   disclosure path.
+//! - **V-011:** the supplied key is compared to the expected key in **constant
+//!   time** (see [`crate::secrets`]). The previous `==` compare leaked the
+//!   matching prefix + correct length via a timing side-channel.
 
 use axum::extract::Request;
-use axum::http::{StatusCode, Uri};
+use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
 use std::sync::Arc;
@@ -37,46 +48,28 @@ pub async fn guard(expected: Arc<str>, req: Request, next: Next) -> Result<Respo
 
     let provided = provided_key(&req);
     match provided {
-        Some(p) if p == expected.as_ref() => Ok(next.run(req).await),
+        // V-011: constant-time compare, not `==`.
+        Some(p) if crate::secrets::secret_str_eq(&p, expected.as_ref()) => {
+            Ok(next.run(req).await)
+        }
         _ => Err(StatusCode::UNAUTHORIZED),
     }
 }
 
+/// Pull the caller-supplied key from the request. V-002: header-only — the
+/// `?api_key=` query fallback is intentionally removed (see module docs).
 fn provided_key(req: &Request) -> Option<String> {
     req.headers()
         .get("X-API-Key")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            let uri: &Uri = req.uri();
-            uri.query()
-                .and_then(|q| url_query_value(q, "api_key").map(str::to_string))
-        })
-}
-
-fn url_query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
-    for pair in query.split('&') {
-        let mut it = pair.splitn(2, '=');
-        if it.next() == Some(key) {
-            return it.next();
-        }
-    }
-    None
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_api_key_query() {
-        assert_eq!(
-            url_query_value("foo=1&api_key=secret&bar=2", "api_key"),
-            Some("secret")
-        );
-        assert_eq!(url_query_value("api_key=", "api_key"), Some(""));
-        assert_eq!(url_query_value("foo=1", "api_key"), None);
-    }
 
     // ---- D-005 regression: auth bypass via path suffix/substring matching ----
     //
@@ -194,5 +187,58 @@ mod tests {
     fn wrong_key_rejected() {
         let app = key_enabled_router();
         assert_eq!(status_for(app, "/v1/sources", Some("wrong")), 401);
+    }
+
+    // ---- V-002: the API key must NOT be accepted from the URL query ---------
+    //
+    // Before V-002 the guard also read `?api_key=`. A key in the URL leaks into
+    // server access logs, reverse-proxy logs, browser history, and the Referer
+    // header on any cross-origin navigation — a single logged URL is a permanent
+    // credential disclosure. The fix is header-only; the query form must now be
+    // ignored entirely (treated as no key → 401).
+
+    #[test]
+    fn v002_query_param_key_is_rejected() {
+        let app = key_enabled_router();
+        // The correct key, but in the query string instead of the header → 401.
+        assert_eq!(
+            status_for(app.clone(), "/v1/sources?api_key=secret", None),
+            401,
+            "V-002: query-param api_key must not authenticate"
+        );
+        // And a slightly-wrong query value is also 401 (not a bypass via parsing).
+        assert_eq!(
+            status_for(app, "/v1/sources?api_key=secre", None),
+            401
+        );
+    }
+
+    #[test]
+    fn v002_header_key_still_authenticates() {
+        // Regression guard: removing the query path must not break the header
+        // path — the header is the supported channel.
+        let app = key_enabled_router();
+        assert_eq!(status_for(app, "/v1/sources", Some("secret")), 200);
+    }
+
+    // ---- V-011: the key compare must be constant-time -----------------------
+    //
+    // We can't assert timing in a unit test, but we can assert the helper is
+    // wired (a wrong key of any length is rejected, a right key of the right
+    // length is accepted) so the behavior is locked against a future `==`
+    // regression. The constant-time property itself is unit-tested in
+    // `secrets.rs`.
+
+    #[test]
+    fn v011_wrong_length_keys_rejected() {
+        let app = key_enabled_router();
+        // Shorter and longer than the real key both reject (no length oracle).
+        assert_eq!(status_for(app.clone(), "/v1/sources", Some("sec")), 401);
+        assert_eq!(
+            status_for(app.clone(), "/v1/sources", Some("secret-extra-bytes")),
+            401
+        );
+        // Exact match accepts.
+        assert_eq!(status_for(app, "/v1/sources", Some("secret")), 200);
     }
 }

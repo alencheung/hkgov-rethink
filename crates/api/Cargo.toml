@@ -30,9 +30,16 @@ chrono.workspace = true
 tokio.workspace = true
 tower.workspace = true
 tower-http.workspace = true
+# V-003: per-IP inbound rate limiting. `api.rate_per_sec` was previously dead
+# config (defined but never wired to the router). `governor` gives a per-client
+# token-bucket we drive from a tiny axum middleware (tower-governor doesn't
+# support axum 0.8's body type yet).
+governor.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Constant-time comparison for the API-key guard (V-011 fix).
+subtle.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true

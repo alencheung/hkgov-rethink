@@ -9,14 +9,50 @@
 
 mod auth;
 mod error;
+mod ratelimit;
 mod routes;
+mod secrets;
 mod state;
 
 use crate::state::AppState;
 use hkgov_agent::{AgentSupervisor, HeuristicClient, InsightStore, LlmClient};
 use hkgov_common::Settings;
+use hkgov_store::MemoryStore;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Build the hot-tier record store from `store.backend` config.
+///
+/// The architecture is cache-first: an in-process `moka` hot tier (the default)
+/// fronts optional redis/pg cold tiers. v1 ships the hot tier only; the
+/// `store.backend` knob selects it. Previously this config was **dead** —
+/// hardcoded to `MemoryStore`, so `HKGOV_STORE__BACKEND=redis` was silently
+/// ignored (FEATURES_TRACKER F-085). Now the selection is honored: an unknown
+/// or not-yet-implemented backend fails loudly at boot with an actionable
+/// message, rather than silently degrading to memory.
+///
+/// The full multi-tier store (moka → redis → pg read-through) and the
+/// generalization of the agent supervisor to `Arc<dyn RecordStore>` are
+/// documented roadmap items (G2 persistence workstream).
+fn build_store(settings: &Settings) -> anyhow::Result<Arc<MemoryStore>> {
+    let backend = settings.store.backend.trim().to_ascii_lowercase();
+    match backend.as_str() {
+        "" | "memory" => Ok(Arc::new(MemoryStore::new(
+            settings.cache.max_entries,
+            settings.cache.ttl_secs,
+        ))),
+        "redis" | "pg" | "postgres" => anyhow::bail!(
+            "store.backend={backend} is not yet wired into the boot path. The hot-tier \
+             (moka) store is the only backend the agent supervisor and serving API currently \
+             bind to. The multi-tier (moka → redis → pg read-through) store is a documented \
+             roadmap item (G2 persistence workstream). For now, omit store.backend to use the \
+             zero-config in-process cache, which is the architecture's intended hot tier."
+        ),
+        other => {
+            anyhow::bail!("unknown store.backend={other:?} (expected memory; redis/pg are roadmap)")
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -29,10 +65,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "hkgov-api starting");
 
     let registry = Arc::new(hkgov_connectors::registry::Registry::build(&settings)?);
-    let store = Arc::new(hkgov_store::MemoryStore::new(
-        settings.cache.max_entries,
-        settings.cache.ttl_secs,
-    ));
+    let store: Arc<MemoryStore> = build_store(&settings)?;
     let insights = Arc::new(InsightStore::new());
     let feedback = Arc::new(hkgov_agent::FeedbackStore::new());
     let signals = Arc::new(hkgov_agent::SignalStore::new());
@@ -115,7 +148,9 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&settings.api.bind).await?;
     tracing::info!(bind = %settings.api.bind, agent_enabled = _agent, "hkgov-api listening");
-    axum::serve(listener, app)
+    // V-003: `into_make_service_with_connect_info` exposes the peer IP to the
+    // rate-limit middleware (it keys the token bucket per source IP).
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     tracing::info!("hkgov-api stopped");
@@ -145,10 +180,7 @@ fn build_llm_client(settings: &Settings) -> Arc<dyn LlmClient> {
 /// the catalog grew to 186 datasets under per-source rate limits, so the first
 /// (and for hours the only) analysis pass ran against an empty store and the
 /// flagship HIBOR detector produced nothing.
-async fn wait_for_scan_readiness(
-    store: &Arc<hkgov_store::MemoryStore>,
-    agent: &hkgov_common::AgentSettings,
-) {
+async fn wait_for_scan_readiness(store: &Arc<MemoryStore>, agent: &hkgov_common::AgentSettings) {
     use hkgov_common::{DataSource, ScanTarget};
     use hkgov_store::{DatasetId, RecordStore};
     // Resolve the effective scan list (defaults when none configured).
