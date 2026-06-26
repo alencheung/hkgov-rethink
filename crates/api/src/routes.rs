@@ -110,11 +110,12 @@ pub fn router(state: AppState) -> Router {
         .route("/dashboard/", get(dashboard));
     let router = if prefix.is_empty() {
         // api_routes already carries `/health`; merge brings it to root.
-        router.merge(api_routes)
+        router.merge(api_routes).route("/ready", get(ready))
     } else {
-        // Nested: root `/health` for probes, api_routes under /{prefix}.
+        // Nested: root `/health` + `/ready` for probes, api_routes under /{prefix}.
         router
             .route("/health", get(health))
+            .route("/ready", get(ready))
             .nest(&format!("/{prefix}"), api_routes)
     };
 
@@ -141,11 +142,8 @@ pub fn router(state: AppState) -> Router {
     router
         // V-007: CORS is now an operator allow-list, not permissive. Empty
         // `cors_origins` (the default) ⇒ same-origin only (no ACAO). Each
-        // configured origin is matched exactly.
-        .layer(cors_layer(&state.settings.api.cors_origins))
-        // V-007: CORS is now an operator allow-list, not permissive. Empty
-        // `cors_origins` (the default) ⇒ same-origin only (no ACAO). Each
-        // configured origin is matched exactly.
+        // configured origin is matched exactly. (PR-007: a duplicate layer was
+        // applied here twice — removed; one layer is correct and idempotent.)
         .layer(cors_layer(&state.settings.api.cors_origins))
         // V-008: security headers on every response — defense-in-depth behind
         // the (already-correct) output escaping. See `security_header_layers`.
@@ -298,13 +296,64 @@ async fn dashboard(State(_): State<AppState>) -> axum::response::Response {
 struct Health {
     status: &'static str,
     version: &'static str,
+    /// PR-004: true when the process is up but degraded — any source circuit is
+    /// open, or no dataset has warmed yet. Pure-liveness `/health` always
+    /// returns `status:"ok"` (the process answers), but `degraded` lets a load
+    /// balancer / readiness rule gate traffic off a broken-warm container
+    /// without giving up liveness. `/ready` is the stricter probe that returns
+    /// 503 when degraded.
+    degraded: bool,
 }
 
-async fn health(State(_): State<AppState>) -> Json<Health> {
+/// Is the serving tier healthy enough to receive traffic? PR-004. `degraded`
+/// when any upstream circuit is open OR no dataset has warmed yet — both are
+/// states where a fresh request cannot be served from the warmed cache.
+async fn is_degraded(state: &AppState) -> bool {
+    let breakers_open = state
+        .registry
+        .breaker_states()
+        .iter()
+        .any(|(_, c)| *c != "closed");
+    let warmed = match state.store.list(None).await {
+        Ok(datasets) => datasets.iter().any(|d| d.record_count > 0),
+        Err(_) => true, // store error ⇒ treat as degraded (don't fail open)
+    };
+    breakers_open || !warmed
+}
+
+async fn health(State(state): State<AppState>) -> Json<Health> {
     Json(Health {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
+        degraded: is_degraded(&state).await,
     })
+}
+
+/// PR-004: the readiness probe. Returns 200 when the serving tier can actually
+/// serve (all breakers closed AND at least one dataset warmed), 503 otherwise.
+/// Point load-balancer / k8s readinessProbes here, not at `/health` (which is
+/// pure liveness). Body carries the breaker summary for operators.
+async fn ready(State(state): State<AppState>) -> axum::response::Response {
+    use axum::http::StatusCode;
+    let degraded = is_degraded(&state).await;
+    #[derive(serde::Serialize)]
+    struct ReadyBody {
+        status: &'static str,
+        degraded: bool,
+        sources: Vec<SourceHealth>,
+    }
+    let sources = health_sources_inner(&state);
+    let body = ReadyBody {
+        status: if degraded { "degraded" } else { "ready" },
+        degraded,
+        sources,
+    };
+    let code = if degraded {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
+    (code, Json(body)).into_response()
 }
 
 #[derive(Serialize)]
@@ -314,16 +363,20 @@ struct SourceHealth {
 }
 
 async fn health_sources(State(state): State<AppState>) -> Json<Vec<SourceHealth>> {
-    let states = state.registry.breaker_states();
-    Json(
-        states
-            .into_iter()
-            .map(|(s, circuit)| SourceHealth {
-                source: s.as_str().to_string(),
-                circuit,
-            })
-            .collect(),
-    )
+    Json(health_sources_inner(&state))
+}
+
+/// Shared breaker-state summary used by both `/health/sources` and `/ready`.
+fn health_sources_inner(state: &AppState) -> Vec<SourceHealth> {
+    state
+        .registry
+        .breaker_states()
+        .into_iter()
+        .map(|(s, circuit)| SourceHealth {
+            source: s.as_str().to_string(),
+            circuit,
+        })
+        .collect()
 }
 
 // ---- GET /sources — filterable dataset catalog ---------------------------
@@ -686,9 +739,24 @@ async fn cite_insight(
         return Err(ApiError(hkgov_common::Error::NotFound(id)));
     };
     // Pull the evidence records from the store to compute the content hash.
+    // PR-003: hash over the insight's *actual* evidence record_ids, not an
+    // arbitrary 500-row page head. The evidence list is self-describing — two
+    // reviewers with the same data must get the same `data_sha256` regardless
+    // of row ordering. Fall back to a page only when the insight has no
+    // evidence refs (legacy/derived signals).
     let dataset_id = DatasetId::new(insight.source, insight.dataset.clone());
-    let page = state.store.get_page(&dataset_id, 0, 500).await?;
-    let records = page.records;
+    let evidence_ids: Vec<String> = insight
+        .evidence
+        .iter()
+        .map(|e| e.record_id.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let records = if evidence_ids.is_empty() {
+        state.store.get_page(&dataset_id, 0, 500).await?.records
+    } else {
+        state.store.get_by_ids(&dataset_id, &evidence_ids).await?
+    };
     let base_url = q
         .base_url
         .unwrap_or_else(|| "http://localhost:8080".to_string());
@@ -750,8 +818,11 @@ async fn list_alerts(
 
 #[derive(Deserialize, Default)]
 struct SilenceIndexQuery {
-    /// Period key like "2026-Q2". Empty/omitted = the latest complete quarter
-    /// derivable from the held insights (falls back to "" = all history).
+    /// Period key like "2026-Q2" to scope the score to one quarter. Empty/omitted
+    /// scores the FULL held insight corpus (all history), NOT the latest quarter
+    /// — pass an explicit `?period=YYYY-Qn` to scope. (PR-008: an earlier version
+    /// of this doc claimed empty defaulted to "the latest complete quarter",
+    /// which the implementation does not do; the docs now match the behavior.)
     #[serde(default)]
     period: Option<String>,
 }
@@ -1004,9 +1075,7 @@ async fn list_investigations(
 ) -> Result<Json<Vec<hkgov_agent::Investigation>>, ApiError> {
     // V-004: scope to the authenticated caller only.
     let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    Ok(Json(
-        state.investigations.list_owned(&owner, q.limit).await,
-    ))
+    Ok(Json(state.investigations.list_owned(&owner, q.limit).await))
 }
 
 async fn get_investigation(
@@ -1069,7 +1138,11 @@ async fn append_investigation_step(
         executed_at: chrono::Utc::now(),
         annotation: req.annotation,
     };
-    match state.investigations.append_step_owned(&id, &owner, step).await {
+    match state
+        .investigations
+        .append_step_owned(&id, &owner, step)
+        .await
+    {
         Some(inv) => Ok(Json(inv)),
         None => Err(ApiError(hkgov_common::Error::NotFound(
             "investigation not found".into(),
@@ -1090,7 +1163,11 @@ async fn add_investigation_note(
 ) -> Result<Json<hkgov_agent::Investigation>, ApiError> {
     // V-004: ownership-gated mutation.
     let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    match state.investigations.add_note_owned(&id, &owner, req.body).await {
+    match state
+        .investigations
+        .add_note_owned(&id, &owner, req.body)
+        .await
+    {
         Some(inv) => Ok(Json(inv)),
         None => Err(ApiError(hkgov_common::Error::NotFound(
             "investigation not found".into(),
@@ -1714,6 +1791,7 @@ mod tests {
             "/dashboard",
             "/health",
             "/health/sources",
+            "/ready",
             "/sources",
             "/categories",
             "/insights",
@@ -1745,6 +1823,9 @@ mod tests {
         assert_eq!(get_status(app.clone(), "/v1/sources").await, 200);
         assert_eq!(get_status(app.clone(), "/v1/insights").await, 200);
         assert_eq!(get_status(app.clone(), "/health").await, 200);
+        // PR-004: /ready is a root-level probe (like /health), reachable with
+        // warmed data + closed breakers ⇒ 200.
+        assert_eq!(get_status(app.clone(), "/ready").await, 200);
         assert_eq!(get_status(app.clone(), "/dashboard").await, 200);
         // Without the prefix, the API routes are NOT at root.
         assert_eq!(get_status(app.clone(), "/sources").await, 404);
@@ -2185,7 +2266,6 @@ mod tests {
     // and assert the attack now fails (and that legitimate use still works).
     // =========================================================================
 
-    use axum::http::Request;
     use hkgov_agent::Signal;
 
     /// Mint a real session for an email and return the bearer token. Mirrors

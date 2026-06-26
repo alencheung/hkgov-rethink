@@ -56,8 +56,24 @@ fn build_store(settings: &Settings) -> anyhow::Result<Arc<MemoryStore>> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // PR-013: a malformed config.toml or a bad env override used to silently drop
+    // to defaults — in prod that means an operator fat-fingers HKGOV_API__API_KEY
+    // and the server boots with auth *off*. Config-load failures must be fatal.
+    // (figment treats a *missing* config.toml as an optional merge, so this does
+    // NOT break `cargo run` with no config file — only genuinely broken config.)
+    // Escape hatch HKGOV_STRICT_CONFIG=false preserves the old forgive-on-error
+    // behavior for local experimentation.
     let settings = Settings::load().unwrap_or_else(|e| {
-        eprintln!("failed to load config ({e}); continuing with defaults");
+        let strict = std::env::var("HKGOV_STRICT_CONFIG")
+            .map(|v| v != "false")
+            .unwrap_or(true);
+        if strict {
+            eprintln!("failed to load config ({e}).");
+            eprintln!("aborting — a malformed config in production is a security risk (e.g. silently auth-off).");
+            eprintln!("set HKGOV_STRICT_CONFIG=false to fall back to defaults and continue.");
+            std::process::exit(1);
+        }
+        eprintln!("HKGOV_STRICT_CONFIG=false: ignoring config error ({e}); continuing with defaults");
         Settings::default()
     });
 
@@ -150,9 +166,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(bind = %settings.api.bind, agent_enabled = _agent, "hkgov-api listening");
     // V-003: `into_make_service_with_connect_info` exposes the peer IP to the
     // rate-limit middleware (it keys the token bucket per source IP).
-    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     tracing::info!("hkgov-api stopped");
     Ok(())
 }

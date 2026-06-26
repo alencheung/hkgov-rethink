@@ -122,6 +122,28 @@ impl RecordStore for MemoryStore {
         })
     }
 
+    // PR-003: efficient by-id lookup for the citation manifest. Iterates the
+    // cached record vector once (no paging) so the reproducibility hash is over
+    // the insight's actual evidence records, not a 500-row page head.
+    async fn get_by_ids(
+        &self,
+        dataset_id: &DatasetId,
+        ids: &[String],
+    ) -> Result<Vec<NormalizedRecord>> {
+        let Some(records) = self.records.get(dataset_id).await else {
+            return Err(Error::Store(format!(
+                "no records cached for {}/{}",
+                dataset_id.source, dataset_id.dataset
+            )));
+        };
+        let want: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+        Ok(records
+            .iter()
+            .filter(|r| want.contains(r.record_id.as_str()))
+            .cloned()
+            .collect())
+    }
+
     async fn meta(&self, dataset_id: &DatasetId) -> Result<Option<DatasetMeta>> {
         let registry = self.registry.read().await;
         let Some(static_meta) = registry.get(dataset_id) else {

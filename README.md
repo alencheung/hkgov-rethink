@@ -11,27 +11,28 @@ These are **not synthetic** — they were produced by this project's own detecto
 against live HKGOV open data. Full verbatim output + evidence pointers:
 [EXAMPLES.md](EXAMPLES.md).
 
-> ⚠️ **`series_jump` (critical):** HIBOR overnight **doubled in one settlement
+> **`series_jump` (critical):** HIBOR overnight **doubled in one settlement
 > window** — +99.3% from 2026-02-13 (1.47) to 2026-02-16 (2.93). HKMA issued no
 > press release attributing the move on those dates.
 
-> 📉 **`outlier`:** A sustained sub-1.3% HIBOR cluster across **8 days in March
+> **`outlier`:** A sustained sub-1.3% HIBOR cluster across **8 days in March
 > 2026** (robust-z down to −4.7), invisible to a single-day spike detector but
 > flagged by the MAD outlier scan as a regime, not a blip.
 
-> 🔎 **`cross_source_gap`:** Dates where HKMA issued a press release but published
+> **`cross_source_gap`:** Dates where HKMA issued a press release but published
 > no matching statistical data row (or vice versa) — the literal "press room
 > leaves it untold" signal, with the specific dates as evidence.
 
-> 🤫 **`GET /v1/silence-index` (v7):** those signals are now rolled up into a
-> single, versioned, citable number — *how much did HKMA not explain this
-> quarter?* Built deterministically from the cross-source gaps + unattributed
-> moves above, so the same critique anyone levels at the score can be checked
-> against the exact missing dates.
+> **`GET /v1/silence-index` (v7):** those signals are now rolled up into a
+> single, versioned, citable number — *how much did HKMA not explain?* Built
+> deterministically from the cross-source gaps + unattributed moves above, so
+> the same critique anyone levels at the score can be checked against the exact
+> missing dates. (Without `?period=`, the score spans the full held insight
+> corpus — pass `?period=YYYY-Qn` to scope to one quarter.)
 
 **The determinism guarantee:** every number above is reproducible. Same data in,
 same findings out, **no API key required**. The LLM only frames results; detection
-is pure Rust. See [Architecture → The determinism guarantee](docs/ARCHITECTURE.md).
+is pure Rust. See [Architecture -> The determinism guarantee](docs/ARCHITECTURE.md).
 
 ## Why this exists
 
@@ -73,7 +74,7 @@ Prefer Docker? `docker run ghcr.io/alencheung/hkgov-rethink` (see
 - **Evidence, not assertions.** Every `Insight` carries `EvidenceRef`s pointing
   back into the store, so a reader can verify the claim against the source data.
 - **Built for scale from day one.** One-way pipeline, cache-first serving, the
-  `RecordStore` trait as the scaling contract. Single node → 100k-concurrency
+  `RecordStore` trait as the scaling contract. Single node to 100k-concurrency
   fleet is a config change, not a refactor ([docs/CAPACITY.md](docs/CAPACITY.md)).
 
 ---
@@ -102,8 +103,8 @@ Prefer Docker? `docker run ghcr.io/alencheung/hkgov-rethink` (see
 
 ## Architecture
 
-The platform is a **one-way data pipeline**: upstream → connectors → ingest →
-store → api → client. The serving API **never** calls a connector directly; it
+The platform is a **one-way data pipeline**: upstream -> connectors -> ingest ->
+store -> api -> client. The serving API **never** calls a connector directly; it
 only reads from the cache. This is the single most important property — it's
 what lets the API scale to fleet-level concurrency without ever saturating the
 free HKGOV endpoints it depends on.
@@ -133,8 +134,8 @@ free HKGOV endpoints it depends on.
               │                                        │ read-only
    ┌──────────▼──────────────────┐    ┌────────────────▼─────────────────┐
    │  api  (axum, the only       │    │  agent (decoupled scheduler)     │
-   │  thing that is deployed)    │    │  reads store → runs detectors →  │
-   │  tower stack: timeout,      │    │  LLM frames → writes Insights    │
+   │  thing that is deployed)    │    │  reads store > runs detectors >  │
+   │  tower stack: timeout,      │    │  LLM frames > writes Insights    │
    │  gzip, CORS, trace,         │    └────────────────┬─────────────────┘
    │  concurrency load-shed      │                     │ upsert()
    │  optional X-API-Key auth    │◀────────────────────┘
@@ -178,7 +179,7 @@ For the full rationale (async model, middleware stack, scaling math) see
 
 ## Features
 
-### ✅ Shipped (v1–v5)
+### Shipped (v1–v5)
 
 **Ingestion & connectors**
 - HKMA connector — the **full public HKMA Open API catalog (151 datasets)**,
@@ -195,7 +196,7 @@ For the full rationale (async model, middleware stack, scaling math) see
 - LandsD/CSDI connector — open geospatial catalog via the data.gov.hk archive
   (`crates/connectors/src/landsd.rs`)
 - Per-source **token-bucket rate limiting** + **three-state circuit breakers**
-  (closed → open → half-open) wrapping every connector
+  (closed -> open -> half-open) wrapping every connector
 - Retry with exponential backoff at the HTTP client layer
 
 **Storage**
@@ -243,7 +244,7 @@ For the full rationale (async model, middleware stack, scaling math) see
   `max_steps`; heuristic client opts out via default impl
   (`crates/agent/src/loop_mod.rs`) (v6)
 - Natural-language Q&A — `POST /v1/ask`; rich mode runs the agent loop,
-  heuristic mode does keyword→dataset matching (`crates/agent/src/qa.rs`) (v6)
+  heuristic mode does keyword->dataset matching (`crates/agent/src/qa.rs`) (v6)
 - Proactive alerting — `AlertDispatcher` pushes severity-filtered, deduped
   insights to webhook sinks; `WebhookSink` behind `--features alerts`
   (`crates/agent/src/alerts.rs`) (v6)
@@ -263,7 +264,7 @@ For the full rationale (async model, middleware stack, scaling math) see
 - Python API client example (`examples/`)
 - CONTRIBUTING guide with data-source verification rules (`CONTRIBUTING.md`)
 
-### 🔮 Planned (from [docs/ROADMAP.md](docs/ROADMAP.md) "Remaining")
+### Planned (from [docs/ROADMAP.md](docs/ROADMAP.md) "Remaining")
 
 - ISD / info.gov.hk HTML scraping + news.gov.hk RSS (press connector v2)
 - Wider `data.gov.hk` coverage — the 33 registered resources are the
@@ -333,9 +334,13 @@ docker run --rm -p 8080:8080 -e HKGOV_AGENT__ENABLED=true hkgov-rethink
 curl 'http://localhost:8080/v1/insights?limit=5'
 ```
 
-The image is multi-stage and distroless-slim; the final image is ~30MB. See
-[`Dockerfile`](Dockerfile). (CI publishes to `ghcr.io/alencheung/hkgov-rethink`
-on tags — see [`.github/workflows/release.yml`](.github/workflows/release.yml).)
+The image is multi-stage: a `rust:slim` builder produces a static API binary,
+copied into a `debian:bookworm-slim` runtime that also carries `ca-certificates`
++ `curl` (the latter for the `/ready` healthcheck). The final image is
+~120MB. See [`Dockerfile`](Dockerfile). (CI publishes to
+`ghcr.io/alencheung/hkgov-rethink` on tags — see
+[`.github/workflows/release.yml`](.github/workflows/release.yml).) A smaller
+distroless runtime is a future hardening item.
 
 ---
 
@@ -446,7 +451,7 @@ warmed NormalizedRecords in the store
                          │
         ┌────────────────▼──────────────────┐    ┌──────────────────────┐
         │ LlmClient (crates/agent/llm.rs)   │    │ qa.rs heuristic      │
-        │  HeuristicClient (default, no key)│    │  keyword→dataset     │
+        │  HeuristicClient (default, no key)│    │  keyword>dataset     │
         │  HttpLlmClient   (--features llm) │    │  fallback for /ask   │
         └────────────────┬──────────────────┘    └──────────────────────┘
                          │ into_insight()
@@ -473,6 +478,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §"The determinism guarantee".
 HKGOV_API__BIND=0.0.0.0:9090              # bind address
 HKGOV_API__API_KEY=secret                 # enable API key auth
 HKGOV_API__MAX_CONCURRENCY=100000         # tower load-shedding ceiling
+HKGOV_API__RATE_PER_SEC=20                # per-IP req/s flood guard (0=unlimited; set before exposing publicly — see config.toml)
 HKGOV_STORE__BACKEND=redis                # memory | redis | pg
 HKGOV_STORE__REDIS_URL=redis://...        # only used when backend=redis
 HKGOV_AGENT__ENABLED=true                 # turn on the AI agent
@@ -551,14 +557,14 @@ examples/      Python API client
 
 | Milestone | Status | Highlights |
 |---|---|---|
-| **v1** Foundation | ✅ | HKMA connector, cache-first store, axum API |
-| **v2** Sources + resilience | ✅ | data.gov.hk + press + LandsD, rate limiting, circuit breakers, Redis store |
-| **v3** AI-agent layer | ✅ | anomaly detection, cross-source gaps, `/insights`, heuristic + LLM clients |
-| **v4** Scale & hardening | ✅ | Postgres store, API auth + `/v1` versioning, OpenTelemetry, k6 harness |
-| **v5** Public surface | ✅ | Insights dashboard, examples, CONTRIBUTING |
-| **v6** Intelligence & agentic | ✅ | richer detectors, tool belt, agent loop, `/ask` NL Q&A, proactive alerting |
-| **v7** Product layer | ✅ | **Silence Index** (opacity, quantified — the flagship) + **Unprecedentedness Score** (historical rarity) + **Cite-It** (citation-grade export w/ reproducibility manifest); first features from the PM strategy |
-| **v8** Product layer II | ✅ | **Insight Lifeline** (evolution tracking) + **Signal Subscriptions** (NL authoring + preview) + **Drill-In Investigations** (case files) + **Bilingual** (zh-HK) + **Identity Tier** (magic-link) + `threshold_crossing` scheduler wiring |
+| **v1** Foundation | shipped | HKMA connector, cache-first store, axum API |
+| **v2** Sources + resilience | shipped | data.gov.hk + press + LandsD, rate limiting, circuit breakers, Redis store |
+| **v3** AI-agent layer | shipped | anomaly detection, cross-source gaps, `/insights`, heuristic + LLM clients |
+| **v4** Scale & hardening | shipped | Postgres store, API auth + `/v1` versioning, OpenTelemetry, k6 harness |
+| **v5** Public surface | shipped | Insights dashboard, examples, CONTRIBUTING |
+| **v6** Intelligence & agentic | shipped | richer detectors, tool belt, agent loop, `/ask` NL Q&A, proactive alerting |
+| **v7** Product layer | shipped | **Silence Index** (opacity, quantified — the flagship) + **Unprecedentedness Score** (historical rarity) + **Cite-It** (citation-grade export w/ reproducibility manifest); first features from the PM strategy |
+| **v8** Product layer II | shipped | **Insight Lifeline** (evolution tracking) + **Signal Subscriptions** (NL authoring + preview) + **Drill-In Investigations** (case files) + **Bilingual** (zh-HK) + **Identity Tier** (magic-link) + `threshold_crossing` scheduler wiring |
 
 Full detail, including the remaining/future work, in
 [docs/ROADMAP.md](docs/ROADMAP.md).

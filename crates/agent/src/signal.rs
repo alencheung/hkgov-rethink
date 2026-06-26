@@ -245,12 +245,7 @@ impl SignalStore {
     /// own, and (b) preserves the immutable fields (`owner`, `id`,
     /// `created_at`) from the stored record, applying only the mutable
     /// overlay (`question`, `compiled`, `channels`, `enabled`).
-    pub async fn update_owned(
-        &self,
-        id: &str,
-        owner: &str,
-        patch: SignalPatch,
-    ) -> Option<Signal> {
+    pub async fn update_owned(&self, id: &str, owner: &str, patch: SignalPatch) -> Option<Signal> {
         let mut w = self.inner.write().await;
         let existing = w.get_mut(id)?;
         // Ownership gate: a caller who doesn't own the record gets `None`,

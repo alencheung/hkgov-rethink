@@ -353,7 +353,10 @@ mod tests {
         // OS-random 32 bytes are the entropy source, not the public args.
         let a = opaque_token("x@y.z", 1, "token");
         let b = opaque_token("x@y.z", 1, "token");
-        assert_ne!(a, b, "V-006: identical public inputs must not mint the same token");
+        assert_ne!(
+            a, b,
+            "V-006: identical public inputs must not mint the same token"
+        );
     }
 
     #[tokio::test]

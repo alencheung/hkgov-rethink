@@ -36,25 +36,20 @@ use std::sync::Arc;
 /// (the state store is behind an `Arc`).
 #[derive(Clone)]
 pub struct IpRateLimiter {
-    inner: Arc<
-        RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>,
-    >,
+    inner: Arc<RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>>,
 }
 
 impl IpRateLimiter {
     /// Build a limiter that sustains `per_sec` requests/second per IP with a
     /// small burst allowance.
     pub fn new(per_sec: u32) -> Self {
-        let burst = (per_sec.saturating_mul(2)).max(4) as u32;
+        let burst = (per_sec.saturating_mul(2)).max(4);
         let quota = Quota::per_second(NonZeroU32::new(per_sec).unwrap_or_else(|| {
             // Unreachable when wired (caller gates on per_sec > 0); defend
             // in depth so a misuse can't construct an unbounded quota.
             NonZeroU32::new(1).unwrap()
         }))
-        .allow_burst(
-            NonZeroU32::new(burst)
-                .expect("burst is at least 4, so non-zero"),
-        );
+        .allow_burst(NonZeroU32::new(burst).expect("burst is at least 4, so non-zero"));
         Self {
             inner: Arc::new(RateLimiter::keyed(quota)),
         }
@@ -131,6 +126,9 @@ mod tests {
             limiter.inner.check_key(&a).is_err(),
             "A drained after {a_allowed} checks"
         );
-        assert!(limiter.inner.check_key(&b).is_ok(), "B has an independent bucket");
+        assert!(
+            limiter.inner.check_key(&b).is_ok(),
+            "B has an independent bucket"
+        );
     }
 }

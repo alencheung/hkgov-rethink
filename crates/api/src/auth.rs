@@ -1,8 +1,8 @@
 //! Optional API-key auth middleware.
 //!
 //! When `api.api_key` is set in config, every request must carry the key in the
-//! `X-API-Key` header. `/health` and `/health/*` are always exempt so liveness
-//! probes work unauthenticated.
+//! `X-API-Key` header. `/health`, `/health/*`, and `/ready` are always exempt so
+//! liveness/readiness probes work unauthenticated.
 //!
 //! When no key is configured, the middleware passes everything through — this
 //! keeps local dev zero-config.
@@ -42,16 +42,14 @@ pub async fn guard(expected: Arc<str>, req: Request, next: Next) -> Result<Respo
     // `/v1/datasets/health/records` contains `/health/`, but both are data
     // routes that must require a key (D-005).
     let path = req.uri().path();
-    if path == "/" || path == "/health" || path == "/health/sources" {
+    if path == "/" || path == "/health" || path == "/health/sources" || path == "/ready" {
         return Ok(next.run(req).await);
     }
 
     let provided = provided_key(&req);
     match provided {
         // V-011: constant-time compare, not `==`.
-        Some(p) if crate::secrets::secret_str_eq(&p, expected.as_ref()) => {
-            Ok(next.run(req).await)
-        }
+        Some(p) if crate::secrets::secret_str_eq(&p, expected.as_ref()) => Ok(next.run(req).await),
         _ => Err(StatusCode::UNAUTHORIZED),
     }
 }
@@ -207,10 +205,7 @@ mod tests {
             "V-002: query-param api_key must not authenticate"
         );
         // And a slightly-wrong query value is also 401 (not a bypass via parsing).
-        assert_eq!(
-            status_for(app, "/v1/sources?api_key=secre", None),
-            401
-        );
+        assert_eq!(status_for(app, "/v1/sources?api_key=secre", None), 401);
     }
 
     #[test]

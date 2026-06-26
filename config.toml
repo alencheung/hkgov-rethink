@@ -16,6 +16,10 @@ api_prefix = "/v1"
 api_key = ""
 # Per-IP rate limit, req/s. 0 = unlimited. V-003: this is now wired to a
 # tower-governor limiter on the router (previously dead config).
+# IMPORTANT (PR-014): 0 is fine for local dev, but BEFORE exposing publicly you
+# MUST set a sane non-zero value (e.g. 20) — otherwise there is zero protection
+# against anonymous request floods. Defaulting to 0 keeps dev zero-config; it is
+# not a safe production setting.
 rate_per_sec = 0
 # CORS allow-list. Empty (default) = same-origin only — no ACAO header. V-007:
 # the router previously used CorsLayer::permissive() (ACAO: *). Add exact

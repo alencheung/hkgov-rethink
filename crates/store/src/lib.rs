@@ -52,6 +52,39 @@ pub trait RecordStore: Send + Sync + 'static {
         limit: usize,
     ) -> Result<RecordPage>;
 
+    /// Fetch the specific records whose `record_id` is in `ids`, for the given
+    /// dataset. Used by the citation manifest (PR-003) so the reproducibility
+    /// hash is computed over the insight's *actual* evidence records rather than
+    /// an arbitrary 500-row page head — two reviewers with the same data must get
+    /// the same hash regardless of row ordering. `MemoryStore` overrides this for
+    /// efficiency; the default pages through and filters, which is correct (if
+    /// slower) for the remote backends.
+    async fn get_by_ids(
+        &self,
+        dataset_id: &DatasetId,
+        ids: &[String],
+    ) -> Result<Vec<NormalizedRecord>> {
+        let want: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let mut out = Vec::with_capacity(ids.len());
+        // Page through the whole dataset in 500-row pages until exhausted.
+        let mut offset = 0usize;
+        loop {
+            let page = self.get_page(dataset_id, offset, 500).await?;
+            let remaining = page.records;
+            let got = remaining.len();
+            for r in remaining {
+                if want.contains(r.record_id.as_str()) {
+                    out.push(r);
+                }
+            }
+            if got < 500 || out.len() >= ids.len() {
+                break;
+            }
+            offset += got;
+        }
+        Ok(out)
+    }
+
     /// Best-effort metadata for a dataset (counts, last refresh). Returns None
     /// if the dataset has never been ingested.
     async fn meta(&self, dataset_id: &DatasetId) -> Result<Option<DatasetMeta>>;

@@ -52,8 +52,12 @@ USER hkgov
 
 EXPOSE 8080
 
+# PR-004: probe /ready (not /health). /health is pure liveness (process up);
+# /ready folds in circuit-breaker state + warm cache, so a container with open
+# circuits or an empty cache is marked unhealthy and stops receiving traffic.
+# curl -f fails the check on the 503 a degraded /ready returns.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://localhost:8080/health || exit 1
+    CMD curl -fsS http://localhost:8080/ready || exit 1
 
 # All config is env-overridable (HKGOV_ prefix + __ separator).
 ENTRYPOINT ["hkgov-api"]
