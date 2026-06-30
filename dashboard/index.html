@@ -651,7 +651,9 @@
     // ============ connection + persistence ============
     const LS_BASE='hkgov.base', LS_KEY='hkgov.key', LS_READ='hkgov.read', LS_LAST='hkgov.lastvisit', LS_SEEN='hkgov.seenids', LS_LANG='hkgov.lang', LS_ONBOARD='hkgov.onboard.dismissed';
     function api() {
-      let base = (document.getElementById('baseUrl').value || 'http://localhost:8080').replace(/\/$/, '');
+      // Empty base = same-origin (the deployed dashboard's own host). Override
+      // via the header input to point at a separately-hosted hkgov-api instance.
+      let base = (document.getElementById('baseUrl').value || '').replace(/\/$/, '');
       const key = document.getElementById('apiKey').value;
       return { base, headers: key ? { 'X-API-Key': key } : {} };
     }

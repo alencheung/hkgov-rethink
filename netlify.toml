@@ -1,0 +1,10 @@
+# Static dashboard deploy — no build step.
+# The dashboard is a single self-contained HTML file (dashboard/index.html).
+# It is a CLIENT only; it fetches live data from the hkgov-api Rust service,
+# which must be hosted separately (Netlify cannot run the Rust binary).
+#
+# This file overrides any stale Build settings entered in the Netlify UI
+# (e.g. a leftover "hugo" build command).
+[build]
+  command = ""
+  publish = "dashboard"
