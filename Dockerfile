@@ -28,9 +28,11 @@ COPY docs/ ./docs/
 COPY config.toml ./
 
 # Release build of the API binary only. Default features keep it zero-dep.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
-    cargo build --release -p hkgov-api && \
+# NOTE: no `--mount=type=cache` here — Railway's Metal builder (and other
+# non-BuildKit Docker engines) reject that flag. We rely on plain layer
+# caching instead: rebuilding from a source change recompiles dependencies
+# too, so expect a longer build (~10-15 min) on code changes.
+RUN cargo build --release -p hkgov-api && \
     cp /build/target/release/hkgov-api /hkgov-api
 
 # ---------- runtime ----------
