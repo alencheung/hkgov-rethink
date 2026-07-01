@@ -47,8 +47,26 @@ use std::sync::Arc;
 /// signal set change — so a v1.x score is never silently compared to a v1.y.
 pub const METHODOLOGY_VERSION: &str = "1.0";
 
-/// The source this index currently covers. Per Phase-5 D-5, v1 is HKMA-scoped.
+/// The source this index covered in v1. Kept as a backward-compat re-export so
+/// existing callers and tests that reference it keep compiling; the index itself
+/// is now parameterized over an arbitrary [`DataSource`] (see [`build_index`]).
 pub const COVERED_SOURCE: DataSource = DataSource::Hkma;
+
+/// Human-facing label for a source, used to build the index title
+/// (e.g. "HKMA Silence Index", "Immigration Silence Index"). Each institution
+/// gets its own honest, scoped number — per Phase-5 D-5, the scope claim must
+/// match the shipped behavior, so the label is source-specific.
+pub fn source_label(source: DataSource) -> &'static str {
+    match source {
+        DataSource::Hkma => "HKMA",
+        DataSource::Immigration => "Immigration",
+        DataSource::LandRegistry => "Land Registry",
+        DataSource::Rvd => "R&VD",
+        DataSource::DataGovHk => "data.gov.hk",
+        DataSource::Press => "Press",
+        DataSource::LandsD => "LandsD",
+    }
+}
 
 /// Half-saturation constant for the score squash. Lower = more sensitive at the
 /// low end; 40 means ~40 weighted signals yields a score of 50.
@@ -139,33 +157,39 @@ impl SilenceIndex {
 ///
 /// The period is a string key (e.g. "2026-Q2"); insights whose `record_id`
 /// evidence falls within the period are counted. `now` is injected for
-/// deterministic timestamps.
+/// deterministic timestamps. `source` scopes the index to one institution
+/// (e.g. `DataSource::Hkma`, `DataSource::Immigration`) — only insights tagged
+/// with that source are scored, so each institution gets its own honest,
+/// reproducible number.
 ///
 /// This is the pure, testable core — it does no IO beyond reading the insight
 /// store. The HTTP route is a thin wrapper.
 pub async fn build_index(
     store: &Arc<InsightStore>,
+    source: DataSource,
     period: &str,
     now: DateTime<Utc>,
 ) -> SilenceIndex {
     let insights = store.list(500).await;
-    build_index_from_insights(&insights, period, now)
+    build_index_from_insights(&insights, source, period, now)
 }
 
 /// Pure core: build the index from an in-memory slice of insights. This is
 /// what the tests exercise directly (no async, no store).
 pub fn build_index_from_insights(
     insights: &[Insight],
+    source: DataSource,
     period: &str,
     now: DateTime<Utc>,
 ) -> SilenceIndex {
-    // Partition insights in-period by kind.
+    // Partition insights in-period by kind. Only insights tagged with the
+    // requested `source` are scored — the index is per-institution.
     let mut press_only: Vec<&Insight> = Vec::new();
     let mut data_only: Vec<&Insight> = Vec::new();
     let mut unattributed_jumps: Vec<&Insight> = Vec::new();
 
     for i in insights {
-        if i.source != COVERED_SOURCE {
+        if i.source != source {
             continue;
         }
         if !insight_in_period(i, period) {
@@ -180,7 +204,7 @@ pub fn build_index_from_insights(
                     data_only.push(i);
                 }
             }
-            "series_jump" if !has_same_day_press(i, insights) => {
+            "series_jump" if !has_same_period_press(i, insights) => {
                 unattributed_jumps.push(i);
             }
             _ => {}
@@ -224,9 +248,9 @@ pub fn build_index_from_insights(
     let total_events: usize = signals.iter().map(|s| s.count).sum();
 
     SilenceIndex {
-        label: format!("{} Silence Index", COVERED_SOURCE.as_str().to_uppercase()),
+        label: format!("{} Silence Index", source_label(source)),
         methodology_version: METHODOLOGY_VERSION,
-        source: COVERED_SOURCE,
+        source,
         period: period.into(),
         score,
         raw_score,
@@ -339,11 +363,18 @@ fn evidence_says_press_only(evidence: &[crate::insight::EvidenceRef]) -> bool {
         .any(|e| e.context.as_deref().unwrap_or("").contains("press"))
 }
 
-/// Did the same source issue a press release on the same day as a series_jump's
-/// current period? If so, the jump is *attributed* and shouldn't count toward
-/// opacity. Heuristic for v1: any cross_source_gap insight in-period whose
-/// evidence contains the jump's current record_id counts as "press existed".
-fn has_same_day_press(jump: &Insight, all: &[Insight]) -> bool {
+/// Did the same source issue a press release covering the same period as a
+/// series_jump's current period? If so, the jump is *attributed* and shouldn't
+/// count toward opacity.
+///
+/// For **daily** data this is exact: the jump's current `record_id`
+/// (`"2026-05-31"`) must equal a gap evidence `record_id`. For **monthly** data
+/// the jump's `record_id` is `"2026-05"` while press-release evidence may be
+/// `"2026-05-31"` — so we match on **period-prefix overlap** rather than exact
+/// equality: two date strings cover the same period if one is a prefix of the
+/// other. This keeps the "attributed vs unattributed" distinction meaningful
+/// across daily and monthly cadences without an explicit cadence hint.
+fn has_same_period_press(jump: &Insight, all: &[Insight]) -> bool {
     let jump_dates: Vec<&str> = jump
         .evidence
         .iter()
@@ -353,12 +384,18 @@ fn has_same_day_press(jump: &Insight, all: &[Insight]) -> bool {
     if jump_dates.is_empty() {
         return false;
     }
+    /// Two date-ish strings cover the same period iff one is a prefix of the
+    /// other (handles daily-vs-monthly, monthly-vs-quarterly, etc.).
+    fn same_period(a: &str, b: &str) -> bool {
+        a == b || a.starts_with(b) || b.starts_with(a)
+    }
     all.iter().any(|other| {
         other.kind == "cross_source_gap"
-            && other
-                .evidence
-                .iter()
-                .any(|e| jump_dates.contains(&e.record_id.as_str()))
+            && other.evidence.iter().any(|e| {
+                jump_dates
+                    .iter()
+                    .any(|jd| same_period(jd, e.record_id.as_str()))
+            })
     })
 }
 
@@ -452,7 +489,7 @@ mod tests {
 
     #[test]
     fn empty_insights_yield_zero_score() {
-        let idx = build_index_from_insights(&[], "2026-Q2", Utc::now());
+        let idx = build_index_from_insights(&[], DataSource::Hkma, "2026-Q2", Utc::now());
         assert_eq!(idx.score, 0.0);
         assert_eq!(idx.total_events, 0);
         assert_eq!(idx.methodology_version, "1.0");
@@ -463,7 +500,7 @@ mod tests {
     fn press_only_gaps_drive_score_up() {
         // 5 press-only gaps in 2026-Q2.
         let ins = vec![gap_insight("g1", &["2026-05-10"], true)];
-        let idx = build_index_from_insights(&ins, "2026-Q2", Utc::now());
+        let idx = build_index_from_insights(&ins, DataSource::Hkma, "2026-Q2", Utc::now());
         let press_signal = idx
             .signals
             .iter()
@@ -478,7 +515,7 @@ mod tests {
     fn unattributed_jump_counts_toward_opacity() {
         // A series_jump in-period with no same-day press → counts.
         let ins = vec![jump_insight("j1", "2026-04-01", "2026-04-15", false)];
-        let idx = build_index_from_insights(&ins, "2026-Q2", Utc::now());
+        let idx = build_index_from_insights(&ins, DataSource::Hkma, "2026-Q2", Utc::now());
         let jump_signal = idx
             .signals
             .iter()
@@ -494,7 +531,7 @@ mod tests {
         let jump = jump_insight("j1", "2026-04-01", "2026-04-15", true);
         let gap = gap_insight("g1", &["2026-04-15"], true);
         let ins = vec![jump, gap];
-        let idx = build_index_from_insights(&ins, "2026-Q2", Utc::now());
+        let idx = build_index_from_insights(&ins, DataSource::Hkma, "2026-Q2", Utc::now());
         let jump_signal = idx
             .signals
             .iter()
@@ -508,7 +545,7 @@ mod tests {
         // A press-source gap should NOT count toward the HKMA index.
         let mut ins = gap_insight("g1", &["2026-05-10"], true);
         ins.source = DataSource::Press;
-        let idx = build_index_from_insights(&[ins], "2026-Q2", Utc::now());
+        let idx = build_index_from_insights(&[ins], DataSource::Hkma, "2026-Q2", Utc::now());
         assert_eq!(idx.score, 0.0);
     }
 
@@ -516,7 +553,7 @@ mod tests {
     fn out_of_period_insights_excluded() {
         // A gap in 2026-Q1 should not count for the 2026-Q2 index.
         let ins = vec![gap_insight("g1", &["2026-02-10"], true)];
-        let idx = build_index_from_insights(&ins, "2026-Q2", Utc::now());
+        let idx = build_index_from_insights(&ins, DataSource::Hkma, "2026-Q2", Utc::now());
         assert_eq!(idx.score, 0.0);
     }
 
@@ -563,8 +600,8 @@ mod tests {
             jump_insight("j1", "2026-04-01", "2026-04-15", false),
         ];
         let now = Utc::now();
-        let a = build_index_from_insights(&ins, "2026-Q2", now);
-        let b = build_index_from_insights(&ins, "2026-Q2", now);
+        let a = build_index_from_insights(&ins, DataSource::Hkma, "2026-Q2", now);
+        let b = build_index_from_insights(&ins, DataSource::Hkma, "2026-Q2", now);
         assert_eq!(
             serde_json::to_string(&a).unwrap(),
             serde_json::to_string(&b).unwrap()

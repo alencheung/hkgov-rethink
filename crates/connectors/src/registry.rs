@@ -6,8 +6,9 @@
 
 use crate::resilience::{CircuitBreaker, RateLimiter};
 use crate::{
-    datagovhk::DataGovHkConnector, hkma::HkmaConnector, landsd::LandsDConnector,
-    press::PressConnector, Connector, DatasetSpec,
+    datagovhk::DataGovHkConnector, hkma::HkmaConnector, immigration::ImmigrationConnector,
+    landregistry::LandRegistryConnector, landsd::LandsDConnector, press::PressConnector,
+    rvd::RvdConnector, Connector, DatasetSpec,
 };
 use async_trait::async_trait;
 use hkgov_common::{DataSource, NormalizedRecord, Result, Settings};
@@ -102,6 +103,32 @@ impl Registry {
 
         let landsd: Arc<dyn Connector> = Arc::new(LandsDConnector::new(&settings.upstream)?);
         by_source.push(wrap(landsd, 1.0, 3, std::time::Duration::from_secs(120)));
+
+        // Immigration Department (入境事務處) — daily border-crossing traffic CSV.
+        // The CSV is a single large file; 2 req/s is conservative for one pull.
+        let immigration: Arc<dyn Connector> =
+            Arc::new(ImmigrationConnector::new(&settings.upstream)?);
+        by_source.push(wrap(
+            immigration,
+            2.0,
+            5,
+            std::time::Duration::from_secs(60),
+        ));
+
+        // Rating & Valuation Department (差餉物業估價處) — monthly price/rental
+        // index CSVs. Two files, each a single pull; 2 req/s is conservative.
+        let rvd: Arc<dyn Connector> = Arc::new(RvdConnector::new(&settings.upstream)?);
+        by_source.push(wrap(rvd, 2.0, 5, std::time::Duration::from_secs(60)));
+
+        // Land Registry (土地註冊處) — monthly property transaction JSON files.
+        let landregistry: Arc<dyn Connector> =
+            Arc::new(LandRegistryConnector::new(&settings.upstream)?);
+        by_source.push(wrap(
+            landregistry,
+            2.0,
+            5,
+            std::time::Duration::from_secs(60),
+        ));
 
         Ok(Self { by_source })
     }

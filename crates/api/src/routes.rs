@@ -28,6 +28,7 @@ use hkgov_common::DataSource;
 use hkgov_store::{DatasetId, RecordStore};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tower::limit::ConcurrencyLimitLayer;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -104,10 +105,19 @@ pub fn router(state: AppState) -> Router {
     // time via include_str!) so the binary — and the Docker image — are
     // self-contained: open http://host:port/dashboard in a browser. It is
     // exempt from API-key auth (a static asset, not data).
+    //
+    // `/cite/{id}` serves the *same* dashboard HTML so a Cite-It permalink
+    // (emitted as `/cite/{insight_id}` by `build_citation`) resolves to the
+    // app instead of 404ing on the Rust-served deploy. The dashboard's
+    // `checkShareLanding()` reads the path and opens the citation drawer
+    // client-side. Auth-exempt for the same reason as `/dashboard`: it is a
+    // static asset, not a data route. (Netlify deploys get the equivalent via
+    // the SPA rewrite in netlify.toml.)
     let router = Router::new()
         .route("/", get(root))
         .route("/dashboard", get(dashboard))
         .route("/dashboard/", get(dashboard))
+        .route("/cite/{id}", get(dashboard))
         // /llms.txt — a curated agent index for the llms.txt convention (and the
         // kind of predictable, crawlable text surface Cloudflare's "Markdown for
         // Agents" model targets). Embedded at compile time, same as the
@@ -143,6 +153,19 @@ pub fn router(state: AppState) -> Router {
     } else {
         router
     };
+
+    // Concurrency load-shedding. `api.max_concurrency` was previously dead
+    // config (the same class of defect as the old `store.backend` /
+    // `rate_per_sec`): defined in config.rs and advertised in README/
+    // CAPACITY/ARCHITECTURE, but never wired to the router, so a connection or
+    // slow-downstream flood could saturate the node to exhaustion with no
+    // shedding. Cap in-flight requests; once the limit is reached the next
+    // request is shed with 503 (tower's default for a saturated limit). The
+    // default (50_000) is permissive enough to be a safety net, not a ceiling
+    // under normal load — operators tune it to fleet capacity.
+    let router = router.layer(ConcurrencyLimitLayer::new(
+        state.settings.api.max_concurrency,
+    ));
 
     router
         // V-007: CORS is now an operator allow-list, not permissive. Empty
@@ -311,7 +334,10 @@ async fn dashboard(State(_): State<AppState>) -> axum::response::Response {
 async fn llms_txt(State(_): State<AppState>) -> axum::response::Response {
     const MD: &str = include_str!("../../../dashboard/llms.txt");
     (
-        [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/markdown; charset=utf-8",
+        )],
         MD,
     )
         .into_response()
@@ -850,15 +876,28 @@ struct SilenceIndexQuery {
     /// which the implementation does not do; the docs now match the behavior.)
     #[serde(default)]
     period: Option<String>,
+    /// The institution whose opacity to score, e.g. `hkma`, `immigration`,
+    /// `landregistry`, `rvd`. Defaults to `hkma` (backward-compatible with the
+    /// v1 single-source index). Each source produces its own honest, scoped
+    /// number — they are never blended into a composite.
+    #[serde(default)]
+    source: Option<String>,
 }
 
 async fn silence_index(
     State(state): State<AppState>,
     Query(q): Query<SilenceIndexQuery>,
-) -> Json<hkgov_agent::SilenceIndex> {
+) -> Result<Json<hkgov_agent::SilenceIndex>, ApiError> {
     let period = q.period.unwrap_or_default();
-    let idx = hkgov_agent::build_silence_index(&state.insights, &period, chrono::Utc::now()).await;
-    Json(idx)
+    // Default to HKMA for backward compat with v1 callers that omit `source`.
+    let source = match &q.source {
+        Some(s) if !s.is_empty() => parse_source(s)?,
+        _ => DataSource::Hkma,
+    };
+    let idx =
+        hkgov_agent::build_silence_index(&state.insights, source, &period, chrono::Utc::now())
+            .await;
+    Ok(Json(idx))
 }
 
 // ---- GET /unprecedentedness — how rare is this value? (P-103) --------------
@@ -915,7 +954,7 @@ async fn unprecedentedness(
 // pseudo-identity `X-Reader-Id` header (client-generated UUID) until real auth
 // lands — matches the current shared-key trust model.
 //
-// ⚠️ D-009 (known risk, waived for v1 by design): `owner` is a *filter*, not
+// [risk] D-009 (known risk, waived for v1 by design): `owner` is a *filter*, not
 // an *ACL*. Any caller holding the shared API key can list (`?owner=` empty →
 // all owners), read, update, or delete any other user's signals and
 // investigations. This is the documented "shared-key trust model" — every keyed
@@ -1915,8 +1954,9 @@ mod tests {
         let state = silence_state().await;
         let q = SilenceIndexQuery {
             period: Some("2026-Q2".into()),
+            ..Default::default()
         };
-        let idx = silence_index(State(state), Query(q)).await.0;
+        let idx = silence_index(State(state), Query(q)).await.unwrap().0;
         assert_eq!(idx.methodology_version, "1.0");
         assert!(idx.label.contains("HKMA"), "label: {}", idx.label);
         assert_eq!(idx.source, DataSource::Hkma);
@@ -1938,10 +1978,24 @@ mod tests {
         };
         let q = SilenceIndexQuery {
             period: Some("2026-Q2".into()),
+            ..Default::default()
         };
-        let idx = silence_index(State(empty_state), Query(q)).await.0;
+        let idx = silence_index(State(empty_state), Query(q)).await.unwrap().0;
         assert_eq!(idx.score, 0.0);
         assert_eq!(idx.total_events, 0);
+    }
+
+    #[tokio::test]
+    async fn silence_index_unknown_source_is_rejected() {
+        // A bad `source` query value must surface as an error (not silently
+        // default to HKMA — the caller asked for a specific institution).
+        let state = silence_state().await;
+        let q = SilenceIndexQuery {
+            source: Some("nonsense".into()),
+            ..Default::default()
+        };
+        let res = silence_index(State(state), Query(q)).await;
+        assert!(res.is_err(), "unknown source must error");
     }
 
     // ---- /unprecedentedness (P-103) ---------------------------------------

@@ -23,6 +23,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 url.workspace = true
 chrono.workspace = true
+csv.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

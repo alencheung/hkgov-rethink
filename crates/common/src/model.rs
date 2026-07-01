@@ -23,6 +23,12 @@ pub enum DataSource {
     DataGovHk,
     Press,
     LandsD,
+    /// Immigration Department (入境事務處) — border-crossing / passenger traffic.
+    Immigration,
+    /// Land Registry (土地註冊處) — property transactions, primary/secondary sales.
+    LandRegistry,
+    /// Rating & Valuation Department (差餉物業估價處) — price/rental indices, vacancy.
+    Rvd,
 }
 
 impl DataSource {
@@ -32,6 +38,9 @@ impl DataSource {
             DataSource::DataGovHk => "datagovhk",
             DataSource::Press => "press",
             DataSource::LandsD => "landsd",
+            DataSource::Immigration => "immigration",
+            DataSource::LandRegistry => "landregistry",
+            DataSource::Rvd => "rvd",
         }
     }
 
@@ -41,6 +50,9 @@ impl DataSource {
             "datagovhk" | "data.gov.hk" => Some(Self::DataGovHk),
             "press" | "isd" | "info.gov.hk" => Some(Self::Press),
             "landsd" | "csdi" => Some(Self::LandsD),
+            "immigration" | "immd" => Some(Self::Immigration),
+            "landregistry" | "lr" | "landreg" => Some(Self::LandRegistry),
+            "rvd" | "rating" | "valuation" => Some(Self::Rvd),
             _ => None,
         }
     }

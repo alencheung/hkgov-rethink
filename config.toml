@@ -52,8 +52,12 @@ backend = "memory"
 redis_url = "redis://127.0.0.1:6379"
 
 [agent]
-# Enable the AI-agent analysis scheduler. Heuristic mode needs no LLM key.
-enabled = false
+# Enable the AI-agent analysis scheduler. ON by default: heuristic mode needs no
+# LLM key (detection is pure Rust), and the Silence Index — the dashboard's
+# flagship number — is computed entirely from the insights this scheduler
+# generates. With it off, insights and the Silence Index stay permanently empty.
+# Set to false only to suppress background scanning.
+enabled = true
 run_interval_secs = 21600
 # Leave empty for heuristic mode; set to an OpenAI-compatible base URL + build
 # with --features llm to use the HTTP LLM client for richer insight framing.

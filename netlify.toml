@@ -8,3 +8,15 @@
 [build]
   command = ""
   publish = "dashboard"
+
+# SPA rewrite: serve the dashboard for any unmatched path so deep links resolve.
+# The Cite-It permalink is emitted as `/cite/{insight_id}` (see
+# crates/agent/src/cite.rs), but the dashboard is a single static HTML file with
+# no per-path asset — without this rewrite a shared permalink 404s on the
+# Netlify deploy. `checkShareLanding()` in index.html reads the path/hash and
+# opens the citation drawer client-side. `force = false` (the default) keeps
+# real static assets (index.html, llms.txt) winning over this catch-all.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

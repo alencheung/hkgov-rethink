@@ -2034,7 +2034,7 @@ fn record_id_for(dataset: &str, fields: &BTreeMap<String, RecordValue>) -> Strin
     // fallback then picks up the other ~150 datasets from any date-like field
     // they carry, before hashing.
     let candidates: &[&str] = match dataset {
-        "capital-market-statistics" => &["end_of_month"],
+        "capital-market-statistics" | "residential-mortgage-survey" => &["end_of_month"],
         "daily-interbank-liquidity" | "daily-figures-interbank-liquidity" => {
             &["date", "end_of_date"]
         }
