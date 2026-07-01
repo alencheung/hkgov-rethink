@@ -107,7 +107,12 @@ pub fn router(state: AppState) -> Router {
     let router = Router::new()
         .route("/", get(root))
         .route("/dashboard", get(dashboard))
-        .route("/dashboard/", get(dashboard));
+        .route("/dashboard/", get(dashboard))
+        // /llms.txt — a curated agent index for the llms.txt convention (and the
+        // kind of predictable, crawlable text surface Cloudflare's "Markdown for
+        // Agents" model targets). Embedded at compile time, same as the
+        // dashboard, and exempt from API-key auth (a static index, not data).
+        .route("/llms.txt", get(llms_txt));
     let router = if prefix.is_empty() {
         // api_routes already carries `/health`; merge brings it to root.
         router.merge(api_routes).route("/ready", get(ready))
@@ -247,6 +252,7 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
         endpoints: &[
             "GET /health",
             "GET /dashboard",
+            "GET /llms.txt",
             "GET /v1/health/sources",
             "GET /v1/sources",
             "GET /v1/categories",
@@ -288,6 +294,25 @@ async fn dashboard(State(_): State<AppState>) -> axum::response::Response {
     (
         [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
         axum::response::Html(HTML),
+    )
+        .into_response()
+}
+
+/// Serve the curated agent index (`llms.txt`). This is a single static
+/// markdown file that orients AI agents to the app, its data, and its API. It
+/// is embedded at compile time (`include_str!`) — the same pattern as
+/// `dashboard` — so the deployed binary carries it with no external file
+/// dependency. The identical file is also served as a static asset at `/llms.txt`
+/// by the dashboard host (e.g. Netlify, which publishes `dashboard/` as its
+/// root), so both deploy paths expose the same content with no drift.
+///
+/// Content type is `text/markdown` (no negotiation: by the llms.txt convention
+/// `/llms.txt` is always markdown).
+async fn llms_txt(State(_): State<AppState>) -> axum::response::Response {
+    const MD: &str = include_str!("../../../dashboard/llms.txt");
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        MD,
     )
         .into_response()
 }

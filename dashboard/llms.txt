@@ -1,0 +1,77 @@
+# HK City Pulse (hkgov-rethink)
+
+> Agentic monitoring that surfaces what the Hong Kong Government press room leaves
+> unsaid. A Rust platform that ingests HKGOV open data (HKMA monetary stats,
+> data.gov.hk, press releases), runs deterministic anomaly detection across
+> sources, and flags where the official narrative and the published data disagree
+> — with evidence you can verify. Detection is pure Rust and reproducible (same
+> data in, same findings out); the LLM only frames results. No API key required
+> for read-only data.
+
+## What it finds
+
+These are produced by the project's own detectors against live HKGOV open data.
+Each finding is an `Insight` record with pointers back to the source rows.
+
+- `series_jump` (critical): a value that moved sharply in one settlement window
+  with no attributing press release. Example: HIBOR overnight +99.3% over a
+  single window, unattributed by HKMA.
+- `outlier`: a sustained regime that a single-day spike detector would miss,
+  caught by a MAD robust-z scan. Example: a sub-1.3% HIBOR cluster across 8 days.
+- `cross_source_gap`: dates where a press release was issued with no matching
+  statistical data row (or vice versa) — the literal "press room leaves it
+  untold" signal, with the specific dates as evidence.
+- `silence_index` (`/v1/silence-index`): those signals rolled into a single,
+  versioned, citable number — how much did HKMA not explain? Pass `?period=YYYY-Qn`
+  to scope to one quarter.
+
+## The determinism guarantee
+
+Every number is reproducible. Same data in, same findings out. The agent layer
+(insights, Q&A, alerting) works end to end with zero external dependencies and
+no API key. The LLM only frames; detection is pure Rust.
+
+## Key endpoints
+
+All under the configured API prefix (default `/v1`) unless noted. Root paths
+(`/health`, `/ready`, `/dashboard`, `/llms.txt`) are unauthenticated. Versioned
+data routes may require an API key when the operator configures one
+(`HKGOV_API__API_KEY`); omit the key in config for an open, key-less deployment.
+
+- [GET /health](/health) — liveness probe (status + degraded flag).
+- [GET /ready](/ready) — readiness probe; 503 when any source circuit is open or
+  no dataset has warmed.
+- [GET /v1/sources](/v1/sources) — list of ingested datasets with record counts.
+- [GET /v1/categories](/v1/categories) — dataset category directory.
+- [GET /v1/datasets/{source}/{dataset}](/v1/datasets) — dataset metadata.
+- [GET /v1/datasets/{source}/{dataset}/records](/v1/datasets) — paginated records
+  from cache (`?offset=&limit=`).
+- [GET /v1/insights](/v1/insights) — AI-agent generated findings (`?limit=`).
+- [GET /v1/insights/{id}/cite](/v1/insights) — reproducibility manifest for a
+  finding (hash + the exact data window it was computed from).
+- [GET /v1/insights/{id}/history](/v1/insights) — prior values of a finding over
+  time (drift tracking).
+- [GET /v1/brief](/v1/brief) — a short, human-readable roll-up of current
+  findings.
+- [GET /v1/silence-index](/v1/silence-index) — the roll-up score; scope with
+  `?period=YYYY-Qn`.
+- [GET /v1/alerts](/v1/alerts) — proactive alert dispatch log.
+- [POST /v1/ask](/v1/ask) — natural-language Q&A over the data
+  (body: `{"question": "..."}`).
+
+## Optional links
+
+- [Project README](https://github.com/alencheung/hkgov-rethink#readme)
+- [Worked examples (verbatim output)](https://github.com/alencheung/hkgov-rethink/blob/main/EXAMPLES.md)
+- [Architecture & determinism guarantee](https://github.com/alencheung/hkgov-rethink/blob/main/docs/ARCHITECTURE.md)
+- [Interactive dashboard](/dashboard)
+
+## Notes for agents
+
+- Prefer the JSON endpoints above for structured access; this index is for
+  orientation only.
+- `/v1/brief` is a good one-call summary to ground a response in current data.
+- `/v1/insights/{id}/cite` exists specifically so a claim can be verified against
+  the exact source window — use it before quoting a finding.
+- This file is served at `/llms.txt` by both the Rust API binary and the static
+  dashboard host; the content is identical.

@@ -4,7 +4,39 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HK City Pulse — hkgov-rethink</title>
+  <!-- Static, crawler-readable metadata. The dashboard is client-rendered, so
+       these tags carry the page's meaning for agents / crawlers that do not
+       execute JS — including Cloudflare's "Markdown for Agents" edge converter,
+       which derives frontmatter from <meta> and appends JSON-LD verbatim. -->
+  <meta name="description" content="Agentic monitoring that surfaces what the Hong Kong Government press room leaves unsaid: ingests HKGOV open data, runs deterministic anomaly detection across sources, and flags where the official narrative and the published data disagree — with verifiable evidence.">
+  <meta name="robots" content="index,follow">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="HK City Pulse — hkgov-rethink">
+  <meta property="og:description" content="Agentic monitoring that surfaces what the HKGOV press room leaves unsaid. Deterministic anomaly detection across HKGOV open data, with verifiable evidence.">
+  <meta property="og:url" content="https://hkgov-rethink.netlify.app/dashboard">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="HK City Pulse — hkgov-rethink">
+  <meta name="twitter:description" content="Agentic monitoring that surfaces what the HKGOV press room leaves unsaid. Deterministic anomaly detection across HKGOV open data, with verifiable evidence.">
+  <link rel="alternate" type="text/markdown" title="Agent index (llms.txt)" href="/llms.txt">
   <link href="https://cdn.jsdelivr.net/npm/remixicon@4.2.0/fonts/remixicon.css" rel="stylesheet">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "HK City Pulse (hkgov-rethink)",
+    "description": "Agentic monitoring that surfaces what the Hong Kong Government press room leaves unsaid. Ingests HKGOV open data, runs deterministic anomaly detection across sources, and flags where the official narrative and the published data disagree, with verifiable evidence.",
+    "applicationCategory": "DataAnalysisApplication",
+    "operatingSystem": "Web",
+    "url": "https://hkgov-rethink.netlify.app/dashboard",
+    "softwareVersion": "0.1.0",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "about": [
+      { "@type": "Thing", "name": "Hong Kong Government open data" },
+      { "@type": "Thing", "name": "Anomaly detection" },
+      { "@type": "Thing", "name": "Press release vs. data reconciliation" }
+    ]
+  }
+  </script>
   <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.js"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
   <style>
