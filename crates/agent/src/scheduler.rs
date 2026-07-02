@@ -15,8 +15,8 @@
 
 use crate::alerts::AlertDispatcher;
 use crate::analysis::{
-    detect_benchmark_deviation, detect_correlation, detect_cross_source_gaps, detect_outliers,
-    detect_proxy_divergence, detect_seasonality, detect_series_jumps_cadenced,
+    coerce_to_period, detect_benchmark_deviation, detect_correlation, detect_cross_source_gaps,
+    detect_outliers, detect_proxy_divergence, detect_seasonality, detect_series_jumps_cadenced,
     detect_threshold_crossing, detect_year_over_year, CrossDirection, Finding,
     DEFAULT_CORRELATION_R, DEFAULT_OUTLIER_Z, DEFAULT_PCT_THRESHOLD, DEFAULT_PROXY_DELTA_PCT,
     DEFAULT_PROXY_R, DEFAULT_SEASONALITY_R,
@@ -354,14 +354,42 @@ async fn run_cross_source_gap(
         return Vec::new();
     }
 
-    // Data side: record_ids ARE the dates for daily series.
+    // Data side: record_ids ARE the dates (daily "YYYY-MM-DD" or monthly
+    // "YYYY-MM" depending on the dataset).
     let data_id = DatasetId::new(comp_source, &companion.dataset);
     let data_dates: Vec<String> = match store.get_page(&data_id, 0, 500).await {
         Ok(p) => p.records.iter().map(|r| r.record_id.clone()).collect(),
         Err(_) => return Vec::new(),
     };
 
-    detect_cross_source_gaps(source, &target.dataset, &press_dates, &data_dates)
+    // Cadence-aware period coercion. Press releases carry daily "YYYY-MM-DD"
+    // dates, but the data side may be monthly ("YYYY-MM"), quarterly, or annual.
+    // Without coercion the two sets never intersect (a monthly data_id "2026-05"
+    // never equals a daily press date "2026-05-31"), so EVERY press release
+    // would register as a spurious gap and the index would max out on noise.
+    // Coerce both sides to the companion dataset's cadence granularity so the
+    // set-difference is meaningful at any cadence.
+    let cadence = target.cadence;
+    let press_periods: Vec<String> = press_dates
+        .iter()
+        .map(|d| coerce_to_period(d, cadence))
+        .collect();
+    let data_periods: Vec<String> = data_dates
+        .iter()
+        .map(|d| coerce_to_period(d, cadence))
+        .collect();
+
+    // The gap finding is attributed to the DATA source (the companion), not the
+    // press source: the Silence Index measures the data source's opacity (how
+    // often its numbers moved or were absent without an accompanying press
+    // release). The index is parameterized per-source, so the finding's source
+    // must match the institution whose index should count it.
+    detect_cross_source_gaps(
+        comp_source,
+        &companion.dataset,
+        &press_periods,
+        &data_periods,
+    )
 }
 
 /// Load the primary + companion datasets and run `detect_proxy_divergence`.
@@ -500,7 +528,7 @@ mod tests {
     use crate::insight::InsightStore;
     use crate::llm::{HeuristicClient, LlmFraming};
     use async_trait::async_trait;
-    use hkgov_common::{CompanionRef, Error, NormalizedRecord, RecordValue};
+    use hkgov_common::{Cadence, CompanionRef, Error, NormalizedRecord, RecordValue};
     use std::collections::BTreeMap;
 
     /// A scripted LLM client that frames every finding with its own summary,
@@ -721,6 +749,161 @@ mod tests {
         run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
         assert_eq!(insights.count().await, 1);
         assert_eq!(insights.list(10).await[0].kind, "cross_source_gap");
+    }
+
+    /// End-to-end regression for the "Silence Index is always zero" defect.
+    ///
+    /// The Silence Index is computed entirely from insights the agent
+    /// scheduler generates (`cross_source_gap` + unattributed `series_jump`).
+    /// When the agent is disabled (or its pass stores nothing), the index is
+    /// permanently 0 / "no signals" — which silently defeats the dashboard's
+    /// flagship feature. This test pins the full chain: an enabled `run_pass`
+    /// over a press-only gap produces a `cross_source_gap` insight, and
+    /// `build_silence_index` over those insights returns a NON-zero score.
+    /// If any link breaks (agent off, detector produces nothing, store empty,
+    /// period filter excludes everything), this fails.
+    #[tokio::test]
+    async fn run_pass_feeds_silence_index_nonzero_score() {
+        use crate::silence::build_index;
+
+        let scan = vec![ScanTarget {
+            source: "press".into(),
+            dataset: "hkma-press-releases".into(),
+            detector: "cross_source_gap".into(),
+            field: Some("date".into()),
+            companion: Some(CompanionRef {
+                source: "hkma".into(),
+                dataset: "daily-figures-interbank-liquidity".into(),
+            }),
+            ..Default::default()
+        }];
+        let settings = settings_with_scan(scan);
+
+        let store = Arc::new(MemoryStore::new(100, 60));
+        // Press side: a release on 2026-05-10 with no matching data row.
+        let press = vec![NormalizedRecord {
+            source: DataSource::Press,
+            dataset: "hkma-press-releases".into(),
+            record_id: "2026-05-10".into(),
+            fields: {
+                let mut m = BTreeMap::new();
+                m.insert("date".into(), RecordValue::Str("2026-05-10".into()));
+                m
+            },
+            fetched_at: chrono::Utc::now(),
+        }];
+        store
+            .put_dataset(
+                &DatasetId::new(DataSource::Press, "hkma-press-releases"),
+                press,
+            )
+            .await
+            .unwrap();
+        // Data side: a DIFFERENT date, so the press release is a press-only gap.
+        store
+            .put_dataset(
+                &DatasetId::new(DataSource::Hkma, "daily-figures-interbank-liquidity"),
+                vec![rec("2026-05-11", "hibor_overnight", 2.0)],
+            )
+            .await
+            .unwrap();
+
+        let insights = Arc::new(InsightStore::new());
+        let llm = Arc::new(HeuristicClient::new());
+
+        // The agent pass — this is what `[agent] enabled = true` runs.
+        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        assert!(
+            insights.count().await >= 1,
+            "agent pass must store the cross_source_gap insight"
+        );
+
+        // The Silence Index — the dashboard's flagship number — over that
+        // same quarter. With a press-only gap in-period it MUST be non-zero.
+        let idx = build_index(&insights, DataSource::Hkma, "2026-Q2", chrono::Utc::now()).await;
+        assert!(
+            idx.score > 0.0,
+            "Silence Index must be non-zero when the agent produced in-period gaps; \
+             got score={} raw={} events={}",
+            idx.score,
+            idx.raw_score,
+            idx.total_events
+        );
+        assert!(idx.total_events >= 1);
+    }
+
+    /// Per-institution index: the Immigration source must produce its own
+    /// non-zero Silence Index independently of HKMA. Seeds daily border-
+    /// crossing totals with a >25% Mainland-visitor jump (the headline signal),
+    /// runs the pass, and scores the Immigration index for that quarter.
+    #[tokio::test]
+    async fn run_pass_feeds_immigration_silence_index() {
+        use crate::silence::build_index;
+
+        let scan = vec![ScanTarget {
+            source: "immigration".into(),
+            dataset: "daily-passenger-traffic-totals".into(),
+            detector: "series_jump".into(),
+            field: Some("mainland_visitors".into()),
+            threshold: Some(25.0),
+            cadence: Cadence::Daily,
+            ..Default::default()
+        }];
+        let settings = settings_with_scan(scan);
+
+        let store = Arc::new(MemoryStore::new(100, 60));
+        // Two consecutive days: a +200% jump in mainland visitors → flagged.
+        let mk = |id: &str, mv: f64| {
+            let mut f = BTreeMap::new();
+            f.insert("mainland_visitors".into(), RecordValue::Float(mv));
+            NormalizedRecord {
+                source: DataSource::Immigration,
+                dataset: "daily-passenger-traffic-totals".into(),
+                record_id: id.into(),
+                fields: f,
+                fetched_at: chrono::Utc::now(),
+            }
+        };
+        seed(
+            &store,
+            vec![
+                mk("2026-05-10", 1000.0),
+                mk("2026-05-11", 3500.0), // +250% → flagged
+            ],
+        )
+        .await;
+
+        let insights = Arc::new(InsightStore::new());
+        let llm = Arc::new(HeuristicClient::new());
+
+        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        assert!(
+            insights.count().await >= 1,
+            "agent pass must store the border-crossing series_jump insight"
+        );
+
+        // The Immigration Silence Index over 2026-Q2 must be non-zero and must
+        // be SEPARATE from HKMA (the jump is Immigration-tagged).
+        let idx = build_index(
+            &insights,
+            DataSource::Immigration,
+            "2026-Q2",
+            chrono::Utc::now(),
+        )
+        .await;
+        assert_eq!(idx.source, DataSource::Immigration);
+        assert!(
+            idx.score > 0.0,
+            "Immigration Silence Index must be non-zero; got score={} events={}",
+            idx.score,
+            idx.total_events
+        );
+        // And HKMA's index must stay zero for this insight (it's not HKMA data).
+        let hkma = build_index(&insights, DataSource::Hkma, "2026-Q2", chrono::Utc::now()).await;
+        assert_eq!(
+            hkma.score, 0.0,
+            "Immigration insight must not leak into HKMA index"
+        );
     }
 
     /// Sanity: the error import isn't dead (keeps clippy happy at the

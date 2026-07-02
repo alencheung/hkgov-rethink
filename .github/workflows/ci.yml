@@ -53,3 +53,9 @@ jobs:
         run: cargo clippy -p hkgov-common --features otel --all-targets -- -D warnings
       - name: llm (agent)
         run: cargo clippy -p hkgov-agent --features llm --all-targets -- -D warnings
+      # alerts (agent): the EmailSink + webhook dispatch path is gated behind
+      # `#[cfg(feature = "alerts")]` (crates/agent/src/alerts.rs). Without this
+      # step the dispatch codepath is never compiled in CI, so a breakage there
+      # would ship green. This closes the gap surfaced in the persona review.
+      - name: alerts (agent)
+        run: cargo clippy -p hkgov-agent --features alerts --all-targets -- -D warnings

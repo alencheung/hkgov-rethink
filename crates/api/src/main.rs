@@ -143,7 +143,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(producer = "agent", "agent supervisor enabled");
         true
     } else {
-        tracing::info!("agent supervisor disabled (set [agent] enabled=true to enable)");
+        tracing::info!(
+            "agent supervisor disabled (insights + Silence Index will stay empty; \
+             set [agent] enabled=true to run the scanner)"
+        );
         false
     };
 

@@ -50,6 +50,9 @@ anyhow = "1"
 url = "2"
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
+# CSV parsing for flat-file government datasets (Immigration daily traffic,
+# R&VD price/rental indices). Not all connectors use it.
+csv = "1"
 # Cryptographic hashing for the Cite-It reproducibility manifest (P-101). Used
 # to detect upstream data drift — same finding recomputed against current data
 # must hash identically, or the cite drawer surfaces a "reproduces as of {ts}"

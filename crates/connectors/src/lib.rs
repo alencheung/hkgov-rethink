@@ -12,10 +12,13 @@
 
 pub mod datagovhk;
 pub mod hkma;
+pub mod immigration;
+pub mod landregistry;
 pub mod landsd;
 pub mod press;
 pub mod registry;
 pub mod resilience;
+pub mod rvd;
 
 use async_trait::async_trait;
 use hkgov_common::{Cadence, Category, DataSource, NormalizedRecord, Result};

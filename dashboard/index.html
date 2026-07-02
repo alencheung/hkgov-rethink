@@ -372,18 +372,18 @@
     <div class="header-row">
       <span id="statusDot" class="status-dot" aria-hidden="true"></span>
       <h1>HK City Pulse <small>— what the press room leaves untold</small></h1>
-      <span id="modeBadge" class="mode-badge" title="agent mode">heuristic</span>
+      <span id="modeBadge" class="mode-badge" data-i18n-title="title_agent_mode" title="agent mode">heuristic</span>
       <button id="langToggle" class="mode-badge" style="cursor:pointer;background:var(--panel);color:var(--fg);" onclick="toggleLang()" title="切換語言 / switch language"><i class="ri-translate-2"></i> <span id="langLabel">中</span></button>
       <div class="config">
-        <label for="baseUrl" class="sr-only">API base URL</label>
-        <input id="baseUrl" value="" placeholder="http://localhost:8080" size="24" aria-label="API base URL" />
-        <label for="apiKey" class="sr-only">API key</label>
-        <input id="apiKey" type="password" placeholder="key" size="10" aria-label="API key" />
-        <button class="icon-btn" onclick="loadAll()" aria-label="Refresh all"><i class="ri-refresh-line"></i></button>
+        <label for="baseUrl" class="sr-only" data-i18n="lbl_api_base">API base URL</label>
+        <input id="baseUrl" value="" data-i18n-ph="ph_api_base" placeholder="http://localhost:8080" size="24" data-i18n-aria="aria_api_base" aria-label="API base URL" />
+        <label for="apiKey" class="sr-only" data-i18n="lbl_api_key">API key</label>
+        <input id="apiKey" type="password" data-i18n-ph="ph_api_key" placeholder="key" size="10" data-i18n-aria="aria_api_key" aria-label="API key" />
+        <button class="icon-btn" onclick="loadAll()" data-i18n-aria="aria_refresh_all" aria-label="Refresh all"><i class="ri-refresh-line"></i></button>
         <span class="kbd-hint" onclick="openPalette()"><i class="ri-command-line"></i> K</span>
       </div>
     </div>
-    <nav class="tabs" role="tablist" aria-label="Primary">
+    <nav class="tabs" role="tablist" data-i18n-aria="aria_primary_nav" aria-label="Primary">
       <button data-tab="overview" class="active" onclick="go('overview')" role="tab" data-i18n="nav_overview">Overview</button>
       <button data-tab="divergence" onclick="go('divergence')" role="tab" data-i18n="nav_divergence">Divergences</button>
       <button data-tab="datasets" onclick="go('datasets')" role="tab" data-i18n="nav_datasets">Datasets</button>
@@ -416,7 +416,7 @@
       <div id="onboardBanner" class="onboard-banner" style="display:none">
         <i class="ri-compass-3-line"></i>
         <span data-i18n="onboard_msg"></span>
-        <button class="onboard-close" onclick="dismissOnboard()" aria-label="Dismiss"><i class="ri-close-line"></i></button>
+        <button class="onboard-close" onclick="dismissOnboard()" data-i18n-aria="onboard_dismiss" aria-label="Dismiss"><i class="ri-close-line"></i></button>
       </div>
 
       <div class="layout">
@@ -428,8 +428,8 @@
             <h2><span data-i18n="tl_h2">Cross-source timeline</span> <span class="sub" data-i18n="tl_sub">— data vs. press releases; gaps glow below</span></h2>
             <div class="tl-wrap">
               <div class="tl-controls">
-                <select id="tlDataset" class="field-pick" onchange="loadTimeline()" aria-label="Dataset"></select>
-                <select id="tlField" onchange="renderTimeline()" aria-label="Field"></select>
+                <select id="tlDataset" class="field-pick" onchange="loadTimeline()" data-i18n-aria="lbl_dataset" aria-label="Dataset"></select>
+                <select id="tlField" onchange="renderTimeline()" data-i18n-aria="lbl_field" aria-label="Field"></select>
                 <label style="font-size:11px;color:var(--muted)"><input type="checkbox" id="tlShowPress" checked onchange="renderTimeline()"> <span data-i18n="tl_show_press">press releases</span></label>
               </div>
               <div id="tlChart"></div>
@@ -445,7 +445,18 @@
 
           <!-- Silence Index hero + drill-down (Issue: flagship was half-built) -->
           <section aria-live="polite">
-            <h2><span data-i18n="silence_h2">HKMA Silence Index</span> <span class="sub" data-i18n="silence_sub">— opacity, quantified · click to see the exact missing dates</span></h2>
+            <h2><span data-i18n="silence_h2">Silence Index</span> <span class="sub" data-i18n="silence_sub">— opacity, quantified · click to see the exact missing dates</span></h2>
+            <!-- Per-institution source selector. Each institution gets its own
+                 honest, scoped number; they are never blended into a composite. -->
+            <div class="silence-source-pick" style="margin-bottom:8px;">
+              <label for="silenceSource" data-i18n="silence_source_label" style="font-size:12px;color:var(--muted);margin-right:6px;">Institution:</label>
+              <select id="silenceSource" onchange="loadSilence()" data-i18n-aria="silence_source_aria" aria-label="Choose institution">
+                <option value="hkma" data-i18n="silence_src_hkma">HKMA (Monetary)</option>
+                <option value="immigration" data-i18n="silence_src_immigration">Immigration (Borders)</option>
+                <option value="landregistry" data-i18n="silence_src_landregistry">Land Registry (Property)</option>
+                <option value="rvd" data-i18n="silence_src_rvd">R&VD (Rents/Prices)</option>
+              </select>
+            </div>
             <div id="silence" class="silence-hero">
               <div class="silence-score" onclick="toggleSilenceBreakdown()" role="button" tabindex="0">
                 <div class="num" id="silenceNum">—</div>
@@ -493,7 +504,7 @@
             <div id="chatLog" class="chat-log" role="log" aria-live="polite"><div class="empty" id="chatEmpty" data-i18n="ask_empty">ask anything about the data — answers carry inline evidence</div></div>
             <div class="chat-input">
               <input id="askInput" data-i18n-ph="ask_ph" placeholder="e.g. what is the interbank liquidity doing?" aria-label="Question" />
-              <button onclick="askAgent()" aria-label="Send"><i class="ri-send-plane-line"></i></button>
+              <button onclick="askAgent()" data-i18n-aria="aria_send" aria-label="Send"><i class="ri-send-plane-line"></i></button>
             </div>
             <div id="kbdHint" style="margin-top:10px;font-size:11px;color:var(--muted);line-height:1.6;">
               <i class="ri-keyboard-line"></i> <b>Cmd/Ctrl+K</b> command palette · <b>g</b> then a tab letter to jump · type <code>/</code> in chat to start an investigation
@@ -561,7 +572,7 @@
       <h2 style="margin-bottom:4px;" data-i18n="ds_h2">Browse datasets</h2>
       <p style="color:var(--muted); margin:0 0 14px;" data-i18n="ds_p">Every ingested HKGOV source, filterable. Click a tag to search.</p>
       <div class="toolbar">
-        <select id="catFilter" onchange="loadSources()" aria-label="Filter by category"></select>
+        <select id="catFilter" onchange="loadSources()" data-i18n-aria="aria_filter_cat" aria-label="Filter by category"></select>
         <input id="srcSearch" data-i18n-ph="ds_search" placeholder="search datasets…" oninput="loadSources()" aria-label="Search datasets" />
       </div>
       <table><thead><tr><th data-i18n="th_cat">cat</th><th data-i18n="th_source_dataset">source / dataset</th><th data-i18n="th_tags">tags</th><th data-i18n="th_cadence">cadence</th><th data-i18n="th_records">records</th></tr></thead>
@@ -582,6 +593,7 @@
           <div><label for="sigField" data-i18n="lbl_field">field</label><input id="sigField" value="hibor_overnight" /></div>
           <div><label for="sigThreshold" data-i18n="lbl_threshold">threshold</label><input id="sigThreshold" type="number" step="any" value="2.0" /></div>
           <div><label for="sigDirection" data-i18n="lbl_direction">direction</label><select id="sigDirection"><option value="above" data-i18n="lbl_above">above</option><option value="below" data-i18n="lbl_below">below</option></select></div>
+          <div><label for="sigCadence" data-i18n="lbl_cadence">cadence</label><select id="sigCadence"><option value="daily" data-i18n="cad_daily">daily</option><option value="weekly" data-i18n="cad_weekly">weekly</option><option value="monthly" data-i18n="cad_monthly">monthly</option><option value="quarterly" data-i18n="cad_quarterly">quarterly</option><option value="annual" data-i18n="cad_annual">annual</option><option value="yoy" data-i18n="cad_yoy">year-over-year</option></select></div>
         </div>
         <label for="sigQuestion" class="nl" data-i18n="lbl_describe">describe it in your words (optional)</label>
         <input id="sigQuestion" class="nl" data-i18n-ph="sig_q_ph" placeholder="e.g. tell me when overnight HIBOR breaks 2.5%" />
@@ -729,7 +741,10 @@
         // overview
         ask_h2:'Ask the agent', ask_ph:'e.g. what is the interbank liquidity doing?', ask_empty:'ask anything about the data — answers carry inline evidence',
         agent_conn:'connecting to the store…', tl_h2:'Cross-source timeline', tl_sub:'— data vs. press releases; gaps glow below',
-        silence_h2:'HKMA Silence Index', silence_sub:'— opacity, quantified · click to see the exact missing dates',
+        silence_h2:'Silence Index', silence_sub:'— opacity, quantified · click to see the exact missing dates',
+        // Per-institution source selector.
+        silence_source_label:'Institution:', silence_source_aria:'Choose institution',
+        silence_src_hkma:'HKMA (Monetary)', silence_src_immigration:'Immigration (Borders)', silence_src_landregistry:'Land Registry (Property)', silence_src_rvd:'R&VD (Rents/Prices)',
         silence_loading:'Loading…', silence_unavail:'Silence Index unavailable', silence_no_signals:'no opacity signals this period',
         silence_label:'Silence Index',
         // timeline empty states
@@ -796,7 +811,7 @@
         fc_cat_all:'all', fc_cat_sme:'Operating SME', fc_cat_tech:'Tech startup', fc_cat_retail:'Retail & F&B', fc_cat_trade:'Trading company', fc_cat_creative:'Creative',
         fc_note:'Curated directory, figures as of June 2026. Programmes change often — always confirm on the official page before applying.', fc_no_match:'no programme matches your filter',
         // form field labels (signals + divergence)
-        lbl_source:'source', lbl_dataset:'dataset', lbl_detector:'detector', lbl_field:'field', lbl_threshold:'threshold', lbl_direction:'direction',
+        lbl_source:'source', lbl_dataset:'dataset', lbl_detector:'detector', lbl_field:'field', lbl_threshold:'threshold', lbl_direction:'direction', lbl_cadence:'cadence',
         lbl_above:'above', lbl_below:'below', lbl_describe:'describe it in your words (optional)',
         lbl_primary_source:'primary proxy · source', lbl_primary_dataset:'primary · dataset', lbl_primary_field:'primary · field',
         lbl_companion_source:'companion proxy · source', lbl_companion_dataset:'companion · dataset', lbl_companion_field:'companion · field',
@@ -815,11 +830,11 @@
         // dataset categories (the 8 Category taxonomy values)
         cat_monetary:'monetary', cat_fiscal:'fiscal', cat_property:'property', cat_trade:'trade', cat_population:'population', cat_livability:'livability', cat_government:'government', cat_other:'other',
         // cadence values
-        cad_daily:'daily', cad_weekly:'weekly', cad_monthly:'monthly', cad_quarterly:'quarterly', cad_annual:'annual', cad_unknown:'unknown',
+        cad_daily:'daily', cad_weekly:'weekly', cad_monthly:'monthly', cad_quarterly:'quarterly', cad_annual:'annual', cad_yoy:'year-over-year', cad_unknown:'unknown',
         // keyboard hint
         kbd_hint:'{kbd} command palette · {g} then a tab letter to jump · type {slash} in chat to start an investigation',
         // silence index dynamic strings
-        silence_events:'{n} unexplained event{s} this period', silence_methodology:'methodology v{v} · HKMA-scoped · deterministic · click the score to see the exact dates',
+        silence_events:'{n} unexplained event{s} this period', silence_methodology:'methodology v{v} · scoped to the selected institution · deterministic · click the score to see the exact dates',
         silence_unavail:'Silence Index unavailable', silence_cannot_reach:'cannot reach /v1/silence-index',
         silence_no_ids:'no per-finding ids (derived signal)', silence_weight:'weight',
         // silence signal kinds (rendered in the breakdown chips)
@@ -843,7 +858,42 @@
         div_proxies_agree:'They agree for now — latest gap is {pct}% (under the {thr}% watch line) and the two are still moving together.',
         // PR-010: first-run orientation (plain language for a cold visitor).
         onboard_msg:'This tool shows where HK government data and press releases disagree. New here? Start with the Silence Index below — it is the one number you can quote.',
-        onboard_dismiss:'Dismiss'
+        onboard_dismiss:'Dismiss',
+        // PR-006 (persona-review): toolbar labels/placeholders/aria — previously
+        // raw English that leaked in both languages.
+        lbl_api_base:'API base URL', lbl_api_key:'API key',
+        ph_api_base:'http://localhost:8080', ph_api_key:'key',
+        aria_api_base:'API base URL', aria_api_key:'API key', aria_refresh_all:'Refresh all',
+        aria_primary_nav:'Primary', aria_send:'Send', aria_filter_cat:'Filter by category',
+        title_agent_mode:'agent mode', title_experimental:'experimental detector', badge_experimental:'experimental',
+        // PR-006: agent strip messages (previously hardcoded English).
+        agent_failing_open:'scanning, but <b style="color:var(--warn)">{src}</b> circuit is open — serving cached findings',
+        agent_watching:'watching HKGOV sources — <b>{n}</b> findings held',
+        agent_held_new:'<b>{n}</b> findings held · <span class="newflag" onclick="showOnlyNew()">{delta} new</span> since I last checked',
+        agent_held_healthy:'<b>{n}</b> findings held · all sources healthy',
+        // PR-006: insight card meta row.
+        card_conf:'{n}% conf', card_by:'by {who}',
+        // PR-006: unprecedentedness band (previously raw English).
+        unprec_label:'unprecedentedness',
+        unprec_top_pct:'top {n}%', unprec_extreme:'extreme', unprec_one_in_n:' · 1-in-{n}',
+        unprec_in_range:'in normal range', unprec_current_value:'current value: {v}',
+        unprec_normal_range:'normal {lo}–{hi}', unprec_min:'min {v}', unprec_max:'max {v}',
+        unprec_last_exceeded:'last exceeded {link}',
+        // PR-006: comparator (prior parallel) card.
+        cmp_badge:'prior parallel', cmp_prior_exceedance:'prior exceedance',
+        cmp_beyond_edge:'When this field last exceeded its normal range, it was <b>{value}</b> on <b>{rid}</b>. That exceedance was {pct}% beyond the band edge.',
+        cmp_last_exceeded_plain:'When this field last exceeded its normal range, it was <b>{value}</b> on <b>{rid}</b>.',
+        // PR-006: return-to-dashboard banner.
+        return_new_since:'<b>{n}</b> new since {when}', return_evolved:' · <b>{n}</b> evolved',
+        return_show_new:'show only new', return_dismiss:'dismiss',
+        // PR-006: honest degraded/empty states (previously a misleading
+        // "scans within ~6h" even when the API was unreachable).
+        degraded_upstream:'— upstream degraded: {srcs}.',
+        degraded_retry:'to retry.',
+        degraded_unreachable:'Cannot reach the data API from this host. If you are viewing a static deploy, an API origin may need to be configured.',
+        degraded_scans:'The agent scans periodically — new findings appear within ~6h.',
+        degraded_banner:'Upstream degraded: {srcs}.',
+        degraded_retry_now:'retry now'
       },
       zh:{
         // nav
@@ -851,7 +901,10 @@
         // overview
         ask_h2:'向代理提問', ask_ph:'例如：銀行同業流動性如何？', ask_empty:'就數據提出任何問題 — 答案附有內嵌證據',
         agent_conn:'正在連接數據庫…', tl_h2:'跨來源時間軸', tl_sub:'— 數據 vs. 新聞稿；分歧於下方標示',
-        silence_h2:'金管局沉默指數', silence_sub:'— 不透明程度，量化呈現 · 按此查看確實缺失的日期',
+        silence_h2:'沉默指數', silence_sub:'— 不透明程度，量化呈現 · 按此查看確實缺失的日期',
+        // 機構來源選擇器。
+        silence_source_label:'機構：', silence_source_aria:'選擇機構',
+        silence_src_hkma:'金管局（貨幣）', silence_src_immigration:'入境事務處（口岸）', silence_src_landregistry:'土地註冊處（物業）', silence_src_rvd:'差餉物業估價處（租金/樓價）',
         silence_loading:'載入中…', silence_unavail:'沉默指數無法使用', silence_no_signals:'本期無不透明訊號',
         silence_label:'沉默指數',
         // timeline empty states
@@ -916,7 +969,7 @@
         fc_cat_all:'全部', fc_cat_sme:'營運中小企', fc_cat_tech:'科技初創', fc_cat_retail:'零售及餐飲', fc_cat_trade:'貿易公司', fc_cat_creative:'創意產業',
         fc_note:'精選目錄，數據截至 2026 年 6 月。計劃經常變更 — 申請前請務必於官方頁面確認。', fc_no_match:'沒有符合您篩選的計劃',
         // form field labels (signals + divergence)
-        lbl_source:'來源', lbl_dataset:'數據集', lbl_detector:'偵測器', lbl_field:'欄位', lbl_threshold:'閾值', lbl_direction:'方向',
+        lbl_source:'來源', lbl_dataset:'數據集', lbl_detector:'偵測器', lbl_field:'欄位', lbl_threshold:'閾值', lbl_direction:'方向', lbl_cadence:'週期',
         lbl_above:'高於', lbl_below:'低於', lbl_describe:'用您的話描述（可選）',
         lbl_primary_source:'主要代理 · 來源', lbl_primary_dataset:'主要 · 數據集', lbl_primary_field:'主要 · 欄位',
         lbl_companion_source:'配對代理 · 來源', lbl_companion_dataset:'配對 · 數據集', lbl_companion_field:'配對 · 欄位',
@@ -935,11 +988,11 @@
         // dataset categories (the 8 Category taxonomy values)
         cat_monetary:'貨幣', cat_fiscal:'財政', cat_property:'物業', cat_trade:'貿易', cat_population:'人口', cat_livability:'宜居', cat_government:'政府', cat_other:'其他',
         // cadence values
-        cad_daily:'每日', cad_weekly:'每週', cad_monthly:'每月', cad_quarterly:'每季', cad_annual:'每年', cad_unknown:'未知',
+        cad_daily:'每日', cad_weekly:'每週', cad_monthly:'每月', cad_quarterly:'每季', cad_annual:'每年', cad_yoy:'按年比較', cad_unknown:'未知',
         // keyboard hint
         kbd_hint:'{kbd} 指令面板 · 按 {g} 後再按分頁字母以跳轉 · 於對話框輸入 {slash} 開始調查',
         // silence index dynamic strings
-        silence_events:'本期 {n} 個未解釋事件', silence_methodology:'方法論 v{v} · 限金管局 · 確定性 · 按分數查看確實缺失的日期',
+        silence_events:'本期 {n} 個未解釋事件', silence_methodology:'方法論 v{v} · 限於所選機構 · 確定性 · 按分數查看確實缺失的日期',
         silence_unavail:'沉默指數無法使用', silence_cannot_reach:'無法連接 /v1/silence-index',
         silence_no_ids:'無逐項發現編號（衍生訊號）', silence_weight:'權重',
         // silence signal kinds (rendered in the breakdown chips)
@@ -962,7 +1015,40 @@
         div_proxies_agree:'目前兩者一致 —— 最新差距為 {pct}%（低於 {thr}% 的監察界線），兩組數據仍然同步。',
         // PR-010：首次到訪導引（為初次使用者以淺白語言撰寫）。
         onboard_msg:'此工具呈現香港政府數據與新聞稿之間的不一致。初次使用？請先看下方的「沉默指數」——那是您唯一可以直接引用的數字。',
-        onboard_dismiss:'關閉'
+        onboard_dismiss:'關閉',
+        // PR-006（角色評核）：工具列標籤／佔位字／無障礙標籤——原先為硬編碼英文。
+        lbl_api_base:'API 基礎網址', lbl_api_key:'API 金鑰',
+        ph_api_base:'http://localhost:8080', ph_api_key:'金鑰',
+        aria_api_base:'API 基礎網址', aria_api_key:'API 金鑰', aria_refresh_all:'全部重新整理',
+        aria_primary_nav:'主導覽', aria_send:'送出', aria_filter_cat:'按類別篩選',
+        title_agent_mode:'代理模式', title_experimental:'實驗性偵測器', badge_experimental:'實驗性',
+        // PR-006：代理狀態列訊息（原先為硬編碼英文）。
+        agent_failing_open:'掃描中，但 <b style="color:var(--warn)">{src}</b> 斷路器為開啟狀態 —— 正提供快取發現',
+        agent_watching:'監察港府來源中 —— 持有 <b>{n}</b> 項發現',
+        agent_held_new:'持有 <b>{n}</b> 項發現 · 自上次查看起新增 <span class="newflag" onclick="showOnlyNew()">{delta} 項</span>',
+        agent_held_healthy:'持有 <b>{n}</b> 項發現 · 所有來源運作正常',
+        // PR-006：洞察卡片資訊列。
+        card_conf:'信心 {n}%', card_by:'由 {who}',
+        // PR-006：前所未見程度帶狀圖（原先為硬編碼英文）。
+        unprec_label:'前所未見程度',
+        unprec_top_pct:'最高 {n}%', unprec_extreme:'極端', unprec_one_in_n:' · {n} 次一遇',
+        unprec_in_range:'處於正常範圍', unprec_current_value:'當前數值：{v}',
+        unprec_normal_range:'正常 {lo}–{hi}', unprec_min:'最低 {v}', unprec_max:'最高 {v}',
+        unprec_last_exceeded:'上次超出於 {link}',
+        // PR-006：比較器（前期平行）卡片。
+        cmp_badge:'前期平行', cmp_prior_exceedance:'前期超出',
+        cmp_beyond_edge:'此欄位上次超出正常範圍時，數值為 <b>{value}</b>，出現於 <b>{rid}</b>。該次超出幅度為波段邊界的 {pct}%。',
+        cmp_last_exceeded_plain:'此欄位上次超出正常範圍時，數值為 <b>{value}</b>，出現於 <b>{rid}</b>。',
+        // PR-006：返回儀表板橫幅。
+        return_new_since:'自 {when} 起新增 <b>{n}</b> 項', return_evolved:' · <b>{n}</b> 項已演變',
+        return_show_new:'僅顯示新增', return_dismiss:'關閉',
+        // PR-006：誠實的降級／空狀態（原先即使 API 無法連接，仍誤稱「約 6 小時內掃描」）。
+        degraded_upstream:'—— 上游降級：{srcs}。',
+        degraded_retry:'以重試。',
+        degraded_unreachable:'無法從此主機連接數據 API。若您瀏覽的是靜態部署，可能需要設定 API 來源網址。',
+        degraded_scans:'代理會定期掃描 —— 新發現約於 6 小時內出現。',
+        degraded_banner:'上游降級：{srcs}。',
+        degraded_retry_now:'立即重試'
       }
     };
     function t(k, vars){ let s=(I18N[curLang]&&I18N[curLang][k])||I18N.en[k]||k; if(vars){ for(const kk in vars) s=s.replace('{'+kk+'}', vars[kk]); } return s; }
@@ -984,6 +1070,12 @@
       document.querySelectorAll('[data-i18n]').forEach(el=>{ const k=el.getAttribute('data-i18n'); const v=lang[k]||I18N.en[k]; if(v!=null){ // preserve any trailing count span on nav buttons
         const countSpan=el.querySelector('.count, .new-pip'); el.textContent=v; if(countSpan) el.appendChild(countSpan); } });
       document.querySelectorAll('[data-i18n-ph]').forEach(el=>{ const k=el.getAttribute('data-i18n-ph'); const v=lang[k]||I18N.en[k]; if(v!=null) el.placeholder=v; });
+      // aria-label / title translation (AGENT.md §i18n: aria-labels are
+      // user-visible and must resolve through the dictionary, just like text).
+      // `data-i18n-aria="key"` sets the element's aria-label from the dict;
+      // `data-i18n-title="key"` sets its title attribute.
+      document.querySelectorAll('[data-i18n-aria]').forEach(el=>{ const k=el.getAttribute('data-i18n-aria'); const v=lang[k]||I18N.en[k]; if(v!=null) el.setAttribute('aria-label',v); });
+      document.querySelectorAll('[data-i18n-title]').forEach(el=>{ const k=el.getAttribute('data-i18n-title'); const v=lang[k]||I18N.en[k]; if(v!=null) el.setAttribute('title',v); });
       // Keyboard hint carries inline <b>/<code> tags, so render it as HTML with
       // the kbd/g/slash placeholders preserved (a plain textContent swap would
       // strip the formatting).
@@ -1015,8 +1107,8 @@
     function updateAgentStrip(insightCount, health, since){
       const msg=document.getElementById('agentMsg'), when=document.getElementById('agentWhen');
       const failing=(health||[]).filter(s=>s.circuit&&s.circuit!=='closed');
-      if(failing.length){ msg.innerHTML=`scanning, but <b style="color:var(--warn)">${escapeHtml(failing.map(f=>f.source).join(', '))}</b> circuit is open — serving cached findings`; }
-      else { const n=insightCount||0; const delta=n-agentLastCount; if(agentLastCount===0){ msg.innerHTML=`watching HKGOV sources — <b>${n}</b> findings held`; } else if(delta>0){ msg.innerHTML=`<b>${n}</b> findings held · <span class="newflag" onclick="showOnlyNew()">${delta} new</span> since I last checked`; flashTitle(delta); } else { msg.innerHTML=`<b>${n}</b> findings held · all sources healthy`; } agentLastCount=n; }
+      if(failing.length){ msg.innerHTML=t('agent_failing_open',{src:escapeHtml(failing.map(f=>f.source).join(', '))}); }
+      else { const n=insightCount||0; const delta=n-agentLastCount; if(agentLastCount===0){ msg.innerHTML=t('agent_watching',{n}); } else if(delta>0){ msg.innerHTML=t('agent_held_new',{n,delta}); flashTitle(delta); } else { msg.innerHTML=t('agent_held_healthy',{n}); } agentLastCount=n; }
       when.textContent='checked '+relTime(new Date().toISOString());
     }
     function flashTitle(n){ if(!document.title.startsWith('(')){ document.title='('+n+') HK City Pulse'; } }
@@ -1033,7 +1125,7 @@
       const n=fresh.length;
       if(n===0){ el.innerHTML=''; return; }
       const evolved=fresh.filter(i=>i.evolution&&!isRead(i.id)).length;
-      el.innerHTML=`<div class="return-banner"><i class="ri-sparkling-line" style="color:var(--accent)"></i> <b>${n}</b> new since ${escapeHtml(relTime(sinceIso))}${evolved?` · <b>${evolved}</b> evolved`:''} <button onclick="showOnlyNew()">show only new</button> <button class="dismiss" onclick="this.parentElement.remove()" aria-label="dismiss"><i class="ri-close-line"></i></button></div>`;
+      el.innerHTML=`<div class="return-banner"><i class="ri-sparkling-line" style="color:var(--accent)"></i> ${t('return_new_since',{n,when:escapeHtml(relTime(sinceIso))})}${evolved?t('return_evolved',{n:evolved}):''} <button onclick="showOnlyNew()">${t('return_show_new')}</button> <button class="dismiss" onclick="this.parentElement.remove()" aria-label="${t('return_dismiss')}"><i class="ri-close-line"></i></button></div>`;
     }
 
     // ============ Proxy Divergence Radar (P-113 flagship) ============
@@ -1182,16 +1274,23 @@
 
     // ============ Silence Index + drill-down ============
     let silenceIdx=null;
+    // Translate the server-provided Silence Index label for the active locale.
+    // The server emits English ("HKMA Silence Index", "Immigration Silence
+    // Index", …); this maps the institution name to zh-HK so the hero reads
+    // naturally in both languages without the server needing locale awareness.
+    const SILENCE_LABEL_ZH={ 'HKMA':'金管局', 'Immigration':'入境事務處', 'Land Registry':'土地註冊處', 'R&VD':'差餉物業估價處' };
+    function silenceLabelZh(label){ if(!label) return t('silence_label'); let out=label; for(const en in SILENCE_LABEL_ZH){ out=out.split(en).join(SILENCE_LABEL_ZH[en]); } return out.split('Silence Index').join('沉默指數'); }
     async function loadSilence(){      const now=new Date(); const q=Math.floor(now.getUTCMonth()/3)+1; const period=now.getUTCFullYear()+'-Q'+q;
-      const idx=await getJSON('/v1/silence-index?period='+period);
+      const src=document.getElementById('silenceSource')?document.getElementById('silenceSource').value:'hkma';
+      const idx=await getJSON('/v1/silence-index?source='+encodeURIComponent(src)+'&period='+period);
       // also fetch prior quarter for delta
       const prevQ=q===1?4:q-1; const prevY=q===1?now.getUTCFullYear()-1:now.getUTCFullYear(); const prevPeriod=prevY+'-Q'+prevQ;
-      const prior=await getJSON('/v1/silence-index?period='+prevPeriod);
+      const prior=await getJSON('/v1/silence-index?source='+encodeURIComponent(src)+'&period='+prevPeriod);
       if(!idx||idx.__error){ document.getElementById('silenceTitle').firstChild.textContent=t('silence_unavail'); document.getElementById('silenceSub').textContent=idx&&idx.__error?('HTTP '+idx.__error):t('silence_cannot_reach'); return; }
       silenceIdx=idx;
       const score=Math.round(idx.score); const num=document.getElementById('silenceNum');
       num.textContent=score; num.style.color=score>=60?'var(--crit)':score>=30?'var(--warn)':'var(--ok)';
-      document.getElementById('silenceLbl').textContent=(curLang==='zh'?(idx.label?idx.label.replace(/^HKMA /,'金管局 ').replace('Silence Index','沉默指數'):t('silence_label')):(idx.label||t('silence_label')))+' · '+(idx.period||period);
+      document.getElementById('silenceLbl').textContent=((curLang==='zh'?silenceLabelZh(idx.label):(idx.label||t('silence_label'))))+' · '+(idx.period||period);
       document.getElementById('silenceTitle').firstChild.textContent=t('silence_events',{n:idx.total_events,s:idx.total_events===1?'':'s'});
       // delta
       if(prior&&!prior.__error&&typeof prior.score==='number'){ const d=score-Math.round(prior.score); const el=document.getElementById('silenceDelta'); if(d!==0){ // PR-009: Remix Icon arrows instead of triangle glyphs (render inconsistently across OS).
@@ -1207,7 +1306,16 @@
     // The full quarterly-trend + threshold alert (v2) is gated on G2 persistence;
     // this delta v1 ships now so the watch button is functional end-to-end.
     async function watchSilenceIndex(){
-      const compiled={ source:'hkma', dataset:'daily-figures-interbank-liquidity', detector:'series_jump', field:'hibor_overnight', threshold:25.0, comparison:'period_over_period', cadence:'daily', direction:'above' };
+      // Per-source watch target — the dominant series for each institution.
+      const src=document.getElementById('silenceSource')?document.getElementById('silenceSource').value:'hkma';
+      const WATCH_TARGETS={
+        hkma:{ source:'hkma', dataset:'daily-figures-interbank-liquidity', field:'hibor_overnight', threshold:25.0, cadence:'daily' },
+        immigration:{ source:'immigration', dataset:'daily-passenger-traffic-totals', field:'mainland_visitors', threshold:25.0, cadence:'daily' },
+        landregistry:{ source:'landregistry', dataset:'monthly-transactions', field:'total_units', threshold:25.0, cadence:'monthly' },
+        rvd:{ source:'rvd', dataset:'price-indices-monthly', field:'all_classes', threshold:10.0, cadence:'monthly' },
+      };
+      const wt=WATCH_TARGETS[src]||WATCH_TARGETS.hkma;
+      const compiled={ ...wt, detector:'series_jump', comparison:'period_over_period', direction:'above' };
       const s=await postJSON('/v1/signals',{ question:'Silence Index watch — alert when a large unattributed move occurs', compiled, channels:[], owner:'dashboard' });
       const btn=document.getElementById('silenceWatchBtn');
       if(!s||s.__error){ btn.innerHTML='<i class="ri-error-warning-line"></i> '+t('silence_watch_failed',{code:(s&&s.__error)}); return; }
@@ -1245,16 +1353,16 @@
       const pctile=u.percentile!=null?Math.round(u.percentile):null;
       const safeSrc=escapeHtml(source||''), safeDs=escapeHtml(dataset||''), safeFld=escapeHtml(field||'');
       return `<div class="unprec ${extreme?'unprec-extreme':''}">
-        <div class="unprec-label"><span><i class="ri-bar-chart-2-line"></i> unprecedentedness</span>${extreme?`<span class="chip">${pctile!=null?'top '+Math.max(1,100-pctile)+'%':'extreme'}${u.one_in_n?` · 1-in-${u.one_in_n}`:''}</span>`:`<span style="color:var(--ok)">in normal range</span>`}</div>
+        <div class="unprec-label"><span><i class="ri-bar-chart-2-line"></i> ${t('unprec_label')}</span>${extreme?`<span class="chip">${pctile!=null?t('unprec_top_pct',{n:Math.max(1,100-pctile)}):t('unprec_extreme')}${u.one_in_n?t('unprec_one_in_n',{n:u.one_in_n}):''}</span>`:`<span style="color:var(--ok)">${t('unprec_in_range')}</span>`}</div>
         <div class="unprec-bar">
           <div class="unprec-normal" style="left:${normL}%;width:${Math.max(2,normW)}%"></div>
-          <div class="unprec-marker ${extreme?'extreme':''}" style="left:calc(${markerPos}% - 1.5px)" title="current value: ${escapeHtml(String(val))}"></div>
+          <div class="unprec-marker ${extreme?'extreme':''}" style="left:calc(${markerPos}% - 1.5px)" title="${t('unprec_current_value',{v:escapeHtml(String(val))})}"></div>
         </div>
         <div class="unprec-foot">
-          <span>normal ${escapeHtml(lo.toFixed(3))}–${escapeHtml(hi.toFixed(3))}</span>
-          ${min!==lo?`<span>min ${escapeHtml(min.toFixed(3))}</span>`:''}
-          ${max!==hi?`<span>max ${escapeHtml(max.toFixed(3))}</span>`:''}
-          ${u.last_exceeded?`<span>last exceeded <a href="#" onclick="openComparator('${safeSrc}','${safeDs}','${safeFld}','${escapeHtml(u.last_exceeded.record_id)}',${u.last_exceeded.value});return false;" style="color:var(--accent);text-decoration:underline;cursor:pointer">${escapeHtml(u.last_exceeded.record_id)} (${u.last_exceeded.pct_beyond_edge>=0?'+':''}${u.last_exceeded.pct_beyond_edge.toFixed(0)}%)</a></span>`:''}
+          <span>${t('unprec_normal_range',{lo:escapeHtml(lo.toFixed(3)),hi:escapeHtml(hi.toFixed(3))})}</span>
+          ${min!==lo?`<span>${t('unprec_min',{v:escapeHtml(min.toFixed(3))})}</span>`:''}
+          ${max!==hi?`<span>${t('unprec_max',{v:escapeHtml(max.toFixed(3))})}</span>`:''}
+          ${u.last_exceeded?`<span>${(()=>{ const le=u.last_exceeded; const pct=(le.pct_beyond_edge>=0?'+':'')+le.pct_beyond_edge.toFixed(0); const link=`<a href="#" onclick="openComparator('${safeSrc}','${safeDs}','${safeFld}','${escapeHtml(le.record_id)}',${le.value});return false;" style="color:var(--accent);text-decoration:underline;cursor:pointer">${escapeHtml(le.record_id)} (${pct}%)</a>`; return t('unprec_last_exceeded',{link}); })()}</span>`:''}
         </div>
       </div>`;
     }
@@ -1265,10 +1373,10 @@
       // to a static read-only view if the record rotated.
       const u=await loadUnprec(source,dataset,field,value);
       const html=`<div class="card sev-info" style="margin-top:8px;border-left-color:var(--accent)">
-        <div class="card-head"><span class="sev-icon"><i class="ri-history-line" style="color:var(--accent)"></i></span><span class="badge badge-info">prior parallel</span><span class="title">${escapeHtml(field)} @ ${escapeHtml(recordId)}</span></div>
-        <div class="summary">When this field last exceeded its normal range, it was <b>${value}</b> on <b>${escapeHtml(recordId)}</b>. ${u&&u.last_exceeded?`That exceedance was ${u.last_exceeded.pct_beyond_edge>=0?'+':''}${u.last_exceeded.pct_beyond_edge.toFixed(0)}% beyond the band edge.`:''}</div>
+        <div class="card-head"><span class="sev-icon"><i class="ri-history-line" style="color:var(--accent)"></i></span><span class="badge badge-info">${t('cmp_badge')}</span><span class="title">${escapeHtml(field)} @ ${escapeHtml(recordId)}</span></div>
+        <div class="summary">${u&&u.last_exceeded?t('cmp_beyond_edge',{value,rid:escapeHtml(recordId),pct:(u.last_exceeded.pct_beyond_edge>=0?'+':'')+u.last_exceeded.pct_beyond_edge.toFixed(0)}):t('cmp_last_exceeded_plain',{value,rid:escapeHtml(recordId)})}</div>
         ${u?unprecBandHTML(u,source,dataset,field):''}
-        <div class="meta"><span>${escapeHtml(source)}/${escapeHtml(dataset)}</span><span>prior exceedance</span></div>
+        <div class="meta"><span>${escapeHtml(source)}/${escapeHtml(dataset)}</span><span>${t('cmp_prior_exceedance')}</span></div>
       </div>`;
       // Thread it under the originating card if we can find one on-page.
       const host=document.querySelector('.card.unread .unprec, .card .unprec')||document.querySelector('#insights .card, #brief .card');
@@ -1304,7 +1412,7 @@
     // ============ insight card ============
     let pendingUnprec={}; // id -> promise
     function insightCard(i, withActions){
-      const exp=i.experimental?' <span class="badge badge-exp" title="experimental detector">experimental</span>':'';
+      const exp=i.experimental?` <span class="badge badge-exp" title="${t('title_experimental')}">${t('badge_experimental')}</span>`:'';
       const evolved=i.evolution?' <span class="badge badge-evolved" title="evolved"><i class="ri-flashlight-line"></i> v'+i.version+'</span>':'';
       const unread=!isRead(i.id);
       const actions=withActions?`
@@ -1326,7 +1434,7 @@
         </div>
         <div class="summary">${escapeHtml(i.summary)}</div>
         <div id="unprec-${cssEsc(i.id)}"></div>
-        <div class="meta"><span>${escapeHtml(i.source)}/${escapeHtml(i.dataset)}</span><span>${escapeHtml(i.kind)}</span><span>${Math.round((i.confidence||0)*100)}% conf</span><span>by ${escapeHtml(i.producer)}</span></div>
+        <div class="meta"><span>${escapeHtml(i.source)}/${escapeHtml(i.dataset)}</span><span>${escapeHtml(i.kind)}</span><span>${t('card_conf',{n:Math.round((i.confidence||0)*100)})}</span><span>${t('card_by',{who:escapeHtml(i.producer)})}</span></div>
         ${evidenceHTML(i.evidence)}
         <details class="history" id="hist-${cssEsc(i.id)}" style="display:none"></details>
         ${actions}
@@ -1377,8 +1485,12 @@
     // ============ degraded-state honesty ============
     let cachedHealth=null;
     async function loadHealthQuiet(){ const hs=await getJSON('/v1/health/sources'); if(hs&&!hs.__error){ cachedHealth=hs; return hs; } const alt=await getJSON('/health/sources'); if(alt&&!alt.__error){ cachedHealth=alt; return alt; } return []; }
-    async function degradedEmpty(message){ const hs=cachedHealth||await loadHealthQuiet(); const failing=(hs||[]).filter(s=>s.circuit&&s.circuit!=='closed'); if(failing.length){ return `<div class="empty">${escapeHtml(message)} <span style="color:var(--warn)">— upstream degraded: ${failing.map(f=>escapeHtml(f.source)).join(', ')}. <i class="ri-refresh-line"></i> to retry.</span></div>`; } return `<div class="empty">${escapeHtml(message)} The agent scans periodically — new findings appear within ~6h.</div>`; }
-    async function renderDegradedBanner(){ const hs=cachedHealth||await loadHealthQuiet(); const el=document.getElementById('degradedBanner'); const failing=(hs||[]).filter(s=>s.circuit&&s.circuit!=='closed'); el.innerHTML=failing.length?`<div class="banner warn"><i class="ri-alert-line"></i> Upstream degraded: ${failing.map(f=>'<b>'+escapeHtml(f.source)+'</b> ('+escapeHtml(f.circuit)+')').join(', ')}. <button onclick="loadAll()">retry now</button></div>`:''; }
+    async function degradedEmpty(message){ const hs=cachedHealth||await loadHealthQuiet(); const failing=(hs||[]).filter(s=>s.circuit&&s.circuit!=='closed'); if(failing.length){ return `<div class="empty">${escapeHtml(message)} <span style="color:var(--warn)">— ${t('degraded_upstream',{srcs:failing.map(f=>escapeHtml(f.source)).join(', ')})} <i class="ri-refresh-line"></i> ${t('degraded_retry')}</span></div>`; } // If health is empty the API itself is unreachable (e.g. the public static
+    // deploy with no API origin wired). Say so honestly rather than claiming the
+    // agent "scans periodically" — that is only true when the API is reachable.
+    if(!hs||!hs.length){ return `<div class="empty">${escapeHtml(message)} ${t('degraded_unreachable')}</div>`; }
+    return `<div class="empty">${escapeHtml(message)} ${t('degraded_scans')}</div>`; }
+    async function renderDegradedBanner(){ const hs=cachedHealth||await loadHealthQuiet(); const el=document.getElementById('degradedBanner'); const failing=(hs||[]).filter(s=>s.circuit&&s.circuit!=='closed'); el.innerHTML=failing.length?`<div class="banner warn"><i class="ri-alert-line"></i> ${t('degraded_banner',{srcs:failing.map(f=>'<b>'+escapeHtml(f.source)+'</b> ('+escapeHtml(f.circuit)+')').join(', ')})} <button onclick="loadAll()">${t('degraded_retry_now')}</button></div>`:''; }
 
     // ============ feedback ============
     async function vote(id, useful, btn){ const {base,headers}=api(); let ok=false; try { const r=await fetch(base+'/v1/insights/'+encodeURIComponent(id)+'/feedback',{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify({useful})}); ok=r.ok; } catch(e){ ok=false; } const note=document.getElementById('fb-'+id); if(note) note.textContent=ok?(useful?'thanks — marked useful':'thanks — marked not useful'):'failed (HTTP) — not recorded'; }
@@ -1439,7 +1551,7 @@
     // ============ signals ============
     async function sigSourceFill(){ const sel=document.getElementById('sigSource'); if(sel.options.length) return; const srcs=await getJSON('/v1/sources'); if(!srcs||srcs.__error) return; const seen={}; for(const s of srcs) if(!seen[s.source]){ seen[s.source]=true; const o=document.createElement('option'); o.value=s.source; o.textContent=s.source; sel.appendChild(o); } sel.value='hkma'; sigDatasetFill(); }
     async function sigDatasetFill(){ const src=document.getElementById('sigSource').value; const sel=document.getElementById('sigDataset'); const field=(document.getElementById('sigField').value||'').trim(); sel.innerHTML=''; const srcs=await getJSON('/v1/sources?source='+encodeURIComponent(src)); if(!srcs||srcs.__error) return; for(const s of srcs){ const o=document.createElement('option'); o.value=s.dataset; o.textContent=s.dataset+' ('+s.record_count+')'; sel.appendChild(o); } if(field){ const preferred=src==='hkma'&&field==='hibor_overnight'?'daily-figures-interbank-liquidity':null; let chosen=null; if(preferred&&[...sel.options].some(o=>o.value===preferred)) chosen=preferred; else { for(const s of srcs.slice(0,12)){ try { const r=await getJSON('/v1/datasets/'+encodeURIComponent(s.source)+'/'+encodeURIComponent(s.dataset)+'/records?limit=1'); if(r&&!r.__error&&r.records&&r.records[0]&&(field in (r.records[0].fields||{}))){ chosen=s.dataset; break; } } catch(e){} } } if(chosen) sel.value=chosen; } }
-    function buildScanTarget(){ return { source:document.getElementById('sigSource').value, dataset:document.getElementById('sigDataset').value, detector:document.getElementById('sigDetector').value, field:document.getElementById('sigField').value||null, threshold:parseFloat(document.getElementById('sigThreshold').value)||null, comparison:'period_over_period', cadence:'unknown', direction:document.getElementById('sigDirection').value }; }
+    function buildScanTarget(){ return { source:document.getElementById('sigSource').value, dataset:document.getElementById('sigDataset').value, detector:document.getElementById('sigDetector').value, field:document.getElementById('sigField').value||null, threshold:parseFloat(document.getElementById('sigThreshold').value)||null, comparison:'period_over_period', cadence:document.getElementById('sigCadence').value||'daily', direction:document.getElementById('sigDirection').value }; }
     async function previewSignal(){ const box=document.getElementById('sigPreview'); box.textContent=t('sig_previewing'); const compiled=buildScanTarget(); const p=await postJSON('/v1/signals/preview',{compiled, window_days:90}); if(!p||p.__error){ box.innerHTML='<span style="color:var(--crit)">'+t('sig_preview_err',{detail:escapeHtml((p&&p.__text)||('HTTP '+(p&&p.__error)))})+'</span>'; return; } const n=p.count==null?(p.findings||[]).length:p.count; box.innerHTML=t('sig_fired',{n,days:(p.window_days||90),s:(n===1?'':'s'),det:escapeHtml(p.compiled.detector),src:escapeHtml(p.compiled.source)+'/'+escapeHtml(p.compiled.dataset)})+'<br>'+(n?'<span style="color:var(--muted)">'+t('sig_recent',{list:((p.findings||[]).slice(0,3).map(f=>escapeHtml(f.record_id||f.title||'?')).join(', '))})+'</span>':'<span style="color:var(--ok)">'+t('sig_none_fired')+'</span>'); }
     async function saveSignal(){ const q=document.getElementById('sigQuestion').value.trim(); const compiled=buildScanTarget(); const s=await postJSON('/v1/signals',{question:q||null, compiled, channels:[], owner:'dashboard'}); if(!s||s.__error){ alert(t('sig_could_not_save',{detail:((s&&s.__text)||('HTTP '+(s&&s.__error)))})); return; } document.getElementById('sigQuestion').value=''; const note=document.getElementById('sigSaveNote'); if(note){ note.textContent=t('sig_saved_ok'); note.style.display='block'; setTimeout(()=>{ note.style.display='none'; }, 6000); } loadSignals(); }
     async function loadSignals(){ const list=await getJSON('/v1/signals?limit=50'); const el=document.getElementById('signalsList'); if(!list||list.__error||!list.length){ el.innerHTML='<div class="empty">'+t('sig_none')+'</div>'; document.getElementById('navSignals').textContent='0'; return; } document.getElementById('navSignals').textContent=list.length; el.innerHTML=list.map(s=>`<div class="case-card"><div class="ct">${escapeHtml(s.question||(s.compiled.detector+' on '+s.compiled.source+'/'+s.compiled.dataset))}</div><div class="cm"><code>${escapeHtml(s.compiled.detector)}</code> · ${escapeHtml(s.compiled.source)}/${escapeHtml(s.compiled.dataset)} · ${s.enabled?t('sig_enabled'):t('sig_paused')}</div><div class="actions"><button onclick="toggleSignal('${escapeHtml(s.id)}', ${!s.enabled})">${s.enabled?t('sig_pause'):t('sig_enable')}</button><button onclick="delSignal('${escapeHtml(s.id)}')">${t('sig_delete')}</button><button onclick="loadDispatchLog('${escapeHtml(s.id)}', this)"><i class="ri-history-line"></i> ${t('sig_dispatch')}</button></div><div class="dispatch-log" id="dlog-${escapeHtml(s.id)}" style="display:none;margin-top:8px;"></div></div>`).join(''); }
@@ -1481,8 +1593,18 @@
 
     // ============ deep-link anchoring ============
     function anchorFromHash(){ const m=location.hash.match(/^#card-(.+)$/); if(m){ const card=document.getElementById('card-'+m[1]); if(card){ card.classList.add('anchored'); card.scrollIntoView({behavior:'smooth',block:'center'}); } } }
-    // cite share permalink: open cite modal on load if hash = #cite/<id>
-    function checkShareLanding(){ const m=location.hash.match(/^#cite\/(.+)$/); if(m){ openCite(decodeURIComponent(m[1])); } }
+    // cite share permalink: open cite modal on load if the URL targets a cite.
+    // Accepts BOTH forms the system emits: a hash `#cite/<id>` and a path
+    // `/cite/<id>` (the Cite-It permalink from build_citation, and the route
+    // served by the API + the Netlify SPA rewrite). Without the path form a
+    // shared permalink 404s / never opens the drawer.
+    function checkShareLanding(){
+      let id=null;
+      const hm=location.hash.match(/^#cite\/(.+)$/);
+      if(hm){ id=decodeURIComponent(hm[1]); }
+      else { const pm=location.pathname.match(/\/cite\/(.+)$/); if(pm){ id=decodeURIComponent(pm[1]); } }
+      if(id){ openCite(id); }
+    }
 
     // ============ command palette ============
     function openPalette(){ document.getElementById('palette').classList.add('open'); document.getElementById('paletteInput').value=''; document.getElementById('paletteInput').focus(); renderPalette(); }

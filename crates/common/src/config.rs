@@ -168,7 +168,11 @@ impl Default for StoreSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentSettings {
-    /// Whether the background agent scheduler runs. Off by default.
+    /// Whether the background agent scheduler runs. On by default — the
+    /// detection layer is pure Rust (no API key) and the Silence Index is
+    /// computed from the insights it generates, so the scheduler must run for
+    /// the dashboard's flagship number to be anything other than zero. Set
+    /// `false` to suppress background scanning.
     pub enabled: bool,
     /// How often the agent re-runs its analysis passes, seconds.
     pub run_interval_secs: u64,
@@ -188,7 +192,17 @@ pub struct AgentSettings {
 impl Default for AgentSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            // On by default. The agent's detection layer is pure Rust
+            // (`HeuristicClient` is the default LLM client when no
+            // `llm_base_url` is set — no network, no API key), so there is no
+            // external cost to running it. The Silence Index — the product's
+            // flagship number — is computed entirely from the insights this
+            // scheduler generates (`cross_source_gap` + unattributed
+            // `series_jump`); with the agent off, those insights never exist
+            // and the index is permanently zero/"no signals", which defeats the
+            // dashboard's headline feature out-of-the-box. Operators who want
+            // to suppress background scanning can set `enabled = false`.
+            enabled: true,
             run_interval_secs: 6 * 3600,
             llm_base_url: String::new(),
             llm_api_key: None,
@@ -399,6 +413,26 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
             experimental: false,
             direction: None,
         },
+        // Residential mortgage delinquency ratio — the 銀主盤 (foreclosure)
+        // proxy. The HKMA Residential Mortgage Survey publishes
+        // `delinquency_ratio` monthly; a 50% period-over-period jump (e.g.
+        // 0.12% -> 0.18%) is a significant borrower-distress signal that
+        // historically precedes a rise in bank-owned property listings.
+        ScanTarget {
+            source: "hkma".into(),
+            dataset: "residential-mortgage-survey".into(),
+            detector: "series_jump".into(),
+            field: Some("delinquency_ratio".into()),
+            threshold: Some(50.0),
+            field_b: None,
+            companion: None,
+            cadence: Cadence::Monthly,
+            comparison: Comparison::PeriodOverPeriod,
+            companion_field: None,
+            join_field: None,
+            experimental: false,
+            direction: None,
+        },
         ScanTarget {
             source: "press".into(),
             dataset: "hkma-press-releases".into(),
@@ -411,6 +445,65 @@ pub fn default_scan_targets() -> Vec<ScanTarget> {
                 dataset: "daily-figures-interbank-liquidity".into(),
             }),
             cadence: Cadence::Unknown,
+            comparison: Comparison::PeriodOverPeriod,
+            companion_field: None,
+            join_field: None,
+            experimental: false,
+            direction: None,
+        },
+        // ---- Immigration (border crossings) — daily, mainland-visitor flow ----
+        // A halving or doubling of Mainland visitor arrivals is the headline
+        // border opacity signal (a checkpoint quietly closed, a policy shift
+        // with no Immigration Department statement). Daily cadence fits the
+        // existing series_jump detector directly.
+        ScanTarget {
+            source: "immigration".into(),
+            dataset: "daily-passenger-traffic-totals".into(),
+            detector: "series_jump".into(),
+            field: Some("mainland_visitors".into()),
+            threshold: Some(25.0),
+            field_b: None,
+            companion: None,
+            cadence: Cadence::Daily,
+            comparison: Comparison::PeriodOverPeriod,
+            companion_field: None,
+            join_field: None,
+            experimental: false,
+            direction: None,
+        },
+        // ---- RVD property price index — monthly, All-Classes ----
+        // A 10% monthly move on the RVD All-Classes price index is large for a
+        // smoothed property series and a notable property Silence Index signal
+        // (a sharp price shift with no RVD commentary). Monthly cadence.
+        ScanTarget {
+            source: "rvd".into(),
+            dataset: "price-indices-monthly".into(),
+            detector: "series_jump".into(),
+            field: Some("all_classes".into()),
+            threshold: Some(10.0),
+            field_b: None,
+            companion: None,
+            cadence: Cadence::Monthly,
+            comparison: Comparison::PeriodOverPeriod,
+            companion_field: None,
+            join_field: None,
+            experimental: false,
+            direction: None,
+        },
+        // ---- Land Registry property transactions — monthly ----
+        // A 25% monthly swing in total S&P agreement volume (the headline 樓市成交
+        // series) is a significant market move worth flagging against Land
+        // Registry commentary. Monthly cadence; covers 二手房 via the primary/
+        // secondary split dataset too.
+        ScanTarget {
+            source: "landregistry".into(),
+            dataset: "monthly-transactions".into(),
+            detector: "series_jump".into(),
+            field: Some("total_units".into()),
+            threshold: Some(25.0),
+            field_b: None,
+            companion: None,
+            cadence: Cadence::Monthly,
             comparison: Comparison::PeriodOverPeriod,
             companion_field: None,
             join_field: None,

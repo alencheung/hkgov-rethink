@@ -185,8 +185,15 @@ pub fn detect_series_jumps(
 /// Detect dates where a press release exists but no matching data row does (or
 /// the reverse). Surfaces "the narrative and the data don't line up" gaps.
 ///
-/// `source`/`dataset` describe the press side (what the dates come from). The
-/// default scan target points these at `press` / `hkma-press-releases`.
+/// `source`/`dataset` describe the **data** side (the institution whose opacity
+/// is being measured). Both `press_dates` and `data_dates` are date strings
+/// (e.g. `"2026-06-30"` for daily, `"2026-06"` for monthly) — the caller is
+/// responsible for coercing both sides to the same granularity via
+/// [`coerce_to_period`] when the cadences differ (the detector does pure set
+/// membership on the strings it receives).
+///
+/// Emits up to two findings: a **press-only** gap (release with no data) and a
+/// **data-only** gap (data with no release). Both feed the Silence Index.
 pub fn detect_cross_source_gaps(
     source: DataSource,
     dataset: &str,
@@ -214,8 +221,8 @@ pub fn detect_cross_source_gaps(
             ),
             heuristic_summary: format!(
                 "On {} date(s) a {} press release was issued but no corresponding \
-                 statistical data row was published, or vice versa. These are candidate \
-                 points where the official narrative and the published data diverge.",
+                 statistical data row was published. These are candidate points where \
+                 the official narrative and the published data diverge.",
                 press_only.len(),
                 source
             ),
@@ -233,7 +240,88 @@ pub fn detect_cross_source_gaps(
                 .collect(),
         });
     }
+
+    // Data row with no press release for that date — the reverse gap.
+    // (Previously only press-only was computed; this was a latent omission that
+    // left the Silence Index's DataOnlyGap signal without backing evidence.)
+    let data_only: Vec<&&String> = data_set
+        .iter()
+        .filter(|d| !press_set.contains(*d))
+        .collect();
+    if !data_only.is_empty() {
+        findings.push(Finding {
+            kind: "cross_source_gap".into(),
+            source,
+            dataset: dataset.into(),
+            title: format!(
+                "{} data date(s) with no matching {} press release",
+                data_only.len(),
+                source
+            ),
+            heuristic_summary: format!(
+                "On {} date(s) {} statistical data was published but no press release \
+                 accompanied it. These are candidate points where the numbers moved \
+                 without an official explanation.",
+                data_only.len(),
+                source
+            ),
+            severity: "info".into(),
+            confidence: 0.5,
+            evidence: data_only
+                .iter()
+                .take(10)
+                .map(|d| EvidenceRef {
+                    record_id: d.to_string(),
+                    field: "date".into(),
+                    value: serde_json::json!(d.to_string()),
+                    context: Some("data date without matching press release".into()),
+                })
+                .collect(),
+        });
+    }
+
     findings
+}
+
+/// Coerce a date string to the granularity implied by a [`Cadence`], so that
+/// a daily press date (`"2026-05-31"`) and a monthly data date (`"2026-05"`)
+/// can be compared by exact string equality. This is what makes monthly
+/// property data work with the gap detector.
+///
+/// - `Daily`/`Weekly`/`Unknown` → unchanged (`"YYYY-MM-DD"` or whatever it is).
+/// - `Monthly` → `"YYYY-MM"` (truncate a daily date to its month).
+/// - `Quarterly` → `"YYYY-Qn"` (derived from the month).
+/// - `Biannual`/`Annual` → `"YYYY"`.
+pub fn coerce_to_period(date: &str, cadence: Cadence) -> String {
+    match cadence {
+        Cadence::Monthly => {
+            if date.len() >= 7 {
+                date[..7].to_string() // "YYYY-MM"
+            } else {
+                date.to_string()
+            }
+        }
+        Cadence::Quarterly => {
+            // Need at least "YYYY-MM" to derive a quarter.
+            if date.len() >= 7 {
+                if let Ok(m) = date[5..7].parse::<u8>() {
+                    let q = ((m - 1) / 3) + 1;
+                    return format!("{}-Q{}", &date[..4], q);
+                }
+            }
+            date.to_string()
+        }
+        Cadence::Biannual | Cadence::Annual => {
+            if date.len() >= 4 {
+                date[..4].to_string() // "YYYY"
+            } else {
+                date.to_string()
+            }
+        }
+        // Daily / Weekly / Unknown: assume the caller passed matching-granularity
+        // strings; no truncation.
+        _ => date.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,6 +1144,72 @@ mod tests {
         let f = detect_cross_source_gaps(DataSource::Press, "hkma-press-releases", &press, &data);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].kind, "cross_source_gap");
+    }
+
+    #[test]
+    fn detects_data_only_gap() {
+        // Data has a date with no press release → a data-only gap finding.
+        let press = vec!["2026-06-18".to_string()];
+        let data = vec!["2026-06-18".to_string(), "2026-06-19".to_string()];
+        let f = detect_cross_source_gaps(DataSource::Hkma, "daily-figures", &press, &data);
+        // Two findings: the press-only set is empty, but data-only has one date.
+        // (Only the data-only finding should be emitted.)
+        assert_eq!(f.len(), 1);
+        assert!(f[0].heuristic_summary.contains("no press release"));
+    }
+
+    #[test]
+    fn coerce_to_period_truncates_by_cadence() {
+        // Monthly: daily date → month.
+        assert_eq!(coerce_to_period("2026-05-31", Cadence::Monthly), "2026-05");
+        // Already-monthly passes through (truncated to itself).
+        assert_eq!(coerce_to_period("2026-05", Cadence::Monthly), "2026-05");
+        // Quarterly: derive the quarter from the month.
+        assert_eq!(
+            coerce_to_period("2026-05-31", Cadence::Quarterly),
+            "2026-Q2"
+        );
+        assert_eq!(
+            coerce_to_period("2026-01-15", Cadence::Quarterly),
+            "2026-Q1"
+        );
+        assert_eq!(
+            coerce_to_period("2026-12-31", Cadence::Quarterly),
+            "2026-Q4"
+        );
+        // Annual: just the year.
+        assert_eq!(coerce_to_period("2026-05-31", Cadence::Annual), "2026");
+        // Daily / Unknown: unchanged.
+        assert_eq!(coerce_to_period("2026-05-31", Cadence::Daily), "2026-05-31");
+        assert_eq!(
+            coerce_to_period("2026-05-31", Cadence::Unknown),
+            "2026-05-31"
+        );
+    }
+
+    #[test]
+    fn coerce_makes_monthly_data_comparable_to_daily_press() {
+        // The core cadence-mismatch scenario: monthly data record_ids vs daily
+        // press dates. Without coercion these never match; with Monthly coercion
+        // they align to "YYYY-MM".
+        let press = ["2026-05-31".to_string()]; // a release on May 31
+        let data = ["2026-05".to_string()]; // May's data row
+        let press_m: Vec<String> = press
+            .iter()
+            .map(|d| coerce_to_period(d, Cadence::Monthly))
+            .collect();
+        let data_m: Vec<String> = data
+            .iter()
+            .map(|d| coerce_to_period(d, Cadence::Monthly))
+            .collect();
+        // After coercion both sides are "2026-05" → no gap.
+        let f = detect_cross_source_gaps(
+            DataSource::LandRegistry,
+            "monthly-transactions",
+            &press_m,
+            &data_m,
+        );
+        assert!(f.is_empty(), "coerced dates match → no gap");
     }
 
     #[test]
