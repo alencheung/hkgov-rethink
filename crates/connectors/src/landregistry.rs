@@ -102,14 +102,23 @@ impl LandRegistryConnector {
                 status: e.status().map(|s| s.as_u16()).unwrap_or(0),
                 detail: format!("http: {e}"),
             })?
-            .json::<serde_json::Value>()
+            .text()
             .await
             .map_err(|e| Error::Decode {
                 origin: "landregistry",
-                backtrace: serde::de::Error::custom(format!("consideration decode: {e}")),
+                backtrace: serde::de::Error::custom(format!("consideration body read: {e}")),
             })?;
+        // The Land Registry publishes these JSON files with a UTF-8 BOM
+        // prefix. serde_json's `.json()` does not strip it, so the decode
+        // fails on byte 0xEF before parsing even starts. Read as text and
+        // strip the BOM, then parse.
+        let body = body.strip_prefix('\u{feff}').unwrap_or(&body);
+        let parsed: serde_json::Value = serde_json::from_str(body).map_err(|e| Error::Decode {
+            origin: "landregistry",
+            backtrace: serde::de::Error::custom(format!("consideration decode: {e}")),
+        })?;
         // The file is a JSON array of row objects.
-        Ok(body.as_array().cloned().unwrap_or_default())
+        Ok(parsed.as_array().cloned().unwrap_or_default())
     }
 
     /// Fetch the all-instruments file for the current month (or prior month if
@@ -136,14 +145,18 @@ impl LandRegistryConnector {
             if !resp.status().is_success() {
                 continue;
             }
-            let body = resp
-                .json::<serde_json::Value>()
-                .await
-                .map_err(|e| Error::Decode {
+            let body = resp.text().await.map_err(|e| Error::Decode {
+                origin: "landregistry",
+                backtrace: serde::de::Error::custom(format!("instruments body read: {e}")),
+            })?;
+            // Same BOM issue as fetch_consideration — see that method.
+            let body = body.strip_prefix('\u{feff}').unwrap_or(&body);
+            let parsed: serde_json::Value =
+                serde_json::from_str(body).map_err(|e| Error::Decode {
                     origin: "landregistry",
                     backtrace: serde::de::Error::custom(format!("instruments decode: {e}")),
                 })?;
-            return Ok(body.as_array().cloned().unwrap_or_default());
+            return Ok(parsed.as_array().cloned().unwrap_or_default());
         }
         Ok(Vec::new())
     }
@@ -314,6 +327,26 @@ mod tests {
         assert_eq!(parse_count(Some("42")), 42);
         assert_eq!(parse_count(Some("")), 0);
         assert_eq!(parse_count(None), 0);
+    }
+
+    // Regression: the Land Registry publishes its JSON files with a UTF-8 BOM
+    // prefix. serde_json rejects BOM-prefixed input, so `.json()` silently
+    // failed every fetch — Land Registry showed 0 records and its absence kept
+    // the agent's scan-readiness wait perpetually timing out at 180s. The
+    // fetchers now read as text and strip a leading BOM before parsing.
+    #[test]
+    fn bom_prefixed_json_parses_after_strip() {
+        // "\u{feff}" is the BOM; serde_json alone chokes on it.
+        let with_bom = "\u{feff}[{\"x\":1}]";
+        let stripped = with_bom.strip_prefix('\u{feff}').unwrap_or(with_bom);
+        let parsed: serde_json::Value =
+            serde_json::from_str(stripped).expect("must parse after BOM strip");
+        assert_eq!(parsed[0]["x"], 1, "content after BOM is intact");
+        // And confirm the un-stripped form fails — this is the bug we fixed.
+        assert!(
+            serde_json::from_str::<serde_json::Value>(with_bom).is_err(),
+            "serde_json must reject BOM-prefixed input (guards the regression)"
+        );
     }
 
     #[test]
