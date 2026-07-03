@@ -1449,15 +1449,35 @@
         ${actions}
       </div>`;
     }
-    // after rendering, lazy-load unprecedentedness for numeric insights
-    function hydrateUnprec(insights){
+    // after rendering, lazy-load unprecedentedness for numeric insights.
+    // THROTTLED: previously this fired one /v1/unprecedentedness call per
+    // numeric insight in a tight loop — up to ~200 concurrent requests the
+    // instant insights render. Each call is a compute-heavy percentile read,
+    // and the fan-out OOM-killed the container on cold start, crash-looping it
+    // before the in-memory store could warm (wiping all data on every restart).
+    // Now processed in a small bounded concurrency window so a freshly-booted
+    // container can serve these without being overwhelmed.
+    async function hydrateUnprec(insights){
+      const targets=[];
       for(const i of insights){
         if(i.kind!=='series_jump'&&i.kind!=='outlier'&&i.kind!=='threshold_crossing') continue;
         const ev=(i.evidence||[]).find(e=>e.context&&e.context.includes('current'))||(i.evidence||[])[0];
         if(!ev) continue;
         const v=valNum(ev.value); if(v===null) continue;
-        loadUnprec(i.source, i.dataset, ev.field, v).then(u=>{ const host=document.getElementById('unprec-'+cssEsc(i.id)); if(host&&u) host.innerHTML=unprecBandHTML(u, i.source, i.dataset, ev.field); });
+        targets.push({i, ev, v});
       }
+      const CONCURRENCY=5;
+      let idx=0;
+      async function worker(){
+        while(idx<targets.length){
+          const {i,ev,v}=targets[idx++]; // claim next; workers share idx
+          const u=await loadUnprec(i.source, i.dataset, ev.field, v);
+          const host=document.getElementById('unprec-'+cssEsc(i.id));
+          if(host&&u) host.innerHTML=unprecBandHTML(u, i.source, i.dataset, ev.field);
+        }
+      }
+      // Spawn a bounded pool of workers; each pulls the next target until done.
+      await Promise.all(Array.from({length:Math.min(CONCURRENCY,targets.length)},worker));
     }
 
     // ============ brief + facets ============
