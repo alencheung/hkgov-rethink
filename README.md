@@ -359,12 +359,11 @@ to Railway's injected `PORT` at runtime (see `crates/api/src/main.rs`).
    - `HKGOV_API__RATE_PER_SEC` = `20` — the default `0` is an unsafe production value.
    - `HKGOV_AGENT__ENABLED` = `true` — so insights + the Silence Index populate.
    - Do **not** set `PORT`; Railway injects it.
-3. Point the dashboard at the Railway origin: edit `DEFAULT_API_BASE` in
-   `dashboard/index.html` to the Railway URL (e.g.
-   `https://<your-service>.up.railway.app`) and redeploy to Netlify. (A
-   user-saved base or the header field always overrides this, so it never
-   traps anyone.) If you skip this, Netlify visitors must paste the Railway
-   URL into the API base-URL field on first visit.
+3. The dashboard already defaults to the Railway origin via `DEFAULT_API_BASE`
+   in `dashboard/index.html` (currently
+   `https://hkgov-rethink-production.up.railway.app`). A user-saved base or the
+   header field always overrides this, so it never traps anyone. Change this
+   constant only if you redeploy the API to a different Railway service URL.
 
 Alternative: deploy the prebuilt image from GHCR — Railway → New → Docker Image →
 `ghcr.io/alencheung/hkgov-rethink:latest` (published on `v*` tags).
