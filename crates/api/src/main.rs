@@ -165,8 +165,27 @@ async fn main() -> anyhow::Result<()> {
 
     let app = routes::router(state);
 
-    let listener = tokio::net::TcpListener::bind(&settings.api.bind).await?;
-    tracing::info!(bind = %settings.api.bind, agent_enabled = _agent, "hkgov-api listening");
+    // Railway (and most PaaS hosts: Fly, Render, Cloud Run) inject a `PORT`
+    // env var and route their public proxy to that exact port — the
+    // Dockerfile's EXPOSE is informational only and is ignored for routing.
+    // Honoring `PORT` ahead of `api.bind` is what makes the container reachable
+    // there. `PORT` carries just the port (e.g. "8080"), so we splice it onto
+    // the wildcard host from config; a full `host:port` in `PORT` is also
+    // accepted. Locally (no `PORT`) we fall through to `api.bind`, preserving
+    // the zero-config `0.0.0.0:8080` default and the `HKGOV_API__BIND` override.
+    let bind = match std::env::var("PORT") {
+        Ok(p) if !p.trim().is_empty() => {
+            let p = p.trim();
+            if p.contains(':') {
+                p.to_string()
+            } else {
+                format!("0.0.0.0:{p}")
+            }
+        }
+        _ => settings.api.bind.clone(),
+    };
+    let listener = tokio::net::TcpListener::bind(&bind).await?;
+    tracing::info!(bind = %bind, agent_enabled = _agent, "hkgov-api listening");
     // V-003: `into_make_service_with_connect_info` exposes the peer IP to the
     // rate-limit middleware (it keys the token bucket per source IP).
     axum::serve(

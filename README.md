@@ -342,6 +342,33 @@ copied into a `debian:bookworm-slim` runtime that also carries `ca-certificates`
 [`.github/workflows/release.yml`](.github/workflows/release.yml).) A smaller
 distroless runtime is a future hardening item.
 
+### Railway (backend host)
+
+Netlify serves the static dashboard only — it cannot run the Rust binary. The
+recommended split is **dashboard → Netlify, API → Railway**. The repo already
+carries a [`railway.toml`](railway.toml) (healthcheck on `/ready`, restart
+policy), and the Dockerfile builds cleanly on Railway's builder (the
+BuildKit-only cache mounts were dropped for this in `4d5dce4`). The binary binds
+to Railway's injected `PORT` at runtime (see `crates/api/src/main.rs`).
+
+**Deploy steps:**
+1. Railway → New → GitHub repo. Railway auto-detects the Dockerfile.
+2. In **Variables**, set (none of these are committed defaults):
+   - `HKGOV_API__CORS_ORIGINS` = `["https://hkgov-rethink.netlify.app"]` — *required* for the split deploy; the default same-origin CORS policy would otherwise block the Netlify dashboard's calls.
+   - `HKGOV_API__API_KEY` — a strong secret; the dashboard's X-API-Key field must match.
+   - `HKGOV_API__RATE_PER_SEC` = `20` — the default `0` is an unsafe production value.
+   - `HKGOV_AGENT__ENABLED` = `true` — so insights + the Silence Index populate.
+   - Do **not** set `PORT`; Railway injects it.
+3. Point the dashboard at the Railway origin: edit `DEFAULT_API_BASE` in
+   `dashboard/index.html` to the Railway URL (e.g.
+   `https://<your-service>.up.railway.app`) and redeploy to Netlify. (A
+   user-saved base or the header field always overrides this, so it never
+   traps anyone.) If you skip this, Netlify visitors must paste the Railway
+   URL into the API base-URL field on first visit.
+
+Alternative: deploy the prebuilt image from GHCR — Railway → New → Docker Image →
+`ghcr.io/alencheung/hkgov-rethink:latest` (published on `v*` tags).
+
 ---
 
 ## Python client
