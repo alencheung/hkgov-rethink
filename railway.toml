@@ -23,12 +23,19 @@
 #                                   actually populate.
 
 [deploy]
-# /ready (not /health) folds in circuit-breaker state + warm cache, so a
-# degraded container stops receiving traffic. Matches the Dockerfile HEALTHCHECK.
-healthcheckPath = "/ready"
-healthcheckTimeout = 30
+# /health is pure liveness (process up + serving). We intentionally do NOT use
+# /ready here: /ready folds in upstream circuit-breaker state, so a single
+# rate-limited source (e.g. HKMA tripping its breaker during a 151-dataset
+# cold start) flips /ready to 503 — which would make Railway mark the
+# container unhealthy and restart-loop it, even though the API is fully
+# functional and serving cached data + insights. /ready is the right signal
+# for a load balancer to drain a replica, not for a deploy healthcheck to
+# decide whether to restart the only replica.
+healthcheckPath = "/health"
+healthcheckTimeout = 10
 # Sleep before the first probe to cover the release-build cold start + the
-# initial cache warm-up pass.
+# initial cache warm-up pass (the agent's readiness wait is ~180s, but /health
+# is up within seconds of boot).
 startPeriodSeconds = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
