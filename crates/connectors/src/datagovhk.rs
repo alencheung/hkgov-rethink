@@ -383,6 +383,7 @@ impl DataGovHkConnector {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(20_000))
             .gzip(true)
+            .redirect(reqwest::redirect::Policy::none())
             .pool_max_idle_per_host(32)
             .user_agent(concat!("hkgov-rethink/", env!("CARGO_PKG_VERSION")))
             .build()

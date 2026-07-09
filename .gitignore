@@ -25,6 +25,9 @@ NDH6SA~M
 # data dumps
 .archive_all.json
 *.archive.json
+# press.html: a one-off generated data dump; not served (dashboard is embedded
+# via include_str!) and not referenced anywhere in source.
+press.html
 
 # Scratch / probe working dir (live endpoint verification artifacts, not source)
 .probe/

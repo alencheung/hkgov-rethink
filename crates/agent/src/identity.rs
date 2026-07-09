@@ -97,7 +97,15 @@ pub struct UserStore {
     /// Monotonic counter mixed into token/session id hashing so two tokens
     /// issued in the same nanosecond for the same email still differ.
     counter: Arc<std::sync::atomic::AtomicU64>,
+    /// Counts token issuances; `maybe_reap_expired` sweeps once every
+    /// [`REAP_EVERY_ISSUES`] to amortize the cost of purging expired state.
+    issue_count: Arc<std::sync::atomic::AtomicU64>,
 }
+
+/// Purge expired/redeemed tokens and expired sessions every N token issuances.
+/// Reaping on every issue would add lock contention to the unauthenticated path;
+/// this batches the work.
+const REAP_EVERY_ISSUES: u64 = 16;
 
 impl UserStore {
     pub fn new() -> Self {
@@ -109,6 +117,13 @@ impl UserStore {
     /// the token — the caller delivers it (email sink in production; directly
     /// in dev/CI).
     pub async fn issue_token(&self, email: &str) -> Token {
+        // Reap expired/redeemed tokens + expired sessions periodically so the
+        // in-process maps can't grow without bound. Triggered opportunistically
+        // on token issuance (the unauthenticated entry point) every N issues —
+        // without this, every magic-link request (including from an attacker)
+        // permanently grows `tokens` by one row.
+        self.maybe_reap_expired();
+
         // Provision the user if new (idempotent on email).
         let user_id = user_id_for(email);
         let mut users = self.users.write().await;
@@ -180,6 +195,30 @@ impl UserStore {
         let user_id = s.user_id.clone();
         drop(sessions);
         self.users.read().await.get(&user_id).cloned()
+    }
+
+    /// Periodically purge expired/redeemed tokens and expired sessions so the
+    /// in-process maps stay bounded. Spawns the actual sweep off the caller's
+    /// task when the issue counter hits [`REAP_EVERY_ISSUES`]; otherwise a cheap
+    /// atomic read. Without this, every token issuance (including unauthenticated
+    /// ones) permanently grows `tokens`, and expired sessions accumulate forever.
+    fn maybe_reap_expired(&self) {
+        let prev = self
+            .issue_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if !prev.is_multiple_of(REAP_EVERY_ISSUES) {
+            return;
+        }
+        let tokens = self.tokens.clone();
+        let sessions = self.sessions.clone();
+        tokio::spawn(async move {
+            let now = Utc::now();
+            let mut t = tokens.write().await;
+            t.retain(|_, tok| !tok.redeemed && tok.expires_at > now);
+            drop(t);
+            let mut s = sessions.write().await;
+            s.retain(|_, sess| sess.expires_at > now);
+        });
     }
 
     /// Look up a user by id.

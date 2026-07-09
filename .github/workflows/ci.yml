@@ -5,6 +5,17 @@ on:
     branches: [main, master]
   pull_request:
 
+# Least-privilege: this workflow only reads code (no releases, deploys, or PR
+# comments). Explicit `permissions` overrides the default GITHUB_TOKEN scope.
+permissions:
+  contents: read
+
+# Repeated pushes to the same branch cancel the in-flight run, so a fast
+# follow-up commit doesn't queue a redundant ~10-15 min Rust build.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -12,6 +23,7 @@ env:
 jobs:
   fmt-clippy-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -39,6 +51,7 @@ jobs:
   # external service to build (only to *run*), so they belong in CI.
   features:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

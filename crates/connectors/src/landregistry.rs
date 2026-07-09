@@ -20,7 +20,7 @@
 //!   (e.g. `"Number of Secondary Sales for ASP Residential Building Units"`);
 //!   we filter for the Primary/Secondary Sales rows.
 
-use crate::{Connector, DatasetSpec};
+use crate::{strip_bom, Connector, DatasetSpec};
 use async_trait::async_trait;
 use chrono::Utc;
 use hkgov_common::{
@@ -75,6 +75,7 @@ impl LandRegistryConnector {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(30_000))
             .gzip(true)
+            .redirect(reqwest::redirect::Policy::none())
             .pool_max_idle_per_host(16)
             .user_agent(concat!("hkgov-rethink/", env!("CARGO_PKG_VERSION")))
             .build()
@@ -112,7 +113,7 @@ impl LandRegistryConnector {
         // prefix. serde_json's `.json()` does not strip it, so the decode
         // fails on byte 0xEF before parsing even starts. Read as text and
         // strip the BOM, then parse.
-        let body = body.strip_prefix('\u{feff}').unwrap_or(&body);
+        let body = strip_bom(&body);
         let parsed: serde_json::Value = serde_json::from_str(body).map_err(|e| Error::Decode {
             origin: "landregistry",
             backtrace: serde::de::Error::custom(format!("consideration decode: {e}")),
@@ -150,7 +151,7 @@ impl LandRegistryConnector {
                 backtrace: serde::de::Error::custom(format!("instruments body read: {e}")),
             })?;
             // Same BOM issue as fetch_consideration — see that method.
-            let body = body.strip_prefix('\u{feff}').unwrap_or(&body);
+            let body = strip_bom(&body);
             let parsed: serde_json::Value =
                 serde_json::from_str(body).map_err(|e| Error::Decode {
                     origin: "landregistry",

@@ -250,10 +250,12 @@ async fn principal_id(users: &UserStore, headers: &HeaderMap) -> Option<String> 
 }
 
 /// Require an authenticated principal, returning its id, or a 401. Used by the
-/// mutating routes so they can never operate without a resolved owner.
+/// mutating routes so they can never operate without a resolved owner. Returns
+/// `Unauthorized` (401), not `BadRequest` (400): a missing/invalid credential is
+/// a 401 condition, distinct from a malformed request.
 fn require_principal(id: Option<String>) -> Result<String, ApiError> {
     id.ok_or_else(|| {
-        ApiError(hkgov_common::Error::BadRequest(
+        ApiError(hkgov_common::Error::Unauthorized(
             "authentication required: send a valid Authorization: Bearer {session} \
              (obtain one from POST /v1/auth/request-token + /v1/auth/redeem)"
                 .into(),
@@ -1318,18 +1320,22 @@ async fn redeem_auth_token(
 }
 
 /// Resolve the `Authorization: Bearer {session}` header to the current user.
-/// Returns 404 when no session is present (not 401, to match the existing
-/// auth model — the API-key gate already handles 401).
+/// Returns 401 when no (valid) session is present, so a client gating UI on auth
+/// gets a distinct status from a successful call (matching `require_principal`).
 async fn auth_me(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-) -> Json<Option<hkgov_agent::User>> {
+) -> Result<Json<hkgov_agent::User>, ApiError> {
     let session = bearer_token(&headers);
     let user = match session {
         Some(s) => state.users.lookup_session(&s).await,
         None => None,
     };
-    Json(user)
+    user.map(Json).ok_or_else(|| {
+        ApiError(hkgov_common::Error::Unauthorized(
+            "no active session: send a valid Authorization: Bearer {session}".into(),
+        ))
+    })
 }
 
 /// Extract the `Bearer {token}` value from an Authorization header, if present.

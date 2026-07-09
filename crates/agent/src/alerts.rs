@@ -18,11 +18,19 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use hkgov_common::{AlertSettings, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
 #[cfg(feature = "alerts")]
 use {crate::alerts_webhook_deps::build_webhook_client, serde_json::Value, std::time::Duration};
+
+/// Maximum number of dispatched insight ids the dedup window retains. The
+/// dispatcher fans out on every supervisor pass, so without a cap the set of
+/// seen ids grows without bound over the process lifetime (distinct findings
+/// accumulate forever). When the cap is hit the oldest id is evicted, which at
+/// worst lets a re-occurring finding re-alert once — acceptable since alert
+/// delivery is logged and idempotent at the sink.
+const MAX_DISPATCHED_IDS: usize = 4096;
 
 /// What every alert sink must do. Implementations are fire-and-forget: a
 /// delivery failure is logged in the [`AlertLog`] but does not abort the fan-out
@@ -101,8 +109,41 @@ impl AlertLog {
 pub struct AlertDispatcher {
     sinks: Vec<Box<dyn AlertSink>>,
     min_severity: InsightSeverity,
-    dispatched: Mutex<HashSet<String>>,
+    dispatched: Mutex<DispatchedWindow>,
     log: Arc<AlertLog>,
+}
+
+/// Bounded "recently dispatched" window: O(1) membership check via the set,
+/// FIFO eviction via the deque when [`MAX_DISPATCHED_IDS`] is exceeded. Keeps
+/// the dedup memory footprint capped for the process lifetime.
+struct DispatchedWindow {
+    ids: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl DispatchedWindow {
+    fn new() -> Self {
+        Self {
+            ids: HashSet::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    /// Returns `true` if `id` was already present (already dispatched).
+    /// Otherwise inserts it, evicting the oldest entry when over the cap.
+    fn mark(&mut self, id: &str) -> bool {
+        if self.ids.contains(id) {
+            return true;
+        }
+        if self.ids.len() >= MAX_DISPATCHED_IDS {
+            if let Some(oldest) = self.order.pop_front() {
+                self.ids.remove(&oldest);
+            }
+        }
+        self.ids.insert(id.to_string());
+        self.order.push_back(id.to_string());
+        false
+    }
 }
 
 impl AlertDispatcher {
@@ -156,7 +197,7 @@ impl AlertDispatcher {
         Some(Self {
             sinks,
             min_severity: parse_severity(&settings.min_severity),
-            dispatched: Mutex::new(HashSet::new()),
+            dispatched: Mutex::new(DispatchedWindow::new()),
             log: Arc::new(AlertLog::new(200)),
         })
     }
@@ -166,7 +207,7 @@ impl AlertDispatcher {
         Self {
             sinks,
             min_severity,
-            dispatched: Mutex::new(HashSet::new()),
+            dispatched: Mutex::new(DispatchedWindow::new()),
             log: Arc::new(AlertLog::new(200)),
         }
     }
@@ -185,15 +226,10 @@ impl AlertDispatcher {
             if severity_rank(&insight.severity) < threshold {
                 continue;
             }
-            // Dedup check + mark atomically.
+            // Dedup check + mark atomically (bounded window).
             let already = {
                 let mut d = self.dispatched.lock().unwrap();
-                if d.contains(&insight.id) {
-                    true
-                } else {
-                    d.insert(insight.id.clone());
-                    false
-                }
+                d.mark(&insight.id)
             };
             if already {
                 continue;

@@ -203,8 +203,18 @@ async fn main() -> anyhow::Result<()> {
 fn build_llm_client(settings: &Settings) -> Arc<dyn LlmClient> {
     #[cfg(feature = "llm")]
     if !settings.agent.llm_base_url.is_empty() {
-        if let Ok(c) = hkgov_agent::llm::HttpLlmClient::new(&settings.agent) {
-            return Arc::new(c);
+        match hkgov_agent::llm::HttpLlmClient::new(&settings.agent) {
+            Ok(c) => return Arc::new(c),
+            // Surface the failure rather than silently degrading to the
+            // heuristic keyword matcher. Without this, a misconfigured base URL
+            // or bad key boots cleanly and /v1/ask quietly returns shallow
+            // answers with no signal to the operator.
+            Err(e) => tracing::warn!(
+                error = %e,
+                base_url = %settings.agent.llm_base_url,
+                "LLM client construction failed; falling back to the heuristic \
+                 client. Rich /v1/ask framing will be disabled until this is fixed."
+            ),
         }
     }
     let _ = settings;

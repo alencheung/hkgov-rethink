@@ -211,14 +211,33 @@ impl InvestigationStore {
     /// variant mutated any id with no ownership check, so an attacker could
     /// inject steps into another user's case file by id. This refuses unless
     /// the caller owns the record.
+    ///
+    /// The ownership check is performed *inside* the write lock (not via a
+    /// separate `assert_owned` read first). A check-then-act split across two
+    /// lock acquisitions is a TOCTOU: ownership could flip (or the record be
+    /// deleted+recreated by another tenant) in the window between the read
+    /// release and the write acquire. `update_owned` already does this right;
+    /// this mirrors it.
     pub async fn append_step_owned(
         &self,
         id: &str,
         owner: &str,
         step: InvestigationStep,
     ) -> Option<Investigation> {
-        self.assert_owned(id, owner).await?;
-        self.append_step(id, step).await
+        let mut w = self.inner.write().await;
+        let inv = w.get_mut(id)?;
+        // Ownership gate inside the lock: a caller who doesn't own the record
+        // gets `None`, identical to "not found" (no cross-tenant existence leak).
+        if !owner.is_empty() && inv.owner != owner {
+            return None;
+        }
+        let mut step = step;
+        let next = inv.steps.len() + 1;
+        step.id = format!("s{next}");
+        step.executed_at = Utc::now();
+        inv.steps.push(step);
+        inv.updated_at = Utc::now();
+        Some(inv.clone())
     }
 
     /// Add a case-level note.
@@ -238,26 +257,28 @@ impl InvestigationStore {
     /// Owner-scoped [`add_note`](Self::add_note). V-004 fix: the bare variant
     /// mutated any id with no ownership check. This refuses unless the caller
     /// owns the record.
+    ///
+    /// Ownership is checked inside the write lock (see `append_step_owned` for
+    /// why the check-then-act split across two locks was a TOCTOU).
     pub async fn add_note_owned(
         &self,
         id: &str,
         owner: &str,
         body: String,
     ) -> Option<Investigation> {
-        self.assert_owned(id, owner).await?;
-        self.add_note(id, body).await
-    }
-
-    /// Returns `Some(())` iff the record exists AND (owner is empty OR the
-    /// record's owner matches). The single gate every owned_* method shares.
-    async fn assert_owned(&self, id: &str, owner: &str) -> Option<()> {
-        let r = self.inner.read().await;
-        let inv = r.get(id)?;
-        if owner.is_empty() || inv.owner == owner {
-            Some(())
-        } else {
-            None
+        let mut w = self.inner.write().await;
+        let inv = w.get_mut(id)?;
+        if !owner.is_empty() && inv.owner != owner {
+            return None;
         }
+        let note = InvestigationNote {
+            id: format!("n{}", inv.notes.len() + 1),
+            body,
+            created_at: Utc::now(),
+        };
+        inv.notes.push(note);
+        inv.updated_at = Utc::now();
+        Some(inv.clone())
     }
 }
 

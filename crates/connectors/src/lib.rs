@@ -23,6 +23,13 @@ pub mod rvd;
 use async_trait::async_trait;
 use hkgov_common::{Cadence, Category, DataSource, NormalizedRecord, Result};
 
+/// Strip a leading UTF-8 BOM if present. HK gov feeds occasionally ship one
+/// (the Land Registry JSON feed did — see commit "strip UTF-8 BOM"). serde_json
+/// rejects a leading BOM, so callers must strip it before parsing text bodies.
+pub(crate) fn strip_bom(s: &str) -> &str {
+    s.strip_prefix('\u{feff}').unwrap_or(s)
+}
+
 /// What every connector must do. Implementations are constructed once at startup
 /// and shared (via `Arc`) across the ingestion scheduler and reload fan-out.
 #[async_trait]

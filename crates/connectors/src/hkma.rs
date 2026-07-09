@@ -73,9 +73,12 @@ struct HkmaDataset {
 }
 
 impl HkmaDataset {
-    /// Render the full fetch URL (path + required query params + pagesize).
-    fn url(&self, base_url: &str) -> String {
-        let mut url = format!("{base_url}/{}?pagesize=1000", self.path);
+    /// Render the full fetch URL (path + required query params + pagesize +
+    /// offset). HKMA paginates via the `offset` query param (record offset,
+    /// not page number); `pagesize=1000` is the upstream max. `offset=0` is
+    /// the first page.
+    fn url(&self, base_url: &str, offset: u64) -> String {
+        let mut url = format!("{base_url}/{}?pagesize=1000&offset={offset}", self.path);
         if let Some(seg) = self.segment {
             url.push_str("&segment=");
             url.push_str(seg);
@@ -1791,6 +1794,7 @@ impl HkmaConnector {
         let mut builder = reqwest::Client::builder()
             .timeout(Duration::from_millis(settings.hkma_timeout_ms))
             .gzip(true)
+            .redirect(reqwest::redirect::Policy::none())
             .pool_max_idle_per_host(32)
             .user_agent(concat!("hkgov-rethink/", env!("CARGO_PKG_VERSION")));
 
@@ -1917,26 +1921,63 @@ impl Connector for HkmaConnector {
         let ds = self.dataset(dataset).ok_or_else(|| {
             Error::Internal(format!("hkma: no path mapping for dataset {dataset}"))
         })?;
-        let url = ds.url(&self.base_url);
-
-        let json = self.get_with_retry(&url).await?;
-        let env: HkmaEnvelope = serde_json::from_value(json).map_err(|e| Error::Decode {
-            origin: "hkma",
-            backtrace: e,
-        })?;
-
-        if !env.header.success {
-            return Err(Error::Upstream {
-                origin: "hkma",
-                status: 200,
-                detail: format!("{}: {}", env.header.err_code, env.header.err_msg),
-            });
-        }
 
         let now = Utc::now();
-        let records = env
-            .result
-            .records
+        let mut raw_records: Vec<serde_json::Value> = Vec::new();
+        let mut datasize: u64 = 0;
+        let mut offset: u64 = 0;
+        // Safety cap: the HKMA API pages at 1000 records. 50 pages caps a
+        // single dataset fetch at 50000 records, which is well above every
+        // dataset in the verified catalog (the largest is a few thousand).
+        // This guards against an unbounded loop if the upstream lies about
+        // `datasize` or returns more records than it reports.
+        const MAX_PAGES: u32 = 50;
+        for page in 0..MAX_PAGES {
+            let url = ds.url(&self.base_url, offset);
+            let json = self.get_with_retry(&url).await?;
+            let env: HkmaEnvelope = serde_json::from_value(json).map_err(|e| Error::Decode {
+                origin: "hkma",
+                backtrace: e,
+            })?;
+
+            if !env.header.success {
+                return Err(Error::Upstream {
+                    origin: "hkma",
+                    status: 200,
+                    detail: format!("{}: {}", env.header.err_code, env.header.err_msg),
+                });
+            }
+
+            // On the first page, capture the declared total record count so we
+            // know how far to page.
+            if page == 0 {
+                datasize = env.result.datasize;
+            }
+            let returned = env.result.records.len() as u64;
+            raw_records.extend(env.result.records);
+
+            // Stop when we've collected everything the upstream reported, or
+            // when a page returns fewer than a full page (last page / empty).
+            if returned == 0 || raw_records.len() as u64 >= datasize {
+                break;
+            }
+            offset += returned;
+        }
+
+        if (raw_records.len() as u64) < datasize {
+            // We hit MAX_PAGES before collecting everything. Surface it loudly
+            // so the truncation is never silent.
+            tracing::warn!(
+                dataset,
+                expected = datasize,
+                fetched = raw_records.len(),
+                skipped = datasize.saturating_sub(raw_records.len() as u64),
+                "hkma: dataset truncated at safety cap ({} pages); increase MAX_PAGES if this dataset legitimately exceeds it",
+                MAX_PAGES,
+            );
+        }
+
+        let records: Vec<NormalizedRecord> = raw_records
             .into_iter()
             .map(|raw| {
                 let fields = normalize_row(&raw);
@@ -1953,7 +1994,8 @@ impl Connector for HkmaConnector {
 
         tracing::info!(
             dataset,
-            count = env.result.datasize,
+            count = datasize,
+            fetched = records.len(),
             "hkma: fetched dataset"
         );
         Ok(records)
@@ -2245,8 +2287,8 @@ mod tests {
             .find(|d| d.slug == "capital-market-statistics")
             .unwrap();
         assert_eq!(
-            plain.url("https://api.hkma.gov.hk/public"),
-            "https://api.hkma.gov.hk/public/market-data-and-statistics/monthly-statistical-bulletin/financial/capital-market-statistics?pagesize=1000"
+            plain.url("https://api.hkma.gov.hk/public", 0),
+            "https://api.hkma.gov.hk/public/market-data-and-statistics/monthly-statistical-bulletin/financial/capital-market-statistics?pagesize=1000&offset=0"
         );
 
         let seg = DATASETS
@@ -2254,8 +2296,8 @@ mod tests {
             .find(|d| d.slug == "efbn-tender-results-efb")
             .unwrap();
         assert_eq!(
-            seg.url("https://api.hkma.gov.hk/public"),
-            "https://api.hkma.gov.hk/public/market-data-and-statistics/monthly-statistical-bulletin/efbn/efbn-tender-results-efb?pagesize=1000&segment=28day"
+            seg.url("https://api.hkma.gov.hk/public", 0),
+            "https://api.hkma.gov.hk/public/market-data-and-statistics/monthly-statistical-bulletin/efbn/efbn-tender-results-efb?pagesize=1000&offset=0&segment=28day"
         );
 
         let lang_seg = DATASETS
@@ -2263,8 +2305,14 @@ mod tests {
             .find(|d| d.slug == "register-svf-licensees")
             .unwrap();
         assert_eq!(
-            lang_seg.url("https://api.hkma.gov.hk/public"),
-            "https://api.hkma.gov.hk/public/bank-svf-info/register-svf-licensees?pagesize=1000&segment=SVFLic&lang=en"
+            lang_seg.url("https://api.hkma.gov.hk/public", 0),
+            "https://api.hkma.gov.hk/public/bank-svf-info/register-svf-licensees?pagesize=1000&offset=0&segment=SVFLic&lang=en"
+        );
+
+        // Offset advances the record window for follow-up pages.
+        assert_eq!(
+            plain.url("https://api.hkma.gov.hk/public", 2000),
+            "https://api.hkma.gov.hk/public/market-data-and-statistics/monthly-statistical-bulletin/financial/capital-market-statistics?pagesize=1000&offset=2000"
         );
     }
 

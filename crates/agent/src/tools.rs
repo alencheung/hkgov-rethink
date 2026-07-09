@@ -18,8 +18,8 @@
 //! - [`RunDetectorTool`] — wraps any `analysis::*` detector by name.
 
 use crate::analysis::{
-    detect_benchmark_deviation, detect_correlation, detect_cross_source_gaps, detect_outliers,
-    detect_proxy_divergence, detect_seasonality, detect_series_jumps_cadenced,
+    coerce_to_period, detect_benchmark_deviation, detect_correlation, detect_cross_source_gaps,
+    detect_outliers, detect_proxy_divergence, detect_seasonality, detect_series_jumps_cadenced,
     detect_year_over_year, Finding, DEFAULT_BENCHMARK_PCT, DEFAULT_CORRELATION_R,
     DEFAULT_OUTLIER_Z, DEFAULT_PCT_THRESHOLD, DEFAULT_PROXY_DELTA_PCT, DEFAULT_PROXY_R,
     DEFAULT_SEASONALITY_R,
@@ -633,8 +633,52 @@ async fn run_gap_via_tool(
         Err(e) => return Err(e),
     };
 
-    let findings = detect_cross_source_gaps(source, dataset, &press_dates, &data_dates);
+    // Cadence-aware coercion, matching the scheduler path (scheduler.rs uses the
+    // configured `target.cadence`; the tool path has no such config, so infer it
+    // from the data-side date strings). Without this the daily press dates and a
+    // monthly/quarterly companion never intersect, so EVERY press release would
+    // register as a spurious gap — a silent divergence between what the agent
+    // loop reports here and what the scheduler actually stores (D-006 invariant:
+    // the preview IS what will fire).
+    let cadence = infer_cadence(&data_dates);
+    let press_periods: Vec<String> = press_dates
+        .iter()
+        .map(|d| coerce_to_period(d, cadence))
+        .collect();
+    let data_periods: Vec<String> = data_dates
+        .iter()
+        .map(|d| coerce_to_period(d, cadence))
+        .collect();
+
+    let findings = detect_cross_source_gaps(source, dataset, &press_periods, &data_periods);
     Ok(json!({ "detector": "cross_source_gap", "findings": findings }))
+}
+
+/// Infer a dataset's reporting cadence from its date/id strings. The tool path
+/// has no configured `cadence` (the scheduler does), so derive it from the shape
+/// of the record ids so period coercion matches what the scheduler applies:
+/// - `"YYYY-MM-DD"` (len 10) → Daily
+/// - `"YYYY-MM"` (len 7) → Monthly
+/// - `"YYYY-Qn"` → Quarterly
+/// - `"YYYY"` (len 4) → Annual
+///
+/// Falls back to `Unknown` (no coercion) when the shape is ambiguous.
+fn infer_cadence(dates: &[String]) -> Cadence {
+    for d in dates {
+        if d.len() >= 10 {
+            return Cadence::Daily;
+        }
+        if d.len() == 7 {
+            return Cadence::Monthly;
+        }
+        if d.len() == 6 && d.contains('-') {
+            return Cadence::Quarterly;
+        }
+        if d.len() <= 4 {
+            return Cadence::Annual;
+        }
+    }
+    Cadence::Unknown
 }
 
 /// Run a two-dataset detector (`proxy_divergence` or `benchmark_deviation`)

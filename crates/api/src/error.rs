@@ -45,6 +45,7 @@ fn kind_for(e: &Error) -> &'static str {
         Error::Decode { .. } => "decode",
         Error::UnknownSource(_) | Error::NotFound(_) => "not_found",
         Error::BadRequest(_) => "bad_request",
+        Error::Unauthorized(_) => "unauthorized",
         Error::Store(_) => "store",
         Error::Agent(_) => "agent",
         Error::Config(_) => "config",

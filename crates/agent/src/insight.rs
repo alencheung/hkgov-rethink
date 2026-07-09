@@ -165,11 +165,23 @@ pub struct EvidenceRef {
 /// [`EvolutionDiff`] is attached to the new version. If the content is
 /// unchanged, the upsert is a no-op (this also fixes the prior behavior where
 /// every pass rewrote `generated_at` even when nothing changed).
+///
+/// Bounded history: each insight's revision list is capped at
+/// [`MAX_HISTORY_PER_INSIGHT`]. The supervisor re-fires on every pass, so
+/// without a cap a wobbling confidence/summary would grow the list without bound
+/// and leak memory over the process lifetime (same defect class as the
+/// `hydrateUnprec` fan-out crash-loop). When the cap is hit the *oldest*
+/// revision is dropped, keeping the most recent context.
 #[derive(Default)]
 pub struct InsightStore {
     inner: Arc<RwLock<BTreeMap<String, Insight>>>,
     history: Arc<RwLock<BTreeMap<String, Vec<InsightRevision>>>>,
 }
+
+/// Maximum number of prior revisions retained per insight. `history()` returns
+/// newest-first, so dropping the oldest entry preserves the recent context a
+/// reader is most likely to cite.
+const MAX_HISTORY_PER_INSIGHT: usize = 20;
 
 impl InsightStore {
     pub fn new() -> Self {
@@ -221,6 +233,12 @@ impl InsightStore {
                 snapshot: prior_snapshot,
                 diff_from_previous: None,
             });
+            // Bound the revision list so a wobbling insight can't grow it
+            // without limit over the process lifetime. Drop the oldest.
+            if entry.len() > MAX_HISTORY_PER_INSIGHT {
+                let excess = entry.len() - MAX_HISTORY_PER_INSIGHT;
+                entry.drain(0..excess);
+            }
             w.insert(id, evolved);
             to_version
         } else {

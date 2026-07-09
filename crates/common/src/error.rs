@@ -37,6 +37,12 @@ pub enum Error {
     #[error("bad request: {0}")]
     BadRequest(String),
 
+    /// The caller is not authenticated. Distinct from [`Error::BadRequest`]
+    /// (400): a 401 means the request itself was fine but no valid credential
+    /// was supplied, so clients can distinguish "log in" from "fix your input".
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     /// Cache / store miss or backing failure.
     #[error("store error: {0}")]
     Store(String),
@@ -62,6 +68,7 @@ impl Error {
         match self {
             Error::UnknownSource(_) | Error::NotFound(_) => 404,
             Error::BadRequest(_) => 400,
+            Error::Unauthorized(_) => 401,
             Error::Upstream { .. } | Error::Store(_) => 502,
             Error::Agent(_) => 502,
             Error::Decode { .. } => 502,

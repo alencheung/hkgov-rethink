@@ -43,6 +43,7 @@ impl PressConnector {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(settings.hkma_timeout_ms))
             .gzip(true)
+            .redirect(reqwest::redirect::Policy::none())
             .pool_max_idle_per_host(16)
             .user_agent(concat!("hkgov-rethink/", env!("CARGO_PKG_VERSION")))
             .build()

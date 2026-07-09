@@ -46,7 +46,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=builder /hkgov-api /usr/local/bin/hkgov-api
 COPY config.toml /app/config.toml
-COPY dashboard/index.html /app/dashboard/index.html
+# NOTE: dashboard/index.html is intentionally NOT copied here. It is embedded
+# into the binary at compile time via include_str!("../../../dashboard/index.html")
+# (crates/api/src/routes.rs), so /app/dashboard/index.html would be dead weight.
+# The /dashboard + /cite/{id} routes serve the embedded string, never disk.
 
 # Non-root user.
 RUN useradd --create-home --uid 10001 hkgov
