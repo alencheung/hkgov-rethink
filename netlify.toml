@@ -22,10 +22,11 @@
   status = 200
 
 # ── Security headers ────────────────────────────────────────────────
-# Raises securityheaders.com grade to A+. The dashboard is a static,
-# client-rendered single HTML file, so CSP allows 'unsafe-inline' for
-# scripts/styles (73 inline event handlers + inline <style>/<script>)
-# while locking down everything else. Whitelist:
+# Raises securityheaders.com grade to A (no warnings). The dashboard's JS
+# was externalised to /app.js and all inline event handlers moved to a
+# data-action delegation pattern, so script-src no longer needs
+# 'unsafe-inline'. style-src still allows 'unsafe-inline' (inline <style>
+# + style attributes; not flagged by securityheaders.com). Whitelist:
 #   • https://cdn.jsdelivr.net  → uPlot (JS/CSS), Remixicon (CSS/font)
 #   • *.up.railway.app          → live API (fetch)
 # JSON-LD (application/ld+json) is exempt from script-src by the spec.
@@ -33,7 +34,7 @@
   for = "/*"
   [headers.values]
     Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
-    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: https:; font-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' https://hkgov-rethink-production.up.railway.app https://hkgov-rethink.up.railway.app; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
+    Content-Security-Policy = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: https:; font-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' https://hkgov-rethink-production.up.railway.app https://hkgov-rethink.up.railway.app; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
     X-Frame-Options = "DENY"
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "strict-origin-when-cross-origin"
