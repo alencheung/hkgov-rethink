@@ -31,6 +31,37 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+/// Paginate through ALL records for a dataset, not just the first page. The
+/// store's `get_page` never hands the caller unbounded arrays, so a single
+/// `get_page(id, 0, 500)` silently truncated any dataset larger than 500 rows
+/// before detection — a big dataset would be scored on its first 500 records
+/// only, with no warning. This pages until a short (or empty) batch, so the
+/// detector sees the whole feed.
+async fn collect_all_records(store: &Arc<MemoryStore>, id: &DatasetId) -> Vec<NormalizedRecord> {
+    let mut all = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let Ok(page) = store.get_page(id, offset, 500).await else {
+            break;
+        };
+        if page.records.is_empty() {
+            break;
+        }
+        let len = page.records.len();
+        all.extend(page.records);
+        if len < 500 {
+            break;
+        }
+        offset += len;
+    }
+    tracing::debug!(
+        dataset = %id.dataset,
+        count = all.len(),
+        "loaded records for detection"
+    );
+    all
+}
+
 /// What every agent tool must provide. Implementations are read-only with
 /// respect to the store — they never mutate ingested data.
 #[async_trait]
@@ -512,7 +543,7 @@ impl Tool for RunDetectorTool {
         }
 
         let id = DatasetId::new(source, dataset.clone());
-        let page = self.store.get_page(&id, 0, 500).await?;
+        let records = collect_all_records(&self.store, &id).await;
         let field = field.as_deref().ok_or_else(|| {
             hkgov_common::Error::Internal(format!("run_detector/{detector}: `field` required"))
         })?;
@@ -521,7 +552,7 @@ impl Tool for RunDetectorTool {
             "series_jump" => detect_series_jumps_cadenced(
                 source,
                 &dataset,
-                &page.records,
+                &records,
                 field,
                 threshold.unwrap_or(25.0),
                 cadence,
@@ -531,7 +562,7 @@ impl Tool for RunDetectorTool {
                 detect_year_over_year(
                     source,
                     &dataset,
-                    &page.records,
+                    &records,
                     field,
                     threshold.unwrap_or(DEFAULT_PCT_THRESHOLD),
                     ppy.max(1),
@@ -540,14 +571,14 @@ impl Tool for RunDetectorTool {
             "outlier" => detect_outliers(
                 source,
                 &dataset,
-                &page.records,
+                &records,
                 field,
                 threshold.unwrap_or(DEFAULT_OUTLIER_Z),
             ),
             "seasonality" => detect_seasonality(
                 source,
                 &dataset,
-                &page.records,
+                &records,
                 field,
                 threshold.unwrap_or(DEFAULT_SEASONALITY_R),
             ),
@@ -560,7 +591,7 @@ impl Tool for RunDetectorTool {
                 detect_correlation(
                     source,
                     &dataset,
-                    &page.records,
+                    &records,
                     field,
                     field_b,
                     threshold.unwrap_or(DEFAULT_CORRELATION_R),
@@ -615,23 +646,20 @@ async fn run_gap_via_tool(
     })?;
     let date_field = date_field.unwrap_or("date");
 
+    // Press side: extract the date field as strings. Page through ALL records
+    // (not just the first 500) so a large press feed isn't silently truncated.
     let press_id = DatasetId::new(source, dataset);
-    let press_dates: Vec<String> = match store.get_page(&press_id, 0, 500).await {
-        Ok(p) => p
-            .records
-            .iter()
-            .filter_map(|r| match r.fields.get(date_field) {
-                Some(RecordValue::Str(s)) => Some(s.clone()),
-                _ => None,
-            })
-            .collect(),
-        Err(e) => return Err(e),
-    };
+    let press_records = collect_all_records(store, &press_id).await;
+    let press_dates: Vec<String> = press_records
+        .iter()
+        .filter_map(|r| match r.fields.get(date_field) {
+            Some(RecordValue::Str(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
     let data_id = DatasetId::new(companion_source, companion_dataset);
-    let data_dates: Vec<String> = match store.get_page(&data_id, 0, 500).await {
-        Ok(p) => p.records.iter().map(|r| r.record_id.clone()).collect(),
-        Err(e) => return Err(e),
-    };
+    let data_records = collect_all_records(store, &data_id).await;
+    let data_dates: Vec<String> = data_records.iter().map(|r| r.record_id.clone()).collect();
 
     // Cadence-aware coercion, matching the scheduler path (scheduler.rs uses the
     // configured `target.cadence`; the tool path has no such config, so infer it
@@ -717,14 +745,9 @@ async fn run_two_dataset_detector(
         ))
     })?;
 
-    let primary = store
-        .get_page(&DatasetId::new(source, dataset), 0, 500)
-        .await?
-        .records;
-    let companion_recs = store
-        .get_page(&DatasetId::new(comp_source, comp_dataset), 0, 500)
-        .await?
-        .records;
+    let primary = collect_all_records(store, &DatasetId::new(source, dataset)).await;
+    let companion_recs =
+        collect_all_records(store, &DatasetId::new(comp_source, comp_dataset)).await;
 
     let findings = match detector {
         "proxy_divergence" => detect_proxy_divergence(

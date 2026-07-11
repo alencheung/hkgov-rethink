@@ -216,13 +216,16 @@ impl SignalStore {
     /// Fetch a signal, but only if `owner` owns it. V-004 fix: the bare `get`
     /// returned any signal by id with no ownership check, enabling cross-tenant
     /// reads/deletes. `None` for unknown OR not-owned — both look the same to
-    /// the caller (no existence oracle for another tenant's ids).
+    /// the caller (no existence oracle for another tenant's ids). The empty-owner
+    /// bypass is dead backcompat code now that identity is wired and
+    /// `principal_id` always returns non-empty — removing it closes a latent
+    /// authz hole.
     pub async fn get_owned(&self, id: &str, owner: &str) -> Option<Signal> {
         self.inner
             .read()
             .await
             .get(id)
-            .filter(|s| owner.is_empty() || s.owner == owner)
+            .filter(|s| s.owner == owner)
             .cloned()
     }
 
@@ -249,8 +252,10 @@ impl SignalStore {
         let mut w = self.inner.write().await;
         let existing = w.get_mut(id)?;
         // Ownership gate: a caller who doesn't own the record gets `None`,
-        // identical to "not found" (no cross-tenant existence leak).
-        if !owner.is_empty() && existing.owner != owner {
+        // identical to "not found" (no cross-tenant existence leak). The
+        // empty-owner bypass is dead backcompat code now that identity is wired —
+        // removing it closes a latent authz hole.
+        if existing.owner != owner {
             return None;
         }
         // Apply only the allow-listed mutable fields. Immutable fields
@@ -278,11 +283,13 @@ impl SignalStore {
     /// Delete a signal owned by `owner`. V-004 fix: the bare `delete` removed
     /// any id with no ownership check, so an attacker who learned another
     /// user's signal id (id format is enumerable) could destroy it. This
-    /// variant refuses unless the caller owns the record.
+    /// variant refuses unless the caller owns the record. The empty-owner bypass
+    /// is dead backcompat code now that identity is wired — removing it closes a
+    /// latent authz hole.
     pub async fn delete_owned(&self, id: &str, owner: &str) -> bool {
         let mut w = self.inner.write().await;
         match w.get(id) {
-            Some(s) if owner.is_empty() || s.owner == owner => {
+            Some(s) if s.owner == owner => {
                 w.remove(id);
                 true
             }

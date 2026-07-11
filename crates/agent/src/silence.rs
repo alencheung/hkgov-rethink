@@ -170,7 +170,13 @@ pub async fn build_index(
     period: &str,
     now: DateTime<Utc>,
 ) -> SilenceIndex {
-    let insights = store.list(500).await;
+    // Read the ENTIRE insight feed, not a capped page. The previous `list(500)`
+    // silently truncated at 500 insights, so a feed larger than that undercounted
+    // the flagship Silence Index number with no warning. `InsightStore::list`
+    // applies `.take(limit)` over an in-memory map, so `usize::MAX` materializes
+    // the whole feed without an unbounded-loop risk.
+    let insights = store.list(usize::MAX).await;
+    tracing::debug!(count = insights.len(), "silence index scoring insights");
     build_index_from_insights(&insights, source, period, now)
 }
 
