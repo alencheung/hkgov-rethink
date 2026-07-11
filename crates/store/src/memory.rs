@@ -6,7 +6,7 @@
 
 use crate::{DatasetId, RecordPage, RecordStore};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use hkgov_common::{Cadence, Category, DataSource, DatasetMeta, Error, NormalizedRecord, Result};
 use moka::future::Cache;
 use std::collections::HashMap;
@@ -25,12 +25,22 @@ struct RegisteredMeta {
     cadence: Cadence,
 }
 
+/// One cached dataset: its records plus the timestamp of the last `put_dataset`.
+///
+/// Keeping both in a single moka entry means `put_dataset` publishes them
+/// atomically in one [`Cache::insert`] — a concurrent `meta()` reader can never
+/// observe new records paired with a stale `last_refreshed_at` (the previous
+/// two-step insert raced in exactly that direction).
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    records: Arc<Vec<NormalizedRecord>>,
+    refreshed_at: DateTime<Utc>,
+}
+
 pub struct MemoryStore {
-    records: Cache<DatasetId, Arc<Vec<NormalizedRecord>>>,
+    records: Cache<DatasetId, CacheEntry>,
     /// Light-touch registry of static dataset metadata.
     registry: RwLock<HashMap<DatasetId, RegisteredMeta>>,
-    /// Last refresh timestamp per dataset.
-    refreshed_at: RwLock<HashMap<DatasetId, chrono::DateTime<Utc>>>,
 }
 
 impl MemoryStore {
@@ -42,7 +52,6 @@ impl MemoryStore {
         Self {
             records,
             registry: RwLock::new(HashMap::new()),
-            refreshed_at: RwLock::new(HashMap::new()),
         }
     }
 
@@ -81,13 +90,13 @@ impl RecordStore for MemoryStore {
         records: Vec<NormalizedRecord>,
     ) -> Result<()> {
         let now = Utc::now();
-        self.records
-            .insert(dataset_id.clone(), Arc::new(records))
-            .await;
-        self.refreshed_at
-            .write()
-            .await
-            .insert(dataset_id.clone(), now);
+        // Single atomic publish: records + refreshed_at land together, so a
+        // concurrent reader cannot observe new records with an old timestamp.
+        let entry = CacheEntry {
+            records: Arc::new(records),
+            refreshed_at: now,
+        };
+        self.records.insert(dataset_id.clone(), entry).await;
         tracing::debug!(
             source = %dataset_id.source,
             dataset = %dataset_id.dataset,
@@ -103,15 +112,20 @@ impl RecordStore for MemoryStore {
         limit: usize,
     ) -> Result<RecordPage> {
         let limit = limit.clamp(1, 500);
-        let Some(records) = self.records.get(dataset_id).await else {
+        let Some(entry) = self.records.get(dataset_id).await else {
             return Err(Error::Store(format!(
                 "no records cached for {}/{}",
                 dataset_id.source, dataset_id.dataset
             )));
         };
-        let total = records.len();
-        let page: Vec<NormalizedRecord> =
-            records.iter().skip(offset).take(limit).cloned().collect();
+        let total = entry.records.len();
+        let page: Vec<NormalizedRecord> = entry
+            .records
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect();
         Ok(RecordPage {
             source: dataset_id.source,
             dataset: dataset_id.dataset.clone(),
@@ -130,14 +144,15 @@ impl RecordStore for MemoryStore {
         dataset_id: &DatasetId,
         ids: &[String],
     ) -> Result<Vec<NormalizedRecord>> {
-        let Some(records) = self.records.get(dataset_id).await else {
+        let Some(entry) = self.records.get(dataset_id).await else {
             return Err(Error::Store(format!(
                 "no records cached for {}/{}",
                 dataset_id.source, dataset_id.dataset
             )));
         };
         let want: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
-        Ok(records
+        Ok(entry
+            .records
             .iter()
             .filter(|r| want.contains(r.record_id.as_str()))
             .cloned()
@@ -149,13 +164,9 @@ impl RecordStore for MemoryStore {
         let Some(static_meta) = registry.get(dataset_id) else {
             return Ok(None);
         };
-        let count = self
-            .records
-            .get(dataset_id)
-            .await
-            .map(|r| r.len())
-            .unwrap_or(0);
-        let last = self.refreshed_at.read().await.get(dataset_id).copied();
+        let entry = self.records.get(dataset_id).await;
+        let count = entry.as_ref().map(|e| e.records.len()).unwrap_or(0);
+        let last = entry.as_ref().map(|e| e.refreshed_at);
         Ok(Some(DatasetMeta {
             source: dataset_id.source,
             dataset: dataset_id.dataset.clone(),
@@ -183,8 +194,9 @@ impl RecordStore for MemoryStore {
 
         let mut out = Vec::new();
         for (id, static_meta) in snapshot {
-            let count = self.records.get(&id).await.map(|r| r.len()).unwrap_or(0);
-            let last = self.refreshed_at.read().await.get(&id).copied();
+            let entry = self.records.get(&id).await;
+            let count = entry.as_ref().map(|e| e.records.len()).unwrap_or(0);
+            let last = entry.as_ref().map(|e| e.refreshed_at);
             out.push(DatasetMeta {
                 source: id.source,
                 dataset: id.dataset.clone(),
