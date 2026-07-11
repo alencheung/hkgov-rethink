@@ -80,6 +80,17 @@ async fn main() -> anyhow::Result<()> {
     hkgov_common::telemetry::init_with_otel(&settings.log.format, &settings.log.filter);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "hkgov-api starting");
 
+    // V-005 loud warning: `dev_return_auth_token` makes POST /auth/request-token
+    // return the magic-link token in the body, so anyone who can reach the API
+    // can mint a session for any email. It must only be on in dev/CI. Emit this
+    // after telemetry init so it lands in the structured log, before any binding.
+    if settings.api.dev_return_auth_token {
+        tracing::warn!(
+            "dev_return_auth_token is enabled — anyone who can reach the API can mint \
+             sessions for any email. Disable in production!"
+        );
+    }
+
     let registry = Arc::new(hkgov_connectors::registry::Registry::build(&settings)?);
     let store: Arc<MemoryStore> = build_store(&settings)?;
     let insights = Arc::new(InsightStore::new());

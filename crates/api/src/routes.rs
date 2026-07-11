@@ -632,14 +632,20 @@ fn default_limit() -> usize {
     100
 }
 
+/// Upper bound on `PageQuery.limit` for the records endpoint. A client sending
+/// `?limit=1000000000` used to push that straight into the store, exposing it to
+/// unbounded materialization. Clamp at the handler boundary.
+const MAX_RECORDS_LIMIT: usize = 500;
+
 async fn dataset_records(
     State(state): State<AppState>,
     Path((source, dataset)): Path<(String, String)>,
     Query(q): Query<PageQuery>,
 ) -> Result<Json<hkgov_store::RecordPage>, ApiError> {
+    let limit = q.limit.clamp(1, MAX_RECORDS_LIMIT);
     let source = parse_source(&source)?;
     let id = DatasetId::new(source, dataset);
-    Ok(Json(state.store.get_page(&id, q.offset, q.limit).await?))
+    Ok(Json(state.store.get_page(&id, q.offset, limit).await?))
 }
 
 #[derive(Deserialize)]
@@ -657,10 +663,15 @@ struct InsightsQuery {
     lang: Option<String>,
 }
 
+/// Upper bound on `InsightsQuery.limit` (insights/alerts endpoints). Same
+/// unbounded-materialization rationale as `MAX_RECORDS_LIMIT`.
+const MAX_INSIGHTS_LIMIT: usize = 500;
+
 async fn list_insights(
     State(state): State<AppState>,
     Query(q): Query<InsightsQuery>,
 ) -> Result<Json<Vec<hkgov_agent::Insight>>, ApiError> {
+    let limit = q.limit.clamp(1, MAX_INSIGHTS_LIMIT);
     let lang = hkgov_agent::Language::parse(q.lang.as_deref());
     // D-007: a present-but-unparseable `since` is a client error, not a silent
     // fallback to the full list. Previously a typo like `?since=banana`
@@ -669,7 +680,7 @@ async fn list_insights(
     // message naming the bad value and the accepted formats.
     let mut insights = if let Some(s) = q.since.as_deref().filter(|s| !s.is_empty()) {
         match parse_since(s) {
-            Ok(ts) => state.insights.list_since(q.limit, ts).await,
+            Ok(ts) => state.insights.list_since(limit, ts).await,
             Err(()) => {
                 return Err(ApiError(hkgov_common::Error::BadRequest(format!(
                     "invalid `since` value: {s:?} (expected RFC 3339 datetime or epoch seconds)"
@@ -677,7 +688,7 @@ async fn list_insights(
             }
         }
     } else {
-        state.insights.list(q.limit).await
+        state.insights.list(limit).await
     };
     // P-106: apply the language selection to each summary in place.
     if lang == hkgov_agent::Language::ZhHk {
@@ -718,7 +729,8 @@ async fn get_brief(
     State(state): State<AppState>,
     Query(q): Query<InsightsQuery>,
 ) -> Json<hkgov_agent::Brief> {
-    let brief = hkgov_agent::build_brief(&state.insights, q.limit, chrono::Utc::now()).await;
+    let limit = q.limit.clamp(1, MAX_INSIGHTS_LIMIT);
+    let brief = hkgov_agent::build_brief(&state.insights, limit, chrono::Utc::now()).await;
     Json(brief)
 }
 
@@ -855,7 +867,8 @@ async fn list_alerts(
     State(state): State<AppState>,
     Query(q): Query<InsightsQuery>,
 ) -> Json<Vec<hkgov_agent::AlertLogEntry>> {
-    Json(state.alert_log.recent(q.limit))
+    let limit = q.limit.clamp(1, MAX_INSIGHTS_LIMIT);
+    Json(state.alert_log.recent(limit))
 }
 
 // ---- GET /silence-index — government opacity, quantified (P-100) -----------
@@ -1008,6 +1021,9 @@ struct ListSignalsQuery {
     limit: usize,
 }
 
+/// Upper bound on per-user list endpoints (signals/investigations).
+const MAX_LIST_LIMIT: usize = 100;
+
 async fn list_signals(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1017,7 +1033,8 @@ async fn list_signals(
     // let anyone list every user's signals (empty owner = all). `list_owned`
     // returns ONLY the caller's records.
     let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    Ok(Json(state.signals.list_owned(&owner, q.limit).await))
+    let limit = q.limit.clamp(1, MAX_LIST_LIMIT);
+    Ok(Json(state.signals.list_owned(&owner, limit).await))
 }
 
 async fn get_signal(
@@ -1141,7 +1158,8 @@ async fn list_investigations(
 ) -> Result<Json<Vec<hkgov_agent::Investigation>>, ApiError> {
     // V-004: scope to the authenticated caller only.
     let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    Ok(Json(state.investigations.list_owned(&owner, q.limit).await))
+    let limit = q.limit.clamp(1, MAX_LIST_LIMIT);
+    Ok(Json(state.investigations.list_owned(&owner, limit).await))
 }
 
 async fn get_investigation(

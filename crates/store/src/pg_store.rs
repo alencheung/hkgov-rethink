@@ -283,7 +283,7 @@ impl RecordStore for PgStore {
             let dataset: String = row.get(1);
             let last: Option<chrono::DateTime<chrono::Utc>> = row.get(2);
             let count: i64 = row.get(3);
-            let Ok(source) = DataSource::parse(&src_str) else {
+            let Some(source) = DataSource::parse(&src_str) else {
                 tracing::warn!(source = %src_str, "unknown source in pg_store, skipping record");
                 continue;
             };

@@ -50,7 +50,10 @@ pub async fn guard(expected: Arc<str>, req: Request, next: Next) -> Result<Respo
     match provided {
         // V-011: constant-time compare, not `==`.
         Some(p) if crate::secrets::secret_str_eq(&p, expected.as_ref()) => Ok(next.run(req).await),
-        _ => Err(StatusCode::UNAUTHORIZED),
+        _ => {
+            tracing::warn!(path = %path, "auth failed: invalid api key");
+            Err(StatusCode::UNAUTHORIZED)
+        }
     }
 }
 

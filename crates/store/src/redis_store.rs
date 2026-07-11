@@ -164,7 +164,7 @@ impl RecordStore for RedisStore {
             if parts.len() != 2 {
                 continue;
             }
-            let Ok(ds) = DataSource::parse(parts[0]) else {
+            let Some(ds) = DataSource::parse(parts[0]) else {
                 tracing::warn!(
                     source = parts[0],
                     "unknown source in redis_store, skipping record"
