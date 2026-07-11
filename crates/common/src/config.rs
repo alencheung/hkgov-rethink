@@ -44,7 +44,9 @@ pub struct ApiSettings {
     /// V-002: the `?api_key=` query fallback was removed — the key is now
     /// header-only so it never lands in access logs / browser history / Referer.
     pub api_key: Option<String>,
-    /// Per-IP request rate limit, requests/sec. 0 = unlimited.
+    /// Per-IP request rate limit, requests/sec. 0 = unlimited (dev/CI only —
+    /// disables flood protection; see `Settings::validate`). Defaults to 20 for
+    /// a safe production baseline.
     pub rate_per_sec: u32,
     /// CORS allow-list of origins. Empty (the default) keeps the API
     /// same-origin only (no `Access-Control-Allow-Origin`). V-007 fix: the
@@ -71,7 +73,9 @@ impl Default for ApiSettings {
             request_timeout_ms: 15_000,
             api_prefix: "/v1".to_string(),
             api_key: None,
-            rate_per_sec: 0,
+            // Safe non-zero default: gives basic flood protection out-of-the-box.
+            // 0 disables the limiter entirely (dev/CI only) — see validate().
+            rate_per_sec: 20,
             cors_origins: Vec::new(),
             dev_return_auth_token: false,
         }
@@ -131,7 +135,7 @@ impl Default for CacheSettings {
 pub struct LogSettings {
     /// `json` or `plain`.
     pub format: String,
-    /// RUSTON_LOG-style filter, e.g. `info,hkgov=debug`.
+    /// RUST_LOG-style filter, e.g. `info,hkgov=debug`.
     pub filter: String,
 }
 
@@ -786,12 +790,63 @@ impl Settings {
     ///
     /// Env vars are flattened with a `HKGOV_` prefix and `__` as the separator,
     /// e.g. `HKGOV_API__BIND=0.0.0.0:9090`.
+    ///
+    /// The loaded settings are run through [`Settings::validate`] before being
+    /// returned, so contradictory states (e.g. alerts enabled with no sink) fail
+    /// loudly at boot instead of silently misbehaving at runtime.
     #[allow(clippy::result_large_err)]
     pub fn load() -> Result<Self, figment::Error> {
-        Figment::from(figment::providers::Serialized::defaults(Settings::default()))
-            .merge(figment::providers::Toml::file("config.toml"))
-            .merge(Env::prefixed("HKGOV_").split("__"))
-            .extract()
+        let settings: Settings =
+            Figment::from(figment::providers::Serialized::defaults(Settings::default()))
+                .merge(figment::providers::Toml::file("config.toml"))
+                .merge(Env::prefixed("HKGOV_").split("__"))
+                .extract()?;
+        settings.validate().map_err(figment::Error::from)?;
+        Ok(settings)
+    }
+
+    /// Validate configuration for internal consistency. Returns the first
+    /// contradiction as a human-readable error string (or `Ok(())` when sound).
+    ///
+    /// Called automatically by [`Settings::load`]; also safe to call manually
+    /// after an explicit `extract()`/re-merge. `rate_per_sec == 0` is NOT an
+    /// error (it is legitimate for dev/CI) — it only emits a `tracing::warn!`
+    /// so a public deployment is nudged toward a non-zero value.
+    pub fn validate(&self) -> Result<(), String> {
+        // Store backend requires its URL. Currently only `redis` carries a URL
+        // in StoreSettings; `memory` needs nothing and `pg` is not yet a
+        // first-class field here (the pg store is built in crates/store).
+        if self.store.backend == "redis" && self.store.redis_url.is_empty() {
+            return Err("store.backend=redis but store.redis_url is empty".into());
+        }
+
+        // Alerts enabled but no sink configured at all → the dispatcher would
+        // have nowhere to push. `webhooks` is a Vec; email is optional.
+        if self.alerts.enabled {
+            let no_webhooks = self.alerts.webhooks.iter().all(|w| w.is_empty());
+            if no_webhooks
+                && self
+                    .alerts
+                    .email_api_url
+                    .as_deref()
+                    .is_none_or(str::is_empty)
+            {
+                return Err(
+                    "alerts.enabled=true but no webhooks or email_api_url configured".into(),
+                );
+            }
+        }
+
+        // Rate limit 0 disables the limiter — fine for dev, unsafe for prod.
+        // Warn (not error) so local zero-config keeps working.
+        if self.api.rate_per_sec == 0 {
+            tracing::warn!(
+                "api.rate_per_sec=0 disables flood protection \
+                 — set a non-zero value for production"
+            );
+        }
+
+        Ok(())
     }
 }
 
