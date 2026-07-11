@@ -1,8 +1,10 @@
 # Architecture
 
 This document explains the design and — specifically — how the v1 foundation is
-shaped to reach the project's stated goals: **100k concurrent users** and an
-**AI-agent analysis layer** that surfaces untold insights.
+shaped to reach the project's stated goals: a **100k-concurrent-user fleet** (a
+design target, not a verified measurement — see the status note under "Scaling
+path" below and [docs/CAPACITY.md](CAPACITY.md)) and an **AI-agent analysis
+layer** that surfaces untold insights.
 
 ## Crate graph
 
@@ -45,16 +47,29 @@ The target is fleet-level, not single-node. The design is honest about that:
 
 ## Scaling path (single node → 100k)
 
-| Stage | Change | Why |
-|---|---|---|
-| v1 (now) | in-process `moka` cache, one node | proves the contract |
-| v2 | shared **Redis** cluster behind `RecordStore` trait | cache hit across nodes |
-| v3 | stateless API behind a **LB**, N replicas | horizontal scale |
-| v4 | **Postgres** read replicas for cold/historical reads | unbounded dataset size |
-| v5 | **load-test harness** (k6/oha) + capacity model | validate the 100k number |
+> **Status note (2026-07):** the 100k figure is a **design target, not a
+> verified measurement**. v1 (in-process `moka`) is the only stage actually
+> wired into the running binary and is the production backend. v2 (Redis) and
+> v4 (Postgres) are **implemented** behind their feature flags but **not wired
+> in** — `store.backend` is dead config in `main.rs`, and each has a known
+> architectural issue to address before wiring (`RedisStore`: whole-dataset
+> blob; `PgStore`: single `Mutex<Client>`). v3 (the LB tier that actually
+> unlocks fleet-level concurrency) is **not implemented**. The only load test
+> run so far is a 500-VU k6 smoke test by hand, not in CI. See
+> [docs/CAPACITY.md](CAPACITY.md) for the honest per-stage breakdown.
+
+| Stage | Change | Why | Status |
+|---|---|---|---|
+| v1 (now) | in-process `moka` cache, one node | proves the contract | shipped + wired + tested |
+| v2 | shared **Redis** cluster behind `RecordStore` trait | cache hit across nodes | implemented, NOT wired (dead config; blob issue) |
+| v3 | stateless API behind a **LB**, N replicas | horizontal scale | not implemented |
+| v4 | **Postgres** read replicas for cold/historical reads | unbounded dataset size | implemented, NOT wired (dead config; Mutex issue) |
+| v5 | **load-test harness** (k6/oha) + capacity model | validate the 100k number | harness exists, defaults to 500 VUs, not in CI |
 
 The `RecordStore` trait in `crates/store` is the contract each tier satisfies —
-swapping the backing store is a constructor change, not a refactor.
+swapping the backing store is intended to be a constructor change, not a
+refactor. But until v2/v4 are wired into `main.rs` and v3 is built, the 100k
+target remains unverified.
 
 ## AI-agent layer (ROADMAP v3 foundation, v6 made it agentic)
 

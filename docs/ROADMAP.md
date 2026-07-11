@@ -1,6 +1,7 @@
 # Roadmap
 
-The end goal — **100k concurrent users** served from **AI-agent-generated
+The end goal — **100k concurrent users** (a design target, not yet a verified
+measurement — see [docs/CAPACITY.md](CAPACITY.md)) served from **AI-agent-generated
 insights** over consolidated HKGOV data. This roadmap tracks what shipped and
 what remains. Each milestone is independently runnable.
 
@@ -97,3 +98,15 @@ extends the `llm` feature. `WebhookSink` adds the `alerts` feature
 - Auth via OAuth/JWT (current is static key).
 - Generalize `ToolBelt` / `AgentSupervisor` to `Arc<dyn RecordStore>` so the
   agent works against Redis/Postgres backends (currently `Arc<MemoryStore>`).
+- **Wire Redis/Postgres store backends into the binary.** `RedisStore`
+  (`--features redis`) and `PgStore` (`--features pg`) are implemented behind
+  feature flags and have tests, but `store.backend` is currently dead config in
+  `main.rs` — nothing instantiates them at runtime. Connecting them also means
+  addressing known issues: `RedisStore` serializes the whole dataset as one
+  blob (re-key per record), and `PgStore` guards its client behind a single
+  `Mutex` (would serialize under load). See [docs/CAPACITY.md](CAPACITY.md).
+- **Validate the 100k concurrency target with a real load test against an LB
+  tier.** The k6 harness exists but defaults to 500 VUs (a smoke test, not a
+  ceiling test) and is not in CI. The 100k figure is a design target; verifying
+  it requires the load-balancer tier (the v3 stage, not yet built) in front of
+  N replicas, plus a k6 run scaled into the tens of thousands of VUs.
