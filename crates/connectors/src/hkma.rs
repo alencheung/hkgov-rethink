@@ -2082,45 +2082,107 @@ fn record_id_for(dataset: &str, fields: &BTreeMap<String, RecordValue>) -> Strin
         }
         _ => &[],
     };
+    let mut date_base: Option<String> = None;
     for key in candidates {
         if let Some(RecordValue::Str(s)) = fields.get(*key) {
-            return s.clone();
+            date_base = Some(s.clone());
+            break;
         }
         if let Some(RecordValue::Int(i)) = fields.get(*key) {
-            return i.to_string();
+            date_base = Some(i.to_string());
+            break;
         }
     }
     // Generic fallback: scan for any of the common HKMA date/period field
     // names, in priority order. Almost every HKMA dataset exposes its period
     // as one of these columns. This keeps record ids human-readable and
     // (where the field is a true calendar date) joinable by cross_source_gap.
-    const GENERIC_DATE_FIELDS: &[&str] = &[
-        "end_of_date",
-        "end_of_month",
-        "end_of_quarter",
-        "end_of_year",
-        "date",
-        "year_month",
-        "quarter",
-        "year",
-    ];
-    for key in GENERIC_DATE_FIELDS {
-        if let Some(RecordValue::Str(s)) = fields.get(*key) {
-            return s.clone();
-        }
-        if let Some(RecordValue::Int(i)) = fields.get(*key) {
-            return i.to_string();
+    if date_base.is_none() {
+        const GENERIC_DATE_FIELDS: &[&str] = &[
+            "end_of_date",
+            "end_of_month",
+            "end_of_quarter",
+            "end_of_year",
+            "date",
+            "year_month",
+            "quarter",
+            "year",
+        ];
+        for key in GENERIC_DATE_FIELDS {
+            if let Some(RecordValue::Str(s)) = fields.get(*key) {
+                date_base = Some(s.clone());
+                break;
+            }
+            if let Some(RecordValue::Int(i)) = fields.get(*key) {
+                date_base = Some(i.to_string());
+                break;
+            }
         }
     }
-    // Deterministic fallback when no date/period field is present.
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
+
+    if let Some(date) = date_base {
+        // D-013: multi-dimensional datasets (keyed by period + a dimension such
+        // as currency, sector, country, …) previously all collapsed onto the
+        // bare date as their record_id. Two rows sharing a date but differing
+        // on the dimension got the SAME id, which silently overwrote each
+        // other in PgStore (PK collision) and muddied dedup in MemoryStore.
+        // Append the first non-empty dimension value found so each row is
+        // uniquely identifiable.
+        const DIMENSION_FIELDS: &[&str] = &[
+            "currency",
+            "sector",
+            "type",
+            "category",
+            "country",
+            "instrument",
+            "tenor",
+            "rating",
+            "issuer_type",
+            "component",
+            "sub_type",
+            "breakdown",
+        ];
+        for key in DIMENSION_FIELDS {
+            if let Some(RecordValue::Str(s)) = fields.get(*key) {
+                if !s.is_empty() {
+                    return format!("{date}|{s}");
+                }
+            }
+        }
+        return date;
+    }
+
+    // Deterministic fallback when no date/period field is present. We use a
+    // fixed FNV-1a hash rather than `std::collections::hash_map::DefaultHasher`,
+    // whose output the std docs explicitly warn is NOT guaranteed to be stable
+    // across Rust versions. record_ids are persisted (PgStore primary keys)
+    // and feed the reproducibility hash, so the digest must be version-stable.
+    let mut hash = fnv1a_64(b"");
     for (k, v) in fields {
-        k.hash(&mut h);
-        format!("{v:?}").hash(&mut h);
+        // Fold each field into the running hash in BTreeMap (sorted) order.
+        hash = fnv1a_64_with(hash, k.as_bytes());
+        let vrepr = format!("{v:?}");
+        hash = fnv1a_64_with(hash, vrepr.as_bytes());
     }
-    format!("id-{:016x}", h.finish())
+    format!("id-{:016x}", hash)
+}
+
+/// 64-bit FNV-1a hash with the canonical offset basis and prime. Deterministic
+/// and stable across Rust/compiler versions, unlike `DefaultHasher`.
+fn fnv1a_64(data: &[u8]) -> u64 {
+    fnv1a_64_with(FNV_OFFSET, data)
+}
+
+const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+fn fnv1a_64_with(init: u64, data: &[u8]) -> u64 {
+    let mut hash = init;
+    for &byte in data {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 /// Public test helper: expose normalization so unit tests can assert against

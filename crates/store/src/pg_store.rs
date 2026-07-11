@@ -191,7 +191,13 @@ impl RecordStore for PgStore {
                 let record_id: String = row.get(0);
                 let fields_json: serde_json::Value = row.get(1);
                 let fetched_at: chrono::DateTime<chrono::Utc> = row.get(2);
-                let fields = serde_json::from_value(fields_json).unwrap_or_default();
+                let fields = match serde_json::from_value(fields_json) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "corrupt fields JSON in pg_store, using empty");
+                        Default::default()
+                    }
+                };
                 NormalizedRecord {
                     source: dataset_id.source,
                     dataset: dataset_id.dataset.clone(),
@@ -277,8 +283,12 @@ impl RecordStore for PgStore {
             let dataset: String = row.get(1);
             let last: Option<chrono::DateTime<chrono::Utc>> = row.get(2);
             let count: i64 = row.get(3);
+            let Some(source) = DataSource::parse(&src_str) else {
+                tracing::warn!(source = %src_str, "unknown source in pg_store, skipping record");
+                continue;
+            };
             out.push(DatasetMeta {
-                source: DataSource::parse(&src_str).unwrap_or(DataSource::Hkma),
+                source,
                 dataset,
                 title: String::new(),
                 description: None,

@@ -24,7 +24,8 @@ use crate::analysis::{
 use crate::insight::{Insight, InsightStore};
 use crate::llm::LlmClient;
 use hkgov_common::{
-    default_scan_targets, Comparison, DataSource, RecordValue, ScanTarget, Settings,
+    default_scan_targets, Comparison, DataSource, NormalizedRecord, RecordValue, ScanTarget,
+    Settings,
 };
 use hkgov_store::{DatasetId, MemoryStore, RecordStore};
 use std::sync::Arc;
@@ -93,6 +94,37 @@ fn effective_scan(settings: &Settings) -> Vec<ScanTarget> {
     } else {
         settings.agent.scan.clone()
     }
+}
+
+/// Paginate through ALL records for a dataset, not just the first page. The
+/// store's `get_page` never hands the caller unbounded arrays, so a single
+/// `get_page(id, 0, 500)` silently truncated any dataset larger than 500 rows
+/// before detection — a big dataset would be scored on its first 500 records
+/// only, with no warning. This pages until a short (or empty) batch, so the
+/// detector sees the whole feed.
+async fn collect_all_records(store: &Arc<MemoryStore>, id: &DatasetId) -> Vec<NormalizedRecord> {
+    let mut all = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let Ok(page) = store.get_page(id, offset, 500).await else {
+            break;
+        };
+        if page.records.is_empty() {
+            break;
+        }
+        let len = page.records.len();
+        all.extend(page.records);
+        if len < 500 {
+            break;
+        }
+        offset += len;
+    }
+    tracing::debug!(
+        dataset = %id.dataset,
+        count = all.len(),
+        "loaded records for detection"
+    );
+    all
 }
 
 async fn run_pass(
@@ -183,10 +215,8 @@ async fn run_one_target(
         _ => {}
     }
 
-    let Ok(page) = store.get_page(&id, 0, 500).await else {
-        return Vec::new();
-    };
-    if page.records.is_empty() {
+    let records = collect_all_records(store, &id).await;
+    if records.is_empty() {
         return Vec::new();
     }
     let Some(field) = target.field.as_deref() else {
@@ -207,7 +237,7 @@ async fn run_one_target(
                 detect_year_over_year(
                     source,
                     &target.dataset,
-                    &page.records,
+                    &records,
                     field,
                     if threshold > 0.0 {
                         threshold
@@ -222,7 +252,7 @@ async fn run_one_target(
                 detect_series_jumps_cadenced(
                     source,
                     &target.dataset,
-                    &page.records,
+                    &records,
                     field,
                     t,
                     target.cadence,
@@ -235,7 +265,7 @@ async fn run_one_target(
             detect_year_over_year(
                 source,
                 &target.dataset,
-                &page.records,
+                &records,
                 field,
                 if threshold > 0.0 {
                     threshold
@@ -248,7 +278,7 @@ async fn run_one_target(
         "outlier" => detect_outliers(
             source,
             &target.dataset,
-            &page.records,
+            &records,
             field,
             if threshold > 0.0 {
                 threshold
@@ -259,7 +289,7 @@ async fn run_one_target(
         "seasonality" => detect_seasonality(
             source,
             &target.dataset,
-            &page.records,
+            &records,
             field,
             if threshold > 0.0 {
                 threshold
@@ -278,7 +308,7 @@ async fn run_one_target(
             detect_correlation(
                 source,
                 &target.dataset,
-                &page.records,
+                &records,
                 field,
                 field_b,
                 if threshold > 0.0 {
@@ -299,7 +329,7 @@ async fn run_one_target(
             detect_threshold_crossing(
                 source,
                 &target.dataset,
-                &page.records,
+                &records,
                 field,
                 threshold,
                 direction,
@@ -337,30 +367,26 @@ async fn run_cross_source_gap(
 
     let date_field = target.field.as_deref().unwrap_or("date");
 
-    // Press side: extract the date field as strings.
+    // Press side: extract the date field as strings. Page through ALL records
+    // (not just the first 500) so a large press feed isn't silently truncated.
     let press_id = DatasetId::new(source, &target.dataset);
-    let press_dates: Vec<String> = match store.get_page(&press_id, 0, 500).await {
-        Ok(p) => p
-            .records
-            .iter()
-            .filter_map(|r| match r.fields.get(date_field) {
-                Some(RecordValue::Str(s)) => Some(s.clone()),
-                _ => None,
-            })
-            .collect(),
-        Err(_) => return Vec::new(),
-    };
+    let press_records = collect_all_records(store, &press_id).await;
+    let press_dates: Vec<String> = press_records
+        .iter()
+        .filter_map(|r| match r.fields.get(date_field) {
+            Some(RecordValue::Str(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
     if press_dates.is_empty() {
         return Vec::new();
     }
 
     // Data side: record_ids ARE the dates (daily "YYYY-MM-DD" or monthly
-    // "YYYY-MM" depending on the dataset).
+    // "YYYY-MM" depending on the dataset). Page through ALL records.
     let data_id = DatasetId::new(comp_source, &companion.dataset);
-    let data_dates: Vec<String> = match store.get_page(&data_id, 0, 500).await {
-        Ok(p) => p.records.iter().map(|r| r.record_id.clone()).collect(),
-        Err(_) => return Vec::new(),
-    };
+    let data_records = collect_all_records(store, &data_id).await;
+    let data_dates: Vec<String> = data_records.iter().map(|r| r.record_id.clone()).collect();
 
     // Cadence-aware period coercion. Press releases carry daily "YYYY-MM-DD"
     // dates, but the data side may be monthly ("YYYY-MM"), quarterly, or annual.
@@ -425,20 +451,9 @@ async fn run_proxy_divergence(
         return Vec::new();
     };
 
-    let primary = match store
-        .get_page(&DatasetId::new(source, &target.dataset), 0, 500)
-        .await
-    {
-        Ok(p) => p.records,
-        Err(_) => return Vec::new(),
-    };
-    let companion_recs = match store
-        .get_page(&DatasetId::new(comp_source, &companion.dataset), 0, 500)
-        .await
-    {
-        Ok(p) => p.records,
-        Err(_) => return Vec::new(),
-    };
+    let primary = collect_all_records(store, &DatasetId::new(source, &target.dataset)).await;
+    let companion_recs =
+        collect_all_records(store, &DatasetId::new(comp_source, &companion.dataset)).await;
 
     let threshold = target.threshold.unwrap_or(0.0);
     detect_proxy_divergence(
@@ -494,20 +509,9 @@ async fn run_benchmark_deviation(
         return Vec::new();
     };
 
-    let actual = match store
-        .get_page(&DatasetId::new(source, &target.dataset), 0, 500)
-        .await
-    {
-        Ok(p) => p.records,
-        Err(_) => return Vec::new(),
-    };
-    let benchmarks = match store
-        .get_page(&DatasetId::new(bench_source, &bench_ref.dataset), 0, 500)
-        .await
-    {
-        Ok(p) => p.records,
-        Err(_) => return Vec::new(),
-    };
+    let actual = collect_all_records(store, &DatasetId::new(source, &target.dataset)).await;
+    let benchmarks =
+        collect_all_records(store, &DatasetId::new(bench_source, &bench_ref.dataset)).await;
 
     let threshold = target.threshold.unwrap_or(0.0);
     detect_benchmark_deviation(

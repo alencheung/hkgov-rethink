@@ -45,8 +45,11 @@ impl RateLimiter {
                     s.tokens -= 1.0;
                     return;
                 }
-                // time until one token refills
-                Duration::from_secs_f64((1.0 - s.tokens) / self.refill_per_sec)
+                // time until one token refills. Guard against a zero/negative
+                // refill rate (treated as unlimited): `.max(EPSILON)` keeps the
+                // divisor finite and lets the request through without panicking.
+                let refill = self.refill_per_sec.max(f64::EPSILON);
+                Duration::from_secs_f64((1.0 - s.tokens) / refill)
             };
             if wait.is_zero() {
                 tokio::task::yield_now().await;
@@ -92,15 +95,28 @@ impl CircuitBreaker {
 
     /// Returns Ok(()) to proceed, Err if the circuit is open.
     pub fn before_call(&self) -> Result<(), &'static str> {
-        let state = self.state.load(Ordering::Relaxed);
+        let state = self.state.load(Ordering::Acquire);
         match state {
             CLOSED => Ok(()),
             OPEN => {
-                let opened = self.opened_at_ms.load(Ordering::Relaxed);
+                let opened = self.opened_at_ms.load(Ordering::Acquire);
                 if Self::now_ms().saturating_sub(opened) >= self.cooldown.as_millis() as u64 {
-                    // Transition to half-open; allow one probe.
-                    self.state.store(HALF_OPEN, Ordering::Relaxed);
-                    Ok(())
+                    // Cooldown elapsed: exactly one caller must become the probe.
+                    // Use a CAS so concurrent callers racing through OPEN all see
+                    // the same outcome — the winner flips OPEN → HALF_OPEN and
+                    // proceeds; every loser fails the CAS (state is now
+                    // HALF_OPEN), sees the circuit as still open, and is told to
+                    // back off. Without the CAS, every concurrent caller would
+                    // store HALF_OPEN and all believe they are the lone probe.
+                    match self.state.compare_exchange(
+                        OPEN,
+                        HALF_OPEN,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => Ok(()), // won the probe slot
+                        Err(_) => Err("circuit open"),
+                    }
                 } else {
                     Err("circuit open")
                 }
@@ -114,24 +130,27 @@ impl CircuitBreaker {
     }
 
     pub fn on_success(&self) {
-        self.failures.store(0, Ordering::Relaxed);
-        self.state.store(CLOSED, Ordering::Relaxed);
+        self.failures.store(0, Ordering::Release);
+        self.state.store(CLOSED, Ordering::Release);
     }
 
     pub fn on_failure(&self) {
+        // The counter itself only needs Relaxed, but the threshold read below
+        // must observe a value at least as recent as our increment, so pair the
+        // fetch_add with an Acquire load when we test it.
         let f = self.failures.fetch_add(1, Ordering::Relaxed) + 1;
         if f >= self.failure_threshold {
-            self.state.store(OPEN, Ordering::Relaxed);
-            self.opened_at_ms.store(Self::now_ms(), Ordering::Relaxed);
-        } else if self.state.load(Ordering::Relaxed) == HALF_OPEN {
+            self.state.store(OPEN, Ordering::Release);
+            self.opened_at_ms.store(Self::now_ms(), Ordering::Release);
+        } else if self.state.load(Ordering::Acquire) == HALF_OPEN {
             // Probe failed: reopen.
-            self.state.store(OPEN, Ordering::Relaxed);
-            self.opened_at_ms.store(Self::now_ms(), Ordering::Relaxed);
+            self.state.store(OPEN, Ordering::Release);
+            self.opened_at_ms.store(Self::now_ms(), Ordering::Release);
         }
     }
 
     pub fn state_label(&self) -> &'static str {
-        match self.state.load(Ordering::Relaxed) {
+        match self.state.load(Ordering::Acquire) {
             CLOSED => "closed",
             OPEN => "open",
             HALF_OPEN => "half-open",
@@ -176,5 +195,48 @@ mod tests {
         assert!(cb.before_call().is_ok()); // transitions to half-open
         cb.on_success();
         assert_eq!(cb.state_label(), "closed");
+    }
+
+    /// Regression for the half-open probe race: when the cooldown elapses while
+    /// the breaker is OPEN, only ONE concurrent caller may flip to HALF_OPEN
+    /// (the probe). Every other caller must observe the circuit as open and be
+    /// rejected. Previously the transition was an unconditional store, so every
+    /// racer became a probe.
+    #[test]
+    fn half_open_allows_single_probe() {
+        let cb = CircuitBreaker::new(1, Duration::from_millis(10));
+        cb.on_failure(); // → OPEN
+        assert_eq!(cb.state_label(), "open");
+        std::thread::sleep(Duration::from_millis(20)); // let cooldown elapse
+
+        // Fire many callers "concurrently" from multiple threads. The CAS must
+        // ensure exactly one Ok and the rest Err.
+        let cb = std::sync::Arc::new(cb);
+        let n = 32;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut handles = Vec::with_capacity(n);
+        for _ in 0..n {
+            let cb = cb.clone();
+            let tx = tx.clone();
+            let h = std::thread::spawn(move || {
+                let ok = cb.before_call().is_ok();
+                tx.send(ok).unwrap();
+            });
+            handles.push(h);
+        }
+        drop(tx);
+        for h in handles {
+            h.join().unwrap();
+        }
+        let results: Vec<bool> = rx.iter().collect();
+        let winners = results.iter().filter(|&&ok| ok).count();
+        assert_eq!(
+            winners, 1,
+            "exactly one probe should win the OPEN→HALF_OPEN race, got {winners}"
+        );
+        // After the race the breaker must be parked in HALF_OPEN; further calls
+        // are rejected until the probe resolves.
+        assert_eq!(cb.state_label(), "half-open");
+        assert!(cb.before_call().is_err());
     }
 }

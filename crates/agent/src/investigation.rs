@@ -158,13 +158,15 @@ impl InvestigationStore {
     }
 
     /// Fetch an investigation owned by `owner`. V-004 fix: the bare `get`
-    /// returned any id with no ownership check.
+    /// returned any id with no ownership check. The empty-owner bypass is dead
+    /// backcompat code now that identity is wired and `principal_id` always
+    /// returns non-empty — removing it closes a latent authz hole.
     pub async fn get_owned(&self, id: &str, owner: &str) -> Option<Investigation> {
         self.inner
             .read()
             .await
             .get(id)
-            .filter(|i| owner.is_empty() || i.owner == owner)
+            .filter(|i| i.owner == owner)
             .cloned()
     }
 
@@ -173,11 +175,13 @@ impl InvestigationStore {
     }
 
     /// Delete an investigation owned by `owner`. V-004 fix: the bare `delete`
-    /// removed any id with no ownership check.
+    /// removed any id with no ownership check. The empty-owner bypass is dead
+    /// backcompat code now that identity is wired — removing it closes a latent
+    /// authz hole.
     pub async fn delete_owned(&self, id: &str, owner: &str) -> bool {
         let mut w = self.inner.write().await;
         match w.get(id) {
-            Some(i) if owner.is_empty() || i.owner == owner => {
+            Some(i) if i.owner == owner => {
                 w.remove(id);
                 true
             }
@@ -228,7 +232,7 @@ impl InvestigationStore {
         let inv = w.get_mut(id)?;
         // Ownership gate inside the lock: a caller who doesn't own the record
         // gets `None`, identical to "not found" (no cross-tenant existence leak).
-        if !owner.is_empty() && inv.owner != owner {
+        if inv.owner != owner {
             return None;
         }
         let mut step = step;
@@ -268,7 +272,7 @@ impl InvestigationStore {
     ) -> Option<Investigation> {
         let mut w = self.inner.write().await;
         let inv = w.get_mut(id)?;
-        if !owner.is_empty() && inv.owner != owner {
+        if inv.owner != owner {
             return None;
         }
         let note = InvestigationNote {

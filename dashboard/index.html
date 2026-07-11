@@ -18,7 +18,7 @@
   <meta name="twitter:title" content="HK City Pulse — hkgov-rethink">
   <meta name="twitter:description" content="Agentic monitoring that surfaces what the HKGOV press room leaves unsaid. Deterministic anomaly detection across HKGOV open data, with verifiable evidence.">
   <link rel="alternate" type="text/markdown" title="Agent index (llms.txt)" href="/llms.txt">
-  <link href="https://cdn.jsdelivr.net/npm/remixicon@4.2.0/fonts/remixicon.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/remixicon@4.2.0/fonts/remixicon.css" rel="stylesheet" integrity="sha384-6FSSi597BTd6QcnsBNoLclRKxTOyyYqkaucRjFgCNr8wHVCp0COLClSPY4Vy/bjh" crossorigin="anonymous">
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
@@ -37,8 +37,16 @@
     ]
   }
   </script>
-  <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
+  <!-- SRI-protected CDN deps. The hashes pin the exact bytes; a CDN
+       compromise (or a silently-rewritten file) will be refused by the
+       browser. The uPlot script URL was corrected to the IIFE build —
+       the previous uPlot.min.js path 404s on jsDelivr for this version. -->
+  <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"
+          integrity="sha384-XMP23k7YSCFr13Xrkxh4IO0v1W+8fB6AP+3Vycxphp2Z0V2vocAZHyuGaFCysrtM"
+          crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css"
+        integrity="sha384-IfV0B7MIOYuO95kO9G5ySKPz/85zqFNOAs8iy4tkK5zd9izhJAB8b7lHrwYqqmYE"
+        crossorigin="anonymous">
   <style>
     :root {
       --bg: #0d1117; --panel: #161b22; --panel2: #1c2230; --border: #30363d;

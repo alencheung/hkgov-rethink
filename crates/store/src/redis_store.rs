@@ -164,7 +164,13 @@ impl RecordStore for RedisStore {
             if parts.len() != 2 {
                 continue;
             }
-            let ds = DataSource::parse(parts[0]).unwrap_or(DataSource::Hkma);
+            let Some(ds) = DataSource::parse(parts[0]) else {
+                tracing::warn!(
+                    source = parts[0],
+                    "unknown source in redis_store, skipping record"
+                );
+                continue;
+            };
             if source.is_some_and(|s| s != ds) {
                 continue;
             }

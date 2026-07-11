@@ -72,3 +72,27 @@ jobs:
       # would ship green. This closes the gap surfaced in the persona review.
       - name: alerts (agent)
         run: cargo clippy -p hkgov-agent --features alerts --all-targets -- -D warnings
+      # Every feature enabled at once. Catches cross-feature interaction bugs
+      # (e.g. two features defining the same item under different cfgs) that the
+      # single-feature steps above can't surface.
+      - name: Clippy all features
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+
+  # Security scanning: cargo-audit (RustSec advisory DB) + cargo-deny (license,
+  # advisories, bans, sources). Kept as its own job so an advisory finding fails
+  # the build independently of the fmt/clippy/test job's result.
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run cargo-audit
+        run: cargo audit
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: Run cargo-deny
+        run: cargo deny check

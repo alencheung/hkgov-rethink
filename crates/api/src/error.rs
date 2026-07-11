@@ -29,9 +29,23 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status =
             StatusCode::from_u16(self.0.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let kind = kind_for(&self.0);
+        // For 5xx: log the full detail (paths, config values, source errors) for
+        // operators, but return a generic message to the client. The previous
+        // `self.0.to_string()` body leaked internal details — e.g. a store error
+        // surfaced a filesystem path, a config error surfaced the bad value — on
+        // every 500/502/503. 4xx errors are user-facing (bad request, not found,
+        // unauthorized) and keep their detailed message so the client can self-correct.
+        if status.is_server_error() {
+            tracing::error!(error = %self.0, kind = %kind, "server error");
+            let body = Json(json!({
+                "error": { "kind": kind, "message": "internal server error" }
+            }));
+            return (status, body).into_response();
+        }
         let body = Json(json!({
             "error": {
-                "kind": kind_for(&self.0),
+                "kind": kind,
                 "message": self.0.to_string(),
             }
         }));

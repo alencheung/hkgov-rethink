@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # Cargo dependencies (workspace-wide).
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  # GitHub Actions used by the CI workflows (keeps `actions/*`, `dtolnay/*`,
+  # `Swatinem/*` etc. pinned to current, patch-level releases).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  # Any Dockerfile base images.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"

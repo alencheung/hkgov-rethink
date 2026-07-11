@@ -74,8 +74,11 @@ Prefer Docker? `docker run ghcr.io/alencheung/hkgov-rethink` (see
 - **Evidence, not assertions.** Every `Insight` carries `EvidenceRef`s pointing
   back into the store, so a reader can verify the claim against the source data.
 - **Built for scale from day one.** One-way pipeline, cache-first serving, the
-  `RecordStore` trait as the scaling contract. Single node to 100k-concurrency
-  fleet is a config change, not a refactor ([docs/CAPACITY.md](docs/CAPACITY.md)).
+  `RecordStore` trait as the scaling contract. Designed for horizontal scaling;
+  Redis and Postgres backends exist but are not yet wired into the production
+  binary — see [docs/CAPACITY.md](docs/CAPACITY.md) for the scaling path and
+  current status (single-node today, 100k is a design target, not a verified
+  number).
 
 ---
 
@@ -168,8 +171,12 @@ free HKGOV endpoints it depends on.
    starve the others. See `crates/connectors/src/resilience.rs` and
    `crates/connectors/src/registry.rs`.
 6. **The `RecordStore` trait is the scaling contract.** Going from one node to
-   a 100k-concurrency fleet is a *constructor change, not a refactor* — swap
-   `MemoryStore` for `RedisStore` or `PgStore`. No other code moves.
+   a fleet is intended to be a *constructor change, not a refactor* — swap
+   `MemoryStore` for `RedisStore` or `PgStore`. No other code moves. (Note:
+   `RedisStore`/`PgStore` are implemented behind feature flags but not yet wired
+   into the running binary; `MemoryStore` is the production backend today. The
+   100k-concurrency figure is a design target, not a verified measurement — see
+   [docs/CAPACITY.md](docs/CAPACITY.md).)
 
 For the full rationale (async model, middleware stack, scaling math) see
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the capacity model in
@@ -207,6 +214,13 @@ For the full rationale (async model, middleware stack, scaling math) see
     (`crates/store/src/redis_store.rs`)
   - `PgStore` — Postgres persistent/cold tier (`--features pg`)
     (`crates/store/src/pg_store.rs`)
+
+  > **Wiring status:** `MemoryStore` (moka) is the production backend — the only
+  > one the binary actually instantiates today. `RedisStore` and `PgStore` are
+  > implemented behind their feature flags (they compile, they have tests) but
+  > **not yet wired into the running binary** — `store.backend` is currently
+  > dead config in `main.rs`. See [docs/CAPACITY.md](docs/CAPACITY.md) for the
+  > scaling path and what remains to connect them.
 
 **Ingest pipeline**
 - Per-dataset refresh supervisor — one tokio task per dataset, each on its own
@@ -505,8 +519,8 @@ HKGOV_API__BIND=0.0.0.0:9090              # bind address
 HKGOV_API__API_KEY=secret                 # enable API key auth
 HKGOV_API__MAX_CONCURRENCY=100000         # tower load-shedding ceiling
 HKGOV_API__RATE_PER_SEC=20                # per-IP req/s flood guard (0=unlimited; set before exposing publicly — see config.toml)
-HKGOV_STORE__BACKEND=redis                # memory | redis | pg
-HKGOV_STORE__REDIS_URL=redis://...        # only used when backend=redis
+HKGOV_STORE__BACKEND=memory               # memory (default/wired) | redis | pg (backends exist but are not yet wired into main.rs — see docs/CAPACITY.md)
+HKGOV_STORE__REDIS_URL=redis://...        # only used when backend=redis (not yet wired)
 HKGOV_AGENT__ENABLED=true                 # turn on the AI agent
 HKGOV_AGENT__LLM_BASE_URL=https://...     # empty = heuristic mode
 HKGOV_AGENT__LLM_API_KEY=sk-...           # for the HTTP LLM client
@@ -627,7 +641,7 @@ oriented:
 | If you want to understand… | read this |
 |---|---|
 | The end-to-end design and the "why" behind each crate | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| The path from one node to 100k concurrent users | [docs/CAPACITY.md](docs/CAPACITY.md) |
+| The scaling path (single node today → 100k design target) and current backend-wiring status | [docs/CAPACITY.md](docs/CAPACITY.md) |
 | What's done vs. what's next | [docs/ROADMAP.md](docs/ROADMAP.md) |
 | Which HKGOV endpoints we hit and why (verified live) | [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) |
 | The normalized data model every source maps onto | `crates/common/src/model.rs` |
