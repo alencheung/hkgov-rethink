@@ -307,6 +307,42 @@ impl InsightStore {
     pub async fn count(&self) -> usize {
         self.inner.read().await.len()
     }
+
+    // ---- file-based persistence -----
+
+    /// Capture a serializable snapshot for the file-based persistence layer.
+    pub async fn snapshot(&self) -> InsightStoreSnapshot {
+        InsightStoreSnapshot {
+            insights: self.inner.read().await.values().cloned().collect(),
+            history: self
+                .history
+                .read()
+                .await
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        }
+    }
+
+    /// Restore from a snapshot (loaded on boot).
+    pub async fn restore(&self, snap: InsightStoreSnapshot) {
+        let mut inner = self.inner.write().await;
+        for i in snap.insights {
+            inner.insert(i.id.clone(), i);
+        }
+        drop(inner);
+        let mut history = self.history.write().await;
+        for (k, v) in snap.history {
+            history.insert(k, v);
+        }
+    }
+}
+
+/// Serializable snapshot of [`InsightStore`] state for file-based persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InsightStoreSnapshot {
+    pub insights: Vec<Insight>,
+    pub history: Vec<(String, Vec<InsightRevision>)>,
 }
 
 /// Compute the field-level diff between two insights sharing the same id. The
@@ -413,6 +449,27 @@ impl FeedbackStore {
             .cloned()
             .collect()
     }
+
+    // ---- file-based persistence -----
+
+    /// Capture a serializable snapshot for the file-based persistence layer.
+    pub async fn snapshot(&self) -> FeedbackStoreSnapshot {
+        FeedbackStoreSnapshot {
+            feedback: self.inner.read().await.clone(),
+        }
+    }
+
+    /// Restore from a snapshot (loaded on boot).
+    pub async fn restore(&self, snap: FeedbackStoreSnapshot) {
+        let mut w = self.inner.write().await;
+        *w = snap.feedback;
+    }
+}
+
+/// Serializable snapshot of [`FeedbackStore`] state for file-based persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedbackStoreSnapshot {
+    pub feedback: Vec<Feedback>,
 }
 
 #[cfg(test)]

@@ -29,6 +29,7 @@ pub mod insight;
 pub mod investigation;
 pub mod llm;
 pub mod loop_mod;
+pub mod persist;
 pub mod qa;
 pub mod scheduler;
 pub mod signal;
@@ -42,14 +43,19 @@ pub use alerts::{EmailSink, WebhookSink};
 pub use bilingual::{frame_zh_hk, select_summary, Language};
 pub use brief::{build_brief, Brief, BriefItem};
 pub use cite::{build_citation, Citation, CitationFormat, ReproducibilityManifest, CITE_VERSION};
-pub use identity::{user_id_for, Session, Token, User, UserStore};
+#[cfg(feature = "alerts")]
+pub use identity::HttpMagicLinkDelivery;
+pub use identity::{
+    user_id_for, LogMagicLinkDelivery, MagicLinkDelivery, Session, Token, User, UserStore,
+    UserStoreSnapshot,
+};
 pub use insight::{
-    EvolutionDiff, Feedback, FeedbackStore, FieldChange, Insight, InsightRevision, InsightSeverity,
-    InsightStore,
+    EvolutionDiff, Feedback, FeedbackStore, FeedbackStoreSnapshot, FieldChange, Insight,
+    InsightRevision, InsightSeverity, InsightStore, InsightStoreSnapshot,
 };
 pub use investigation::{
     investigation_id, Investigation, InvestigationNote, InvestigationStep, InvestigationStore,
-    StepKind,
+    InvestigationStoreSnapshot, StepKind,
 };
 #[cfg(feature = "llm")]
 pub use llm::HttpLlmClient;
@@ -59,7 +65,7 @@ pub use qa::heuristic_answer;
 pub use scheduler::AgentSupervisor;
 pub use signal::{
     preview_signal, signal_id, FindingDto as SignalFindingDto, Signal, SignalChannel, SignalPatch,
-    SignalPreview, SignalStore,
+    SignalPreview, SignalStore, SignalStoreSnapshot,
 };
 pub use silence::{
     build_index as build_silence_index,

@@ -284,6 +284,29 @@ impl InvestigationStore {
         inv.updated_at = Utc::now();
         Some(inv.clone())
     }
+
+    // ---- file-based persistence -----
+
+    /// Capture a serializable snapshot for the file-based persistence layer.
+    pub async fn snapshot(&self) -> InvestigationStoreSnapshot {
+        InvestigationStoreSnapshot {
+            investigations: self.inner.read().await.values().cloned().collect(),
+        }
+    }
+
+    /// Restore from a snapshot (loaded on boot).
+    pub async fn restore(&self, snap: InvestigationStoreSnapshot) {
+        let mut w = self.inner.write().await;
+        for i in snap.investigations {
+            w.insert(i.id.clone(), i);
+        }
+    }
+}
+
+/// Serializable snapshot of [`InvestigationStore`] state for file-based persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvestigationStoreSnapshot {
+    pub investigations: Vec<Investigation>,
 }
 
 /// Build a stable investigation id from its seed + a creation timestamp.

@@ -1,7 +1,8 @@
 //! Shared application state handed to every handler via axum's `State` extractor.
 
 use hkgov_agent::{
-    AlertLog, FeedbackStore, InsightStore, InvestigationStore, LlmClient, SignalStore, UserStore,
+    AlertLog, FeedbackStore, InsightStore, InvestigationStore, LlmClient, MagicLinkDelivery,
+    SignalStore, UserStore,
 };
 use hkgov_common::Settings;
 use hkgov_connectors::registry::Registry;
@@ -32,5 +33,8 @@ pub struct AppState {
     /// Dispatch log for proactive alerting (always present; empty when alerts
     /// are disabled). Exposed via `GET /v1/alerts`.
     pub alert_log: Arc<AlertLog>,
+    /// Magic-link email delivery sink. Log-based by default (dev/CI); HTTP
+    /// email-gateway when the `alerts` feature + delivery config are present.
+    pub magic_link_delivery: Arc<dyn MagicLinkDelivery>,
     pub settings: Arc<Settings>,
 }

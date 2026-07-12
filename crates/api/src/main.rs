@@ -92,12 +92,143 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let registry = Arc::new(hkgov_connectors::registry::Registry::build(&settings)?);
+
+    // D-012 guard: validate that every scan-target slug the agent will scan is
+    // actually served by a registered connector. A catalog rewrite that renames
+    // a slug silently produced zero findings (the detector ran against a dataset
+    // the store never warmed). This turns that into a loud boot-time warning so
+    // it's caught before the first pass rather than hours later via empty output.
+    //
+    // Also logs the *effective* scan targets (defaults when `agent.scan` is
+    // empty), so an operator can see exactly which detectors will run without
+    // reading source code — the defaults previously lived only in
+    // `default_scan_targets()` and were invisible at runtime.
+    if settings.agent.enabled {
+        let scan: Vec<hkgov_common::ScanTarget> = if settings.agent.scan.is_empty() {
+            hkgov_common::default_scan_targets()
+        } else {
+            settings.agent.scan.clone()
+        };
+        let using_defaults = settings.agent.scan.is_empty();
+        tracing::info!(
+            count = scan.len(),
+            source = if using_defaults {
+                "built-in defaults"
+            } else {
+                "config.toml [[agent.scan]]"
+            },
+            "agent scan targets (effective):"
+        );
+        for t in &scan {
+            tracing::info!(
+                source = %t.source,
+                dataset = %t.dataset,
+                detector = %t.detector,
+                field = ?t.field,
+                "  scan target",
+            );
+        }
+        let unknown = registry.validate_scan_targets(&scan);
+        if !unknown.is_empty() {
+            for v in &unknown {
+                tracing::error!(
+                    source = %v.source,
+                    dataset = %v.dataset,
+                    kind = %v.kind,
+                    "scan target references a dataset no connector serves — \
+                     this detector will produce no findings. Update the slug or \
+                     remove the scan target."
+                );
+            }
+            tracing::error!(
+                count = unknown.len(),
+                "scan-target validation failed; {} target(s) reference unknown datasets. \
+                 The agent will run but these detectors will be no-ops. Fix the slugs in \
+                 config.toml [[agent.scan]] or report a connector/catalog drift.",
+                unknown.len()
+            );
+        }
+    }
+
     let store: Arc<MemoryStore> = build_store(&settings)?;
     let insights = Arc::new(InsightStore::new());
     let feedback = Arc::new(hkgov_agent::FeedbackStore::new());
     let signals = Arc::new(hkgov_agent::SignalStore::new());
     let investigations = Arc::new(hkgov_agent::InvestigationStore::new());
     let users = Arc::new(hkgov_agent::UserStore::new());
+
+    // File-based persistence stopgap: restore all user-authored state from the
+    // snapshot directory so signals, investigations, identity, insights, and
+    // feedback survive a graceful restart. A missing or corrupt snapshot is a
+    // no-op (store starts empty). The snapshot directory defaults to `./data`;
+    // override with `HKGOV_PERSIST__DIR`. Set to an empty string to disable.
+    let persist_dir = std::env::var("HKGOV_PERSIST__DIR").unwrap_or_else(|_| "data".into());
+    let persist_dir_path = if !persist_dir.is_empty() {
+        let dir = std::path::PathBuf::from(&persist_dir);
+        let _ = std::fs::create_dir_all(&dir);
+        Some(dir)
+    } else {
+        None
+    };
+
+    // Helper: restore a store from its snapshot file (no-op if missing/corrupt).
+    macro_rules! restore_store {
+        ($store:expr, $snap:path, $name:literal, $dir:expr) => {{
+            let path = $dir.join(concat!($name, ".json"));
+            if let Some(snap) = hkgov_agent::persist::restore_from_file::<$snap>(&path).await {
+                $store.restore(snap).await;
+                tracing::info!(path = %path.display(), concat!("restored ", $name, " store from snapshot"));
+            }
+            path
+        }};
+    }
+
+    let users_snapshot_path = match &persist_dir_path {
+        Some(dir) => Some(restore_store!(
+            users,
+            hkgov_agent::UserStoreSnapshot,
+            "users",
+            dir
+        )),
+        None => None,
+    };
+    let insights_snapshot_path = match &persist_dir_path {
+        Some(dir) => Some(restore_store!(
+            insights,
+            hkgov_agent::InsightStoreSnapshot,
+            "insights",
+            dir
+        )),
+        None => None,
+    };
+    let signals_snapshot_path = match &persist_dir_path {
+        Some(dir) => Some(restore_store!(
+            signals,
+            hkgov_agent::SignalStoreSnapshot,
+            "signals",
+            dir
+        )),
+        None => None,
+    };
+    let investigations_snapshot_path = match &persist_dir_path {
+        Some(dir) => Some(restore_store!(
+            investigations,
+            hkgov_agent::InvestigationStoreSnapshot,
+            "investigations",
+            dir
+        )),
+        None => None,
+    };
+    let feedback_snapshot_path = match &persist_dir_path {
+        Some(dir) => Some(restore_store!(
+            feedback,
+            hkgov_agent::FeedbackStoreSnapshot,
+            "feedback",
+            dir
+        )),
+        None => None,
+    };
+
     // Build the LLM client up front so both the supervisor and the /v1/ask
     // endpoint share the same instance.
     let llm: Arc<dyn LlmClient> = build_llm_client(&settings);
@@ -161,6 +292,52 @@ async fn main() -> anyhow::Result<()> {
         false
     };
 
+    // Periodic snapshot of all user-authored stores (stopgap persistence).
+    // Saves identity, insights, signals, investigations, and feedback to disk
+    // every 60s so a graceful restart doesn't wipe user state. The first
+    // snapshot fires after one interval, covering a quick restart cycle.
+    //
+    // Helper: spawn a periodic snapshot task for one store.
+    macro_rules! spawn_snapshot_task {
+        ($store:expr, $path:expr, $name:literal) => {
+            if let Some(ref path) = $path {
+                let store = $store.clone();
+                let path = path.clone();
+                tokio::spawn(async move {
+                    let interval = Duration::from_secs(60);
+                    loop {
+                        tokio::time::sleep(interval).await;
+                        let snap = store.snapshot().await;
+                        if let Err(e) = hkgov_agent::persist::snapshot_to_file(&path, &snap).await {
+                            tracing::warn!(
+                                path = %path.display(),
+                                error = %e,
+                                concat!($name, "-store snapshot failed")
+                            );
+                        }
+                    }
+                });
+            }
+        };
+    }
+
+    spawn_snapshot_task!(users, users_snapshot_path, "user");
+    spawn_snapshot_task!(insights, insights_snapshot_path, "insight");
+    spawn_snapshot_task!(signals, signals_snapshot_path, "signal");
+    spawn_snapshot_task!(
+        investigations,
+        investigations_snapshot_path,
+        "investigation"
+    );
+    spawn_snapshot_task!(feedback, feedback_snapshot_path, "feedback");
+
+    // Magic-link email delivery sink. The default is the log-based sink (dev/CI
+    // — logs the delivery event so a log-shipper pipeline can transport it).
+    // When `HKGOV_MAGIC_LINK__API_URL` is set (and the `alerts` feature is on
+    // for reqwest), the HTTP email-gateway sink is used instead — the production
+    // path for real email delivery via SendGrid/Mailgun/SES-via-HTTP.
+    let magic_link_delivery: Arc<dyn hkgov_agent::MagicLinkDelivery> = build_magic_link_delivery();
+
     let state = AppState {
         registry,
         store,
@@ -171,6 +348,7 @@ async fn main() -> anyhow::Result<()> {
         users,
         llm,
         alert_log,
+        magic_link_delivery,
         settings: Arc::new(settings.clone()),
     };
 
@@ -230,6 +408,48 @@ fn build_llm_client(settings: &Settings) -> Arc<dyn LlmClient> {
     }
     let _ = settings;
     Arc::new(HeuristicClient::new())
+}
+
+/// Construct the magic-link delivery sink. Default: log-based (dev/CI). When
+/// `HKGOV_MAGIC_LINK__API_URL` is set, the HTTP email-gateway sink is used
+/// (SendGrid/Mailgun/SES-via-HTTP — behind the `alerts` feature for reqwest).
+fn build_magic_link_delivery() -> Arc<dyn hkgov_agent::MagicLinkDelivery> {
+    let api_url = std::env::var("HKGOV_MAGIC_LINK__API_URL").unwrap_or_default();
+    if !api_url.is_empty() {
+        #[cfg(feature = "alerts")]
+        {
+            let token = std::env::var("HKGOV_MAGIC_LINK__API_TOKEN").unwrap_or_default();
+            let from = std::env::var("HKGOV_MAGIC_LINK__FROM")
+                .unwrap_or_else(|_| "HK City Pulse <noreply@hkgov-rethink.example>".into());
+            let redeem_base = std::env::var("HKGOV_MAGIC_LINK__REDEEM_BASE_URL")
+                .unwrap_or_else(|_| "https://hkgov-rethink-production.up.railway.app".into());
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
+            tracing::info!(
+                api_url = %api_url,
+                from = %from,
+                "magic-link HTTP email delivery configured"
+            );
+            return Arc::new(hkgov_agent::HttpMagicLinkDelivery::new(
+                api_url,
+                token,
+                from,
+                redeem_base,
+                client,
+            ));
+        }
+        #[cfg(not(feature = "alerts"))]
+        {
+            tracing::warn!(
+                api_url = %api_url,
+                "HKGOV_MAGIC_LINK__API_URL is set but the `alerts` feature is not enabled — \
+                 falling back to log-based delivery. Rebuild with --features alerts to use HTTP email."
+            );
+        }
+    }
+    Arc::new(hkgov_agent::LogMagicLinkDelivery)
 }
 
 /// Wait until the datasets the configured scan targets reference have at least

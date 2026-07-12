@@ -27,6 +27,7 @@ serde_json.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
 # SHA-256 for the Cite-It reproducibility manifest (P-101).
 sha2.workspace = true
 # CSPRNG for one-time magic-link tokens + session handles (V-006 fix). The old

@@ -12,6 +12,20 @@
 //!   GET  /alerts?limit=               — proactive alert dispatch log
 //!   POST /ask                         — natural-language Q&A over the data
 
+mod auth_routes;
+mod investigations;
+mod signals;
+
+// Bring the extracted handlers into scope so `router()` can reference them.
+use auth_routes::{auth_me, bearer_token, redeem_auth_token, request_auth_token};
+use investigations::{
+    add_investigation_note, append_investigation_step, create_investigation, delete_investigation,
+    get_investigation, list_investigations,
+};
+use signals::{
+    create_signal, delete_signal, get_signal, list_signals, preview_signal_route, update_signal,
+};
+
 use crate::auth::{guard, make_guard};
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -118,6 +132,13 @@ pub fn router(state: AppState) -> Router {
         .route("/dashboard", get(dashboard))
         .route("/dashboard/", get(dashboard))
         .route("/cite/{id}", get(dashboard))
+        // Dashboard JS modules (split from app.js for navigability). Embedded at
+        // compile time, same as the dashboard HTML. Auth-exempt (static assets).
+        .route("/api.js", get(dashboard_js_api))
+        .route("/i18n.js", get(dashboard_js_i18n))
+        .route("/features.js", get(dashboard_js_features))
+        .route("/pages.js", get(dashboard_js_pages))
+        .route("/boot.js", get(dashboard_js_boot))
         // /llms.txt — a curated agent index for the llms.txt convention (and the
         // kind of predictable, crawlable text surface Cloudflare's "Markdown for
         // Agents" model targets). Embedded at compile time, same as the
@@ -315,13 +336,37 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
 /// (`include_str!`) so the deployed binary — and the Docker image — carry it
 /// with no external file dependency. Open `http://host:port/dashboard`.
 async fn dashboard(State(_): State<AppState>) -> axum::response::Response {
-    const HTML: &str = include_str!("../../../dashboard/index.html");
+    const HTML: &str = include_str!("../../../../dashboard/index.html");
     (
         [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
         axum::response::Html(HTML),
     )
         .into_response()
 }
+
+/// Serve a dashboard JS module. Each module is embedded at compile time (same
+/// pattern as `dashboard`). The content type is `application/javascript`.
+macro_rules! dashboard_js_handler {
+    ($fn_name:ident, $file:literal) => {
+        async fn $fn_name(State(_): State<AppState>) -> axum::response::Response {
+            const JS: &str = include_str!($file);
+            (
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/javascript; charset=utf-8",
+                )],
+                JS,
+            )
+                .into_response()
+        }
+    };
+}
+
+dashboard_js_handler!(dashboard_js_api, "../../../../dashboard/api.js");
+dashboard_js_handler!(dashboard_js_i18n, "../../../../dashboard/i18n.js");
+dashboard_js_handler!(dashboard_js_features, "../../../../dashboard/features.js");
+dashboard_js_handler!(dashboard_js_pages, "../../../../dashboard/pages.js");
+dashboard_js_handler!(dashboard_js_boot, "../../../../dashboard/boot.js");
 
 /// Serve the curated agent index (`llms.txt`). This is a single static
 /// markdown file that orients AI agents to the app, its data, and its API. It
@@ -334,7 +379,7 @@ async fn dashboard(State(_): State<AppState>) -> axum::response::Response {
 /// Content type is `text/markdown` (no negotiation: by the llms.txt convention
 /// `/llms.txt` is always markdown).
 async fn llms_txt(State(_): State<AppState>) -> axum::response::Response {
-    const MD: &str = include_str!("../../../dashboard/llms.txt");
+    const MD: &str = include_str!("../../../../dashboard/llms.txt");
     (
         [(
             axum::http::header::CONTENT_TYPE,
@@ -961,415 +1006,6 @@ async fn unprecedentedness(
     Ok(Json(read))
 }
 
-// ---- Signals (P-102) — authoring + preview ---------------------------------
-//
-// A signal is a user-owned ScanTarget plus channel routing. v1 ships authoring
-// + preview (stateless). Server-side push (holding channel secrets, scheduled
-// re-scan, outbound HTTP) waits on P-108 (identity). The `owner` field is the
-// pseudo-identity `X-Reader-Id` header (client-generated UUID) until real auth
-// lands — matches the current shared-key trust model.
-//
-// [risk] D-009 (known risk, waived for v1 by design): `owner` is a *filter*, not
-// an *ACL*. Any caller holding the shared API key can list (`?owner=` empty →
-// all owners), read, update, or delete any other user's signals and
-// investigations. This is the documented "shared-key trust model" — every keyed
-// caller is mutually trusting. Before multi-tenant deployment, the owner must
-// become an enforced principal: derive `owner` from the authenticated session
-// (not the request body) and reject cross-owner mutations. Tracked as a risk,
-// not fixed here, because the v1 auth model intentionally has a single trust
-// domain.
-
-#[derive(Deserialize)]
-struct CreateSignalRequest {
-    /// The natural-language intent (kept for re-display).
-    #[serde(default)]
-    question: Option<String>,
-    /// The compiled scan target. The caller compiles intent→target client-side
-    /// for now (a future `compile_intent` LLM step can move this server-side).
-    compiled: hkgov_common::ScanTarget,
-    /// Where to push when it fires. v1 stores these; dispatch waits on P-108.
-    #[serde(default)]
-    channels: Vec<hkgov_agent::SignalChannel>,
-}
-
-async fn create_signal(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<CreateSignalRequest>,
-) -> Result<Json<hkgov_agent::Signal>, ApiError> {
-    // V-004: owner comes from the authenticated session, NOT the request body.
-    // The request no longer even carries an `owner` field — there is no way
-    // for a caller to claim another user's identity.
-    let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    let id = hkgov_agent::signal_id(&owner, &req.compiled);
-    let signal = hkgov_agent::Signal {
-        id,
-        owner,
-        question: req.question.unwrap_or_default(),
-        compiled: req.compiled,
-        channels: req.channels,
-        enabled: true,
-        created_at: chrono::Utc::now(),
-        updated_at: None,
-    };
-    Ok(Json(state.signals.create(signal).await))
-}
-
-#[derive(Deserialize, Default)]
-struct ListSignalsQuery {
-    #[serde(default = "default_limit")]
-    limit: usize,
-}
-
-/// Upper bound on per-user list endpoints (signals/investigations).
-const MAX_LIST_LIMIT: usize = 100;
-
-async fn list_signals(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<ListSignalsQuery>,
-) -> Result<Json<Vec<hkgov_agent::Signal>>, ApiError> {
-    // V-004: scope to the authenticated caller only. The old `?owner=` filter
-    // let anyone list every user's signals (empty owner = all). `list_owned`
-    // returns ONLY the caller's records.
-    let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    let limit = q.limit.clamp(1, MAX_LIST_LIMIT);
-    Ok(Json(state.signals.list_owned(&owner, limit).await))
-}
-
-async fn get_signal(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Result<Json<Option<hkgov_agent::Signal>>, ApiError> {
-    // V-004: ownership-gated read.
-    let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    Ok(Json(state.signals.get_owned(&id, &owner).await))
-}
-
-async fn delete_signal(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    // V-004: ownership-gated delete. A caller can no longer destroy another
-    // user's signal by guessing/enumerating its id.
-    let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    let ok = state.signals.delete_owned(&id, &owner).await;
-    Ok(Json(serde_json::json!({ "deleted": ok })))
-}
-
-async fn update_signal(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(patch): Json<hkgov_agent::SignalPatch>,
-) -> Result<Json<hkgov_agent::Signal>, ApiError> {
-    // V-010: the body is now a SignalPatch (an explicit allow-list of mutable
-    // fields: question/compiled/channels/enabled). The immutable fields —
-    // owner, id, created_at — are absent from the struct, so they can never be
-    // rewritten by a request body. V-004: the update is ownership-gated.
-    let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    match state.signals.update_owned(&id, &owner, patch).await {
-        Some(s) => Ok(Json(s)),
-        None => Err(ApiError(hkgov_common::Error::NotFound(
-            "signal not found".into(),
-        ))),
-    }
-}
-
-#[derive(Deserialize)]
-struct PreviewSignalRequest {
-    /// The compiled scan target to preview.
-    compiled: hkgov_common::ScanTarget,
-    /// Window in days (default 90).
-    #[serde(default = "default_preview_window")]
-    window_days: i64,
-}
-
-fn default_preview_window() -> i64 {
-    90
-}
-
-async fn preview_signal_route(
-    State(state): State<AppState>,
-    Json(req): Json<PreviewSignalRequest>,
-) -> Json<hkgov_agent::SignalPreview> {
-    let preview = hkgov_agent::preview_signal(&state.store, &req.compiled, req.window_days).await;
-    Json(preview)
-}
-
-// ---- Investigations (P-105) — saved, resumable case files ------------------
-//
-// From any insight, a user launches a multi-step investigation. v1 stores the
-// case file in-process (volatile, no DB tier). The `owner` field is the pseudo-
-// identity until P-108; share/resume work via the case-file id over the shared
-// API key.
-
-#[derive(Deserialize)]
-struct CreateInvestigationRequest {
-    /// The Insight.id this case is launched from (the seed).
-    seed_insight_id: String,
-    /// Snapshot fields (so the case is intelligible if the seed rotates).
-    seed_source: String,
-    seed_dataset: String,
-    seed_title: String,
-    /// Optional human-authored title; defaults to the seed title.
-    #[serde(default)]
-    title: Option<String>,
-}
-
-async fn create_investigation(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<CreateInvestigationRequest>,
-) -> Result<Json<hkgov_agent::Investigation>, ApiError> {
-    // V-004: owner from the session, not the body.
-    let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    let source = parse_source(&req.seed_source)?;
-    let now = chrono::Utc::now();
-    let id = hkgov_agent::investigation_id(&req.seed_insight_id, now);
-    let inv = hkgov_agent::Investigation {
-        id,
-        seed_insight_id: req.seed_insight_id,
-        seed_source: source,
-        seed_dataset: req.seed_dataset,
-        seed_title: req.seed_title.clone(),
-        title: req.title.unwrap_or(req.seed_title),
-        owner,
-        steps: Vec::new(),
-        notes: Vec::new(),
-        created_at: now,
-        updated_at: now,
-    };
-    Ok(Json(state.investigations.create(inv).await))
-}
-
-#[derive(Deserialize, Default)]
-struct ListInvestigationsQuery {
-    #[serde(default = "default_limit")]
-    limit: usize,
-}
-
-async fn list_investigations(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<ListInvestigationsQuery>,
-) -> Result<Json<Vec<hkgov_agent::Investigation>>, ApiError> {
-    // V-004: scope to the authenticated caller only.
-    let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    let limit = q.limit.clamp(1, MAX_LIST_LIMIT);
-    Ok(Json(state.investigations.list_owned(&owner, limit).await))
-}
-
-async fn get_investigation(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Result<Json<Option<hkgov_agent::Investigation>>, ApiError> {
-    // V-004: ownership-gated read.
-    let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    Ok(Json(state.investigations.get_owned(&id, &owner).await))
-}
-
-async fn delete_investigation(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    // V-004: ownership-gated delete.
-    let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    let ok = state.investigations.delete_owned(&id, &owner).await;
-    Ok(Json(serde_json::json!({ "deleted": ok })))
-}
-
-#[derive(Deserialize)]
-struct AppendStepRequest {
-    kind: String,
-    prompt: String,
-    #[serde(default)]
-    answer: Option<hkgov_agent::Answer>,
-    #[serde(default)]
-    trace: Vec<hkgov_agent::TraceStep>,
-    #[serde(default)]
-    annotation: Option<String>,
-}
-
-async fn append_investigation_step(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(req): Json<AppendStepRequest>,
-) -> Result<Json<hkgov_agent::Investigation>, ApiError> {
-    // V-004: ownership-gated mutation.
-    let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    let kind = match req.kind.as_str() {
-        "chip" => hkgov_agent::StepKind::Chip,
-        "qa" => hkgov_agent::StepKind::Qa,
-        "finding_promotion" => hkgov_agent::StepKind::FindingPromotion,
-        other => {
-            return Err(ApiError(hkgov_common::Error::BadRequest(format!(
-                "unknown step kind: {other} (try chip|qa|finding_promotion)"
-            ))))
-        }
-    };
-    let step = hkgov_agent::InvestigationStep {
-        id: String::new(), // assigned by append_step
-        kind,
-        prompt: req.prompt,
-        answer: req.answer,
-        trace: req.trace,
-        executed_at: chrono::Utc::now(),
-        annotation: req.annotation,
-    };
-    match state
-        .investigations
-        .append_step_owned(&id, &owner, step)
-        .await
-    {
-        Some(inv) => Ok(Json(inv)),
-        None => Err(ApiError(hkgov_common::Error::NotFound(
-            "investigation not found".into(),
-        ))),
-    }
-}
-
-#[derive(Deserialize)]
-struct AddNoteRequest {
-    body: String,
-}
-
-async fn add_investigation_note(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(req): Json<AddNoteRequest>,
-) -> Result<Json<hkgov_agent::Investigation>, ApiError> {
-    // V-004: ownership-gated mutation.
-    let owner = require_principal(principal_id(&state.users, &headers).await)?;
-    match state
-        .investigations
-        .add_note_owned(&id, &owner, req.body)
-        .await
-    {
-        Some(inv) => Ok(Json(inv)),
-        None => Err(ApiError(hkgov_common::Error::NotFound(
-            "investigation not found".into(),
-        ))),
-    }
-}
-
-// ---- Auth (P-108) — email + magic-link identity ----------------------------
-//
-// The cheapest identity that unblocks the per-user features (signals,
-// investigations, read-state). A user POSTs their email → gets a one-time token
-// (returned directly in dev/CI; emailed in production) → redeems it for a
-// session handle → uses `Authorization: Bearer {session}` on subsequent calls.
-// The `User.id` is the principal the other features key on as `owner`.
-
-#[derive(Deserialize)]
-struct RequestTokenRequest {
-    email: String,
-}
-
-#[derive(Serialize)]
-struct TokenResponse {
-    /// The one-time token. V-005: **only** present when `api.dev_return_auth_token`
-    /// is set (dev/CI). In production the token is delivered out-of-band (email)
-    /// and this field is `None` (serialized as `null` / omitted) — returning it
-    /// in the body meant anyone who could read the response (logs/MITM) could
-    /// impersonate the email owner.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    token: Option<String>,
-    /// When the token expires (RFC 3339). The client should re-request after.
-    expires_at: chrono::DateTime<chrono::Utc>,
-}
-
-async fn request_auth_token(
-    State(state): State<AppState>,
-    Json(req): Json<RequestTokenRequest>,
-) -> Json<TokenResponse> {
-    let t = state.users.issue_token(req.email.trim()).await;
-    // V-005: only return the credential in the body when the operator has
-    // explicitly opted into the dev/CI mode. Otherwise the token must be
-    // delivered out-of-band (the email sink the identity tier is designed
-    // around); the body just confirms the request was accepted + when it
-    // expires.
-    let token = if state.settings.api.dev_return_auth_token {
-        Some(t.token)
-    } else {
-        None
-    };
-    Json(TokenResponse {
-        token,
-        expires_at: t.expires_at,
-    })
-}
-
-#[derive(Deserialize)]
-struct RedeemRequest {
-    token: String,
-}
-
-#[derive(Serialize)]
-struct RedeemResponse {
-    session_token: String,
-    user: hkgov_agent::User,
-}
-
-async fn redeem_auth_token(
-    State(state): State<AppState>,
-    Json(req): Json<RedeemRequest>,
-) -> Result<Json<RedeemResponse>, ApiError> {
-    let session = state.users.redeem_token(&req.token).await.ok_or_else(|| {
-        ApiError(hkgov_common::Error::BadRequest(
-            "token invalid, expired, or already used".into(),
-        ))
-    })?;
-    let user = state.users.get(&session.user_id).await.ok_or_else(|| {
-        ApiError(hkgov_common::Error::Internal(
-            "session minted for unknown user".into(),
-        ))
-    })?;
-    Ok(Json(RedeemResponse {
-        session_token: session.session_token,
-        user,
-    }))
-}
-
-/// Resolve the `Authorization: Bearer {session}` header to the current user.
-/// Returns 401 when no (valid) session is present, so a client gating UI on auth
-/// gets a distinct status from a successful call (matching `require_principal`).
-async fn auth_me(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-) -> Result<Json<hkgov_agent::User>, ApiError> {
-    let session = bearer_token(&headers);
-    let user = match session {
-        Some(s) => state.users.lookup_session(&s).await,
-        None => None,
-    };
-    user.map(Json).ok_or_else(|| {
-        ApiError(hkgov_common::Error::Unauthorized(
-            "no active session: send a valid Authorization: Bearer {session}".into(),
-        ))
-    })
-}
-
-/// Extract the `Bearer {token}` value from an Authorization header, if present.
-fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
-    let auth = headers
-        .get(axum::http::header::AUTHORIZATION)?
-        .to_str()
-        .ok()?;
-    let token = auth.strip_prefix("Bearer ")?.trim();
-    if token.is_empty() {
-        None
-    } else {
-        Some(token.to_string())
-    }
-}
-
 // ---- POST /ask — natural-language Q&A -------------------------------------
 
 #[derive(Deserialize)]
@@ -1378,11 +1014,6 @@ struct AskRequest {
 }
 
 /// Answer a natural-language question about the data.
-///
-/// Rich mode (LLM configured): drives [`run_agent_loop`], letting the model
-/// call store/detector tools and reason to an answer.
-/// Heuristic mode (default, no key): [`heuristic_answer`] matches keywords
-/// against ingested datasets — useful but shallow.
 async fn ask(
     State(state): State<AppState>,
     Json(req): Json<AskRequest>,
@@ -1422,6 +1053,9 @@ fn parse_source(s: &str) -> Result<DataSource, ApiError> {
 
 #[cfg(test)]
 mod tests {
+    use super::auth_routes::RequestTokenRequest;
+    use super::investigations::ListInvestigationsQuery;
+    use super::signals::ListSignalsQuery;
     use super::*;
     use hkgov_common::Settings;
     use hkgov_store::RecordStore;
@@ -1476,6 +1110,7 @@ mod tests {
             users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
             settings: Arc::new(settings),
         }
     }
@@ -1656,6 +1291,7 @@ mod tests {
             users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
             settings: Arc::new(settings),
         }
     }
@@ -1969,6 +1605,7 @@ mod tests {
             users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
             settings: Arc::new(settings),
         }
     }
@@ -2077,6 +1714,7 @@ mod tests {
             users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
             settings: Arc::new(settings),
         }
     }
@@ -2243,6 +1881,7 @@ mod tests {
             users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
             settings: Arc::new(settings),
         }
     }

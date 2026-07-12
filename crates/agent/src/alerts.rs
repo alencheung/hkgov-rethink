@@ -326,7 +326,13 @@ impl AlertSink for WebhookSink {
                 }
             }
         }
-        unreachable!("retry loop returns within 2 attempts")
+        // Every loop iteration either returns or continues; the loop runs at most
+        // 2 iterations and the final one always returns. Reaching here is a
+        // logic error (e.g. someone changed the loop bound) — return an error
+        // rather than panicking the dispatch path.
+        Err(hkgov_common::Error::Internal(
+            "webhook dispatch exited its retry loop without a result".into(),
+        ))
     }
 }
 

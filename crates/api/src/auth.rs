@@ -123,6 +123,7 @@ mod tests {
             users: Arc::new(hkgov_agent::UserStore::new()),
             llm: Arc::new(hkgov_agent::HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
             settings: Arc::new(settings),
         };
         router(state)

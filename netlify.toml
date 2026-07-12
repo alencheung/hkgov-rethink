@@ -23,7 +23,8 @@
 
 # ── Security headers ────────────────────────────────────────────────
 # Raises securityheaders.com grade to A (no warnings). The dashboard's JS
-# was externalised to /app.js and all inline event handlers moved to a
+# is split into external modules (api.js, i18n.js, features.js, pages.js,
+# boot.js) and all inline event handlers moved to a
 # data-action delegation pattern, so script-src no longer needs
 # 'unsafe-inline'. style-src still allows 'unsafe-inline' (inline <style>
 # + style attributes; not flagged by securityheaders.com). Whitelist:

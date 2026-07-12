@@ -300,6 +300,29 @@ impl SignalStore {
     pub async fn count(&self) -> usize {
         self.inner.read().await.len()
     }
+
+    // ---- file-based persistence -----
+
+    /// Capture a serializable snapshot for the file-based persistence layer.
+    pub async fn snapshot(&self) -> SignalStoreSnapshot {
+        SignalStoreSnapshot {
+            signals: self.inner.read().await.values().cloned().collect(),
+        }
+    }
+
+    /// Restore from a snapshot (loaded on boot).
+    pub async fn restore(&self, snap: SignalStoreSnapshot) {
+        let mut w = self.inner.write().await;
+        for s in snap.signals {
+            w.insert(s.id.clone(), s);
+        }
+    }
+}
+
+/// Serializable snapshot of [`SignalStore`] state for file-based persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalStoreSnapshot {
+    pub signals: Vec<Signal>,
 }
 
 /// Compile a stable signal id from its owner + scan target. Two identical
@@ -385,13 +408,22 @@ fn record_after(rec: &hkgov_common::NormalizedRecord, cutoff: DateTime<Utc>) -> 
     let s = &rec.record_id;
     if s.len() >= 10 {
         if let Ok(d) = chrono::NaiveDate::parse_from_str(&s[..10], "%Y-%m-%d") {
-            return d.and_hms_opt(0, 0, 0).unwrap().and_utc() > cutoff;
+            // Midnight (0,0,0) is always a valid time of day, so this never returns None.
+            return d
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight is always a valid time")
+                .and_utc()
+                > cutoff;
         }
     }
     if s.len() >= 7 {
         // YYYY-MM: treat as the first of the month.
         if let Ok(d) = chrono::NaiveDate::parse_from_str(&format!("{}-01", &s[..7]), "%Y-%m-%d") {
-            return d.and_hms_opt(0, 0, 0).unwrap().and_utc() > cutoff;
+            return d
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight is always a valid time")
+                .and_utc()
+                > cutoff;
         }
     }
     true // unparseable → keep

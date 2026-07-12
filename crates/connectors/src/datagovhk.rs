@@ -55,6 +55,21 @@ struct DataGovResource {
     id_field: Option<&'static str>,
 }
 
+/// Normalize a resource URL for the v2 filter API: upgrade `http://` to
+/// `https://`. The resource URL is an *identifier* passed to the filter API
+/// (the platform fetches the underlying file), not a URL we fetch directly, so
+/// upgrading is safe and avoids mixed-content / TLS-posture concerns. All HK
+/// government PSI hosts (`*.gov.hk`, `static.data.gov.hk`, `centanet.com`)
+/// serve over HTTPS. Applied centrally at query-build time so the table values
+/// and any future additions are covered uniformly.
+fn normalize_resource_url(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("http://") {
+        format!("https://{rest}")
+    } else {
+        url.to_string()
+    }
+}
+
 /// The verified data.gov.hk resource table. Every `resource_url` here was
 /// confirmed to return data via `api.data.gov.hk/v2/filter` (see module docs).
 const RESOURCES: &[DataGovResource] = &[
@@ -402,7 +417,7 @@ impl DataGovHkConnector {
     /// Build the `q` parameter value for the v2 filter API.
     fn build_query(&self, resource_url: &str) -> serde_json::Value {
         serde_json::json!({
-            "resource": resource_url,
+            "resource": normalize_resource_url(resource_url),
             "section": 1,
             "format": "json"
         })
@@ -690,5 +705,18 @@ mod tests {
             .find(|r| r.slug == "money-lenders-licensees")
             .expect("money-lenders-licensees must remain registered");
         assert_eq!(r.id_field, Some("MLR_No"));
+    }
+
+    #[test]
+    fn normalize_resource_url_upgrades_http_to_https() {
+        assert_eq!(
+            normalize_resource_url("http://www.cr.gov.hk/datagovhk/psi/x.csv"),
+            "https://www.cr.gov.hk/datagovhk/psi/x.csv"
+        );
+        // https is left untouched.
+        assert_eq!(
+            normalize_resource_url("https://www.chp.gov.hk/files/misc/x.csv"),
+            "https://www.chp.gov.hk/files/misc/x.csv"
+        );
     }
 }

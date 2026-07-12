@@ -763,7 +763,11 @@ pub fn detect_proxy_divergence(
     let mut findings = Vec::new();
 
     // (1) Value divergence on the most recent joined period.
-    let (last_key, last_a, last_b) = pairs.last().cloned().unwrap();
+    // Safe: the MIN_SAMPLES guard above guarantees pairs is non-empty.
+    let (last_key, last_a, last_b) = pairs
+        .last()
+        .cloned()
+        .expect("pairs is non-empty after the MIN_SAMPLES guard");
     let base = last_a.abs().max(last_b.abs());
     if base > f64::EPSILON {
         let delta_pct_observed = ((last_a - last_b).abs() / base) * 100.0;

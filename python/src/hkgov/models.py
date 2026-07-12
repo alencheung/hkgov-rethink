@@ -116,3 +116,170 @@ class AlertLogEntry:
     sink: str
     status: str
     dispatched_at: str
+
+
+# ---- v7/v8 product-layer types ---------------------------------------------
+
+
+@dataclass(frozen=True)
+class SilenceSignal:
+    kind: str
+    count: int
+    weight: float
+    contribution: float
+    evidence_ids: list[str]
+
+
+@dataclass(frozen=True)
+class SilenceIndex:
+    label: str
+    methodology_version: str
+    source: str
+    period: str
+    score: float
+    raw_score: float
+    computed_at: str
+    total_events: int
+    signals: list[SilenceSignal] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class NormalRange:
+    low: float
+    high: float
+    median: float
+    mad: float
+
+
+@dataclass(frozen=True)
+class LastExceeded:
+    record_id: str
+    value: float
+    when: Optional[str]
+    pct_beyond_edge: float
+
+
+@dataclass(frozen=True)
+class Unprecedentedness:
+    value: float
+    n: int
+    percentile: Optional[float] = None
+    band: Optional[NormalRange] = None
+    one_in_n: Optional[int] = None
+    hist_min: Optional[float] = None
+    hist_max: Optional[float] = None
+    last_exceeded: Optional[LastExceeded] = None
+
+
+@dataclass(frozen=True)
+class ReproducibilityManifest:
+    cite_version: str
+    detector: str
+    source: str
+    dataset: str
+    data_sha256: str
+    generated_at: str
+    threshold: Optional[float] = None
+    runtime_version: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Citation:
+    permalink: str
+    insight_id: str
+    cite_version: str
+    title: str
+    publisher: str
+    year: int
+    generated_at: str
+    experimental: bool
+    manifest: ReproducibilityManifest
+
+
+@dataclass(frozen=True)
+class ScanTarget:
+    source: str
+    dataset: str
+    detector: str
+    field: Optional[str] = None
+    threshold: Optional[float] = None
+    field_b: Optional[str] = None
+    companion: Optional[dict[str, Any]] = None
+    cadence: str = "unknown"
+    comparison: str = "period_over_period"
+    direction: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class SignalChannel:
+    kind: str
+    target: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Signal:
+    id: str
+    owner: str
+    question: str
+    compiled: ScanTarget
+    enabled: bool
+    created_at: str
+    updated_at: Optional[str] = None
+    channels: list[SignalChannel] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class InvestigationStep:
+    id: str
+    kind: str
+    prompt: str
+    answer: Optional[Answer] = None
+    trace: list[TraceStep] = field(default_factory=list)
+    annotation: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Investigation:
+    id: str
+    seed_insight_id: str
+    seed_source: str
+    seed_dataset: str
+    seed_title: str
+    title: str
+    owner: str
+    steps: list[InvestigationStep] = field(default_factory=list)
+    notes: list[dict[str, Any]] = field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class User:
+    id: str
+    email: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class TokenResponse:
+    token: Optional[str]
+    expires_at: str
+
+
+@dataclass(frozen=True)
+class Session:
+    session_token: str
+    user: User
+
+
+@dataclass(frozen=True)
+class Finding:
+    kind: str
+    source: str
+    dataset: str
+    title: str
+    summary: str
+    severity: str
+    confidence: float
+    evidence: list[EvidenceRef] = field(default_factory=list)

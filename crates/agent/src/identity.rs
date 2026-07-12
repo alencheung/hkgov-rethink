@@ -30,7 +30,9 @@
 //! store — `issue_token` returns the token directly (dev/CI) or hands it to an
 //! email sink (when the `alerts` feature is wired, future work).
 
+use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
+use hkgov_common::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -106,6 +108,18 @@ pub struct UserStore {
 /// Reaping on every issue would add lock contention to the unauthenticated path;
 /// this batches the work.
 const REAP_EVERY_ISSUES: u64 = 16;
+
+/// A serializable snapshot of the [`UserStore`]'s persistent state. Used by the
+/// file-based persistence layer (`persist.rs`) to survive graceful restarts.
+///
+/// Tokens are deliberately excluded — they're short-lived (15 min TTL) one-time
+/// credentials. Persisting them would extend their lifetime across restarts,
+/// undermining the one-time guarantee.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserStoreSnapshot {
+    pub users: Vec<User>,
+    pub sessions: Vec<(String, Session)>,
+}
 
 impl UserStore {
     pub fn new() -> Self {
@@ -233,6 +247,40 @@ impl UserStore {
 
     pub async fn count(&self) -> usize {
         self.users.read().await.len()
+    }
+
+    // ---- file-based persistence (stopgap until the Postgres tier lands) -----
+
+    /// Capture a serializable snapshot of the store's persistent state.
+    pub async fn snapshot(&self) -> UserStoreSnapshot {
+        UserStoreSnapshot {
+            users: self.users.read().await.values().cloned().collect(),
+            sessions: self
+                .sessions
+                .read()
+                .await
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        }
+    }
+
+    /// Restore from a snapshot (loaded from file on boot). Only restores
+    /// non-expired sessions; expired ones are dropped during the restore so a
+    /// long downtime doesn't resurrect dead sessions.
+    pub async fn restore(&self, snap: UserStoreSnapshot) {
+        let now = Utc::now();
+        let mut users = self.users.write().await;
+        for u in snap.users {
+            users.insert(u.id.clone(), u);
+        }
+        drop(users);
+        let mut sessions = self.sessions.write().await;
+        for (k, s) in snap.sessions {
+            if s.expires_at > now {
+                sessions.insert(k, s);
+            }
+        }
     }
 
     // ---- test-only helpers ------------------------------------------------
@@ -475,5 +523,169 @@ mod tests {
         };
         store.plant_session_for_test(legacy).await;
         assert!(store.lookup_session("legacy-bearer").await.is_some());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Magic-link email delivery
+// ---------------------------------------------------------------------------
+
+/// Delivers a magic-link token to a user's email address. Implementations:
+/// - [`LogMagicLinkDelivery`] (default): logs the delivery event — useful for
+///   dev/CI and for log-shipper-based delivery pipelines.
+/// - [`HttpMagicLinkDelivery`] (behind `alerts`): POSTs to an HTTP email-API
+///   gateway (SendGrid/Mailgun/SES-via-HTTP) — the production path.
+///
+/// The delivery is deliberately decoupled from the `UserStore`: the store mints
+/// the token; the delivery sink transports it. This mirrors the `AlertSink`
+/// pattern and lets operators swap delivery backends without touching identity
+/// logic.
+#[async_trait]
+pub trait MagicLinkDelivery: Send + Sync + 'static {
+    /// Deliver a magic-link token. `redeem_url` is the fully-formed URL the user
+    /// clicks (e.g. `https://app.example.com/auth/redeem?token=...`). The
+    /// delivery sink is responsible for rendering the email body.
+    async fn deliver(&self, email: &str, redeem_url: &str, expires_at: DateTime<Utc>)
+        -> Result<()>;
+
+    /// Human-readable name for logging.
+    fn name(&self) -> &'static str;
+}
+
+/// A no-op delivery sink that logs the delivery event. The default for dev/CI —
+/// the token is never logged (it's a credential), but the structured event lets
+/// an external log-based pipeline (or the test harness) observe it.
+pub struct LogMagicLinkDelivery;
+
+#[async_trait]
+impl MagicLinkDelivery for LogMagicLinkDelivery {
+    async fn deliver(
+        &self,
+        email: &str,
+        _redeem_url: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<()> {
+        tracing::info!(
+            target: "hkgov::identity::magic_link_delivered",
+            email = %email,
+            expires_at = %expires_at,
+            "magic-link token delivered (log sink); configure an HTTP email gateway for production delivery"
+        );
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "log"
+    }
+}
+
+/// HTTP email-API gateway delivery (SendGrid/Mailgun/SES-via-HTTP). Behind the
+/// `alerts` feature so the default build needs no HTTP client for identity.
+///
+/// The gateway contract is intentionally generic: a JSON POST to `api_url` with
+/// `Authorization: Bearer <token>` and a body `{to, subject, text}`. Most
+/// transactional-email APIs accept this shape directly or with a thin adapter.
+/// SMTP-sending would need a heavy crate; HTTP-API-sending reuses the existing
+/// reqwest client.
+#[cfg(feature = "alerts")]
+pub struct HttpMagicLinkDelivery {
+    api_url: String,
+    token: String,
+    from: String,
+    client: reqwest::Client,
+}
+
+#[cfg(feature = "alerts")]
+impl HttpMagicLinkDelivery {
+    pub fn new(
+        api_url: String,
+        token: String,
+        from: String,
+        _redeem_base_url: String,
+        client: reqwest::Client,
+    ) -> Self {
+        // Note: `_redeem_base_url` is accepted for API symmetry with the
+        // config-driven construction in main.rs (HKGOV_MAGIC_LINK__REDEEM_BASE_URL),
+        // but the redeem URL is built by the route handler which knows the
+        // request context. The delivery sink just transports whatever URL it's
+        // given via `deliver(email, redeem_url, expires_at)`.
+        Self {
+            api_url,
+            token,
+            from,
+            client,
+        }
+    }
+}
+
+#[cfg(feature = "alerts")]
+#[async_trait]
+impl MagicLinkDelivery for HttpMagicLinkDelivery {
+    async fn deliver(
+        &self,
+        email: &str,
+        redeem_url: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let subject = "Your HK City Pulse sign-in link";
+        let text = format!(
+            "Click the link below to sign in. The link expires at {expires_at} and can only be used once.\n\n{redeem_url}"
+        );
+        let body = serde_json::json!({
+            "from": self.from,
+            "to": email,
+            "subject": subject,
+            "text": text,
+        });
+        let resp = self
+            .client
+            .post(&self.api_url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| hkgov_common::Error::Upstream {
+                origin: "magic-link-email",
+                status: 0,
+                detail: format!("transport: {e}"),
+            })?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let detail = resp.text().await.unwrap_or_default();
+            return Err(hkgov_common::Error::Upstream {
+                origin: "magic-link-email",
+                status,
+                detail,
+            });
+        }
+        tracing::info!(
+            target: "hkgov::identity::magic_link_delivered",
+            email = %email,
+            "magic-link token delivered via HTTP email gateway"
+        );
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "http-email"
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn log_delivery_succeeds() {
+        let sink = LogMagicLinkDelivery;
+        let result = sink
+            .deliver(
+                "alice@example.com",
+                "https://app.example.com/auth/redeem?token=abc",
+                Utc::now() + Duration::minutes(15),
+            )
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(sink.name(), "log");
     }
 }

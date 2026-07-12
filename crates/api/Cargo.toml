@@ -14,9 +14,11 @@ path = "src/main.rs"
 [features]
 default = []
 # Passthrough to enable the HTTP LLM client in the agent layer.
-llm = ["hkgov-agent/llm"]
-# Passthrough to enable proactive webhook alerting in the agent layer.
-alerts = ["hkgov-agent/alerts"]
+llm = ["hkgov-agent/llm", "dep:reqwest"]
+# Passthrough to enable proactive webhook alerting + HTTP magic-link email
+# delivery in the agent layer. Also brings in reqwest for the boot-time
+# email-gateway client construction in main.rs.
+alerts = ["hkgov-agent/alerts", "dep:reqwest"]
 
 [dependencies]
 hkgov-common.workspace = true
@@ -30,6 +32,9 @@ chrono.workspace = true
 tokio.workspace = true
 tower.workspace = true
 tower-http.workspace = true
+# Optional: needed by the HTTP magic-link email client (alerts feature) and the
+# HTTP LLM client (llm feature).
+reqwest = { workspace = true, optional = true }
 # V-003: per-IP inbound rate limiting. `api.rate_per_sec` was previously dead
 # config (defined but never wired to the router). `governor` gives a per-client
 # token-bucket we drive from a tiny axum middleware (tower-governor doesn't

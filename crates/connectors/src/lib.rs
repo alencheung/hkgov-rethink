@@ -12,6 +12,8 @@
 
 pub mod datagovhk;
 pub mod hkma;
+/// The verified HKMA dataset table (internal — used by `hkma`).
+mod hkma_datasets;
 pub mod immigration;
 pub mod landregistry;
 pub mod landsd;

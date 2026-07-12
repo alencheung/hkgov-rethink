@@ -699,6 +699,12 @@
     </div>
   </div>
 
-  <script src="/app.js" defer></script>
+  <!-- Dashboard JS, split into logical modules for navigability.
+       Loaded with defer (in order) — they share the global lexical scope. -->
+  <script src="/api.js" defer></script>
+  <script src="/i18n.js" defer></script>
+  <script src="/features.js" defer></script>
+  <script src="/pages.js" defer></script>
+  <script src="/boot.js" defer></script>
 </body>
 </html>

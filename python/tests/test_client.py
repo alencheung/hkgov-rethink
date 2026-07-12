@@ -123,7 +123,7 @@ def test_sources() -> None:
 @responses.activate
 def test_sources_filters_pass_query_params() -> None:
     # The filter kwargs must translate to the right query params.
-    route = responses.add(
+    responses.add(
         responses.GET, f"{BASE}{PREFIX}/sources", json=SAMPLE_SOURCES, status=200
     )
     _client().sources(category="monetary", tag=["hibor", "liquidity"], cadence="daily", q="interbank")
@@ -262,3 +262,351 @@ def test_feedback_posts_and_reads_score() -> None:
     assert b'"useful": true' in sent_body
     assert b'"note": "great catch"' in sent_body
     assert c.feedback_score(insight_id) == 1
+
+
+# ── v7/v8 endpoint coverage (D-011) ──────────────────────────────────────────
+
+SAMPLE_SILENCE_INDEX = {
+    "label": "HKMA Silence Index",
+    "methodology_version": "1.0",
+    "source": "hkma",
+    "period": "2026-Q2",
+    "score": 75.76,
+    "raw_score": 120.0,
+    "computed_at": "2026-07-01T00:00:00Z",
+    "total_events": 25,
+    "signals": [
+        {
+            "kind": "unattributed_series_jump",
+            "count": 20,
+            "weight": 5.0,
+            "contribution": 100.0,
+            "evidence_ids": ["series_jump:hkma:a", "series_jump:hkma:b"],
+        }
+    ],
+}
+
+SAMPLE_UNPRECEDENTEDNESS = {
+    "value": 2.93,
+    "n": 90,
+    "percentile": 99.5,
+    "band": {"low": 0.5, "high": 2.0, "median": 1.2, "mad": 0.3},
+    "one_in_n": 200,
+    "hist_min": 0.1,
+    "hist_max": 3.1,
+    "last_exceeded": {
+        "record_id": "2024-12-15",
+        "value": 3.1,
+        "when": "2024-12-15T00:00:00Z",
+        "pct_beyond_edge": 55.0,
+    },
+}
+
+SAMPLE_CITATION = {
+    "permalink": "/cite/series_jump:hkma:abc",
+    "insight_id": "series_jump:hkma:abc",
+    "cite_version": "1.0",
+    "title": "hibor_overnight moved +99.3%",
+    "publisher": "HK City Pulse",
+    "year": 2026,
+    "generated_at": "2026-06-21T00:00:00Z",
+    "experimental": False,
+    "manifest": {
+        "cite_version": "1.0",
+        "detector": "series_jump",
+        "source": "hkma",
+        "dataset": "daily-interbank-liquidity",
+        "data_sha256": "abc123",
+        "generated_at": "2026-06-21T00:00:00Z",
+        "threshold": 25.0,
+        "runtime_version": "0.1.0",
+    },
+}
+
+SAMPLE_SIGNAL = {
+    "id": "sig:alice:abc",
+    "owner": "alice",
+    "question": "Tell me when HIBOR spikes",
+    "compiled": {
+        "source": "hkma",
+        "dataset": "daily-figures-interbank-liquidity",
+        "detector": "series_jump",
+        "field": "hibor_overnight",
+        "threshold": 25.0,
+        "cadence": "daily",
+        "comparison": "period_over_period",
+    },
+    "channels": [{"kind": "webhook", "target": "https://example.com/hook"}],
+    "enabled": True,
+    "created_at": "2026-07-01T00:00:00Z",
+}
+
+SAMPLE_INVESTIGATION = {
+    "id": "inv:series_jump:hkma:abc",
+    "seed_insight_id": "series_jump:hkma:abc",
+    "seed_source": "hkma",
+    "seed_dataset": "daily-interbank-liquidity",
+    "seed_title": "hibor_overnight moved +99.3%",
+    "title": "Why did HIBOR spike?",
+    "owner": "alice",
+    "steps": [],
+    "notes": [],
+    "created_at": "2026-07-01T00:00:00Z",
+    "updated_at": "2026-07-01T00:00:00Z",
+}
+
+
+@responses.activate
+def test_silence_index() -> None:
+    responses.add(
+        responses.GET,
+        f"{BASE}{PREFIX}/silence-index",
+        json=SAMPLE_SILENCE_INDEX,
+        status=200,
+    )
+    c = _client()
+    idx = c.silence_index("2026-Q2")
+    assert idx.score == 75.76
+    assert idx.total_events == 25
+    assert len(idx.signals) == 1
+    assert idx.signals[0].kind == "unattributed_series_jump"
+    # period is passed as a query param
+    assert "period=2026-Q2" in responses.calls[0].request.url
+
+
+@responses.activate
+def test_unprecedentedness() -> None:
+    responses.add(
+        responses.GET,
+        f"{BASE}{PREFIX}/unprecedentedness",
+        json=SAMPLE_UNPRECEDENTEDNESS,
+        status=200,
+    )
+    c = _client()
+    u = c.unprecedentedness("hkma", "daily-interbank-liquidity", "hibor_overnight", 2.93)
+    assert u.value == 2.93
+    assert u.percentile == 99.5
+    assert u.band is not None
+    assert u.band.median == 1.2
+    assert u.one_in_n == 200
+    assert u.last_exceeded is not None
+    assert u.last_exceeded.value == 3.1
+
+
+@responses.activate
+def test_cite_returns_citation_bundle() -> None:
+    responses.add(
+        responses.GET,
+        f"{BASE}{PREFIX}/insights/ins1/cite",
+        json=SAMPLE_CITATION,
+        status=200,
+    )
+    c = _client()
+    cite = c.cite("ins1")
+    assert cite.permalink == "/cite/series_jump:hkma:abc"
+    assert cite.manifest.detector == "series_jump"
+    assert cite.manifest.data_sha256 == "abc123"
+
+
+@responses.activate
+def test_cite_returns_rendered_string_for_format() -> None:
+    responses.add(
+        responses.GET,
+        f"{BASE}{PREFIX}/insights/ins1/cite",
+        body="@misc{key, title={test}}",
+        status=200,
+        content_type="text/plain",
+    )
+    c = _client()
+    rendered = c.cite("ins1", fmt="bibtex")
+    assert isinstance(rendered, str)
+    assert "@misc" in rendered
+    # format is passed as a query param
+    assert "format=bibtex" in responses.calls[0].request.url
+
+
+@responses.activate
+def test_insights_since_and_lang_params() -> None:
+    responses.add(
+        responses.GET,
+        f"{BASE}{PREFIX}/insights",
+        json=SAMPLE_INSIGHTS,
+        status=200,
+    )
+    c = _client()
+    c.insights(since="2026-07-01T00:00:00Z", lang="zh-HK")
+    url = responses.calls[0].request.url
+    assert "since=2026-07-01" in url
+    assert "lang=zh-HK" in url
+
+
+@responses.activate
+def test_insight_history() -> None:
+    responses.add(
+        responses.GET,
+        f"{BASE}{PREFIX}/insights/ins1/history",
+        json=SAMPLE_INSIGHTS,
+        status=200,
+    )
+    c = _client()
+    history = c.insight_history("ins1")
+    assert len(history) == 1
+    assert history[0].kind == "series_jump"
+
+
+@responses.activate
+def test_request_and_redeem_auth_token() -> None:
+    responses.add(
+        responses.POST,
+        f"{BASE}{PREFIX}/auth/request-token",
+        json={"token": "tok123", "expires_at": "2026-07-01T00:15:00Z"},
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        f"{BASE}{PREFIX}/auth/redeem",
+        json={
+            "session_token": "ses456",
+            "user": {"id": "u:alice", "email": "alice@example.com", "created_at": "2026-07-01T00:00:00Z"},
+        },
+        status=200,
+    )
+    c = _client()
+    t = c.request_auth_token("alice@example.com")
+    assert t.token == "tok123"
+    s = c.redeem_auth_token("tok123")
+    assert s.session_token == "ses456"
+    assert s.user.email == "alice@example.com"
+
+
+@responses.activate
+def test_auth_me_sends_bearer() -> None:
+    responses.add(
+        responses.GET,
+        f"{BASE}{PREFIX}/auth/me",
+        json={"id": "u:alice", "email": "alice@example.com", "created_at": "2026-07-01T00:00:00Z"},
+        status=200,
+    )
+    c = _client()
+    u = c.auth_me("ses456")
+    assert u.email == "alice@example.com"
+    assert "Authorization" in responses.calls[0].request.headers
+    assert responses.calls[0].request.headers["Authorization"] == "Bearer ses456"
+
+
+@responses.activate
+def test_list_and_create_signals() -> None:
+    responses.add(
+        responses.GET,
+        f"{BASE}{PREFIX}/signals",
+        json=[SAMPLE_SIGNAL],
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        f"{BASE}{PREFIX}/signals",
+        json=SAMPLE_SIGNAL,
+        status=200,
+    )
+    c = _client()
+    sigs = c.list_signals(session_token="ses456")
+    assert len(sigs) == 1
+    assert sigs[0].compiled.detector == "series_jump"
+    # Bearer header forwarded
+    assert responses.calls[0].request.headers["Authorization"] == "Bearer ses456"
+
+    from hkgov import ScanTarget
+
+    st = ScanTarget(
+        source="hkma",
+        dataset="daily-figures-interbank-liquidity",
+        detector="series_jump",
+        field="hibor_overnight",
+        threshold=25.0,
+    )
+    created = c.create_signal(st, question="Tell me when HIBOR spikes", session_token="ses456")
+    assert created.id == "sig:alice:abc"
+
+
+@responses.activate
+def test_delete_signal() -> None:
+    responses.add(
+        responses.DELETE,
+        f"{BASE}{PREFIX}/signals/sig1",
+        json={"deleted": True},
+        status=200,
+    )
+    c = _client()
+    assert c.delete_signal("sig1", session_token="ses456") is True
+
+
+@responses.activate
+def test_preview_signal() -> None:
+    responses.add(
+        responses.POST,
+        f"{BASE}{PREFIX}/signals/preview",
+        json={"findings": SAMPLE_INSIGHTS},
+        status=200,
+    )
+    c = _client()
+    from hkgov import ScanTarget
+
+    st = ScanTarget(
+        source="hkma",
+        dataset="daily-figures-interbank-liquidity",
+        detector="series_jump",
+        field="hibor_overnight",
+        threshold=25.0,
+    )
+    findings = c.preview_signal(st, session_token="ses456")
+    assert len(findings) == 1
+    assert findings[0].kind == "series_jump"
+
+
+@responses.activate
+def test_create_and_list_investigations() -> None:
+    responses.add(
+        responses.POST,
+        f"{BASE}{PREFIX}/investigations",
+        json=SAMPLE_INVESTIGATION,
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        f"{BASE}{PREFIX}/investigations",
+        json=[SAMPLE_INVESTIGATION],
+        status=200,
+    )
+    c = _client()
+    inv = c.create_investigation(
+        "series_jump:hkma:abc",
+        "hkma",
+        "daily-interbank-liquidity",
+        "hibor_overnight moved +99.3%",
+        title="Why did HIBOR spike?",
+        session_token="ses456",
+    )
+    assert inv.id.startswith("inv:")
+    invs = c.list_investigations(session_token="ses456")
+    assert len(invs) == 1
+    assert invs[0].title == "Why did HIBOR spike?"
+
+
+@responses.activate
+def test_delete_investigation_and_add_note() -> None:
+    responses.add(
+        responses.DELETE,
+        f"{BASE}{PREFIX}/investigations/inv1",
+        json={"deleted": True},
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        f"{BASE}{PREFIX}/investigations/inv1/notes",
+        json={**SAMPLE_INVESTIGATION, "notes": [{"text": "a note"}]},
+        status=200,
+    )
+    c = _client()
+    assert c.delete_investigation("inv1", session_token="ses456") is True
+    inv = c.add_investigation_note("inv1", "a note", session_token="ses456")
+    assert inv.notes[-1]["text"] == "a note"
