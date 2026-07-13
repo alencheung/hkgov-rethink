@@ -285,7 +285,8 @@ pub enum Comparison {
 ///
 /// `detector` is one of: `series_jump`, `year_over_year`, `outlier`,
 /// `seasonality`, `correlation`, `cross_source_gap`, `proxy_divergence`,
-/// `benchmark_deviation`. Field/threshold semantics depend on the detector
+/// `benchmark_deviation`, `threshold_crossing`, `trend_break`.
+/// Field/threshold semantics depend on the detector
 /// (see `crates/agent/src/analysis.rs`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ScanTarget {

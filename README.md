@@ -1,5 +1,9 @@
 # hkgov-rethink
 
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="hkgov-rethink banner — agentic monitoring that surfaces what the HKGOV press room leaves unsaid" width="100%" />
+</p>
+
 > **Agentic monitoring that surfaces what the HKGOV press room leaves unsaid.**
 > A Rust platform that ingests Hong Kong Government open data, runs deterministic
 > anomaly detection across sources, and tells you when the official narrative and
@@ -44,6 +48,10 @@ missing-data days — as structured `Insight` records with pointers back to the
 source rows so a human can verify the claim.
 
 ## Try it in 60 seconds
+
+<p align="center">
+  <img src="docs/assets/launch.svg" alt="Launch in 60 seconds: the demo script prints real insights, or run the server and open the dashboard at http://localhost:8080/dashboard" width="100%" />
+</p>
 
 ```bash
 ./scripts/demo.sh        # one-shot: boots, warms, prints 3 real insights, exits
@@ -112,14 +120,20 @@ only reads from the cache. This is the single most important property — it's
 what lets the API scale to fleet-level concurrency without ever saturating the
 free HKGOV endpoints it depends on.
 
+<p align="center">
+  <img src="docs/assets/how-it-works.svg" alt="How hkgov-rethink works — a one-way data pipeline from HKGOV sources through connectors, ingest, store, and API, with a decoupled agent reading from the store. Solid lines are data writes, dashed lines are read-only." width="100%" />
+</p>
+
 ```
                          ┌─────────────────────────────────────────────┐
    HKGOV open data       │  connectors (per-source, resilient)         │
    ─────────────────     │  HKMA · data.gov.hk · press · LandsD/CSDI   │
-   api.hkma.gov.hk   ──▶ │  + token-bucket rate limit                  │
-   api.data.gov.hk   ──▶ │  + three-state circuit breaker              │
-   press releases    ──▶ │  + retry w/ exponential backoff             │
-   CSDI / LandsD     ──▶ └───────────────────────┬─────────────────────┘
+   api.hkma.gov.hk   ──▶ │  Immigration · RVD · Land Registry          │
+   api.data.gov.hk   ──▶ │  + token-bucket rate limit                  │
+   press releases    ──▶ │  + three-state circuit breaker              │
+   immd.gov.hk       ──▶ │  + retry w/ exponential backoff             │
+   rvd.gov.hk        ──▶ └───────────────────────┬─────────────────────┘
+   landreg.gov.hk    ──▶                            │
                                                   │ NormalizedRecord[]
                            ┌──────────────────────▼──────────────────────┐
                            │  ingest  (per-dataset refresh supervisor)   │
@@ -202,6 +216,14 @@ For the full rationale (async model, middleware stack, scaling math) see
   (`crates/connectors/src/press.rs`)
 - LandsD/CSDI connector — open geospatial catalog via the data.gov.hk archive
   (`crates/connectors/src/landsd.rs`)
+- Immigration Department connector — daily passenger-traffic CSV (border
+  crossings), 2 datasets: tidy breakdown + territory totals
+  (`crates/connectors/src/immigration.rs`)
+- Rating & Valuation Department connector — monthly property price/rental
+  index CSVs, 2 datasets (`crates/connectors/src/rvd.rs`)
+- Land Registry connector — monthly property transaction JSON files, 2
+  datasets: transactions by price band + primary/secondary market split
+  (`crates/connectors/src/landregistry.rs`)
 - Per-source **token-bucket rate limiting** + **three-state circuit breakers**
   (closed -> open -> half-open) wrapping every connector
 - Retry with exponential backoff at the HTTP client layer
@@ -218,9 +240,10 @@ For the full rationale (async model, middleware stack, scaling math) see
   > **Wiring status:** `MemoryStore` (moka) is the production backend — the only
   > one the binary actually instantiates today. `RedisStore` and `PgStore` are
   > implemented behind their feature flags (they compile, they have tests) but
-  > **not yet wired into the running binary** — `store.backend` is currently
-  > dead config in `main.rs`. See [docs/CAPACITY.md](docs/CAPACITY.md) for the
-  > scaling path and what remains to connect them.
+  > **not yet wired into the running binary** — `store.backend` is read at
+  > boot but only `memory` is implemented; `redis`/`pg` produce a loud
+  > startup error. See [docs/CAPACITY.md](docs/CAPACITY.md) for the scaling
+  > path and what remains to connect them.
 
 **Ingest pipeline**
 - Per-dataset refresh supervisor — one tokio task per dataset, each on its own
@@ -230,8 +253,8 @@ For the full rationale (async model, middleware stack, scaling math) see
 **API** (axum 0.8, the only thing deployed — `crates/api/`)
 - Cache-first read endpoints (see [API reference](#api-reference))
 - Tower middleware stack: timeout (slowloris protection), gzip, CORS, tracing,
-  concurrency load-shedding (`crates/api/src/routes.rs`)
-- Optional `X-API-Key` / `?api_key=` auth (`crates/api/src/auth.rs`)
+  concurrency load-shedding (`crates/api/src/routes/mod.rs`)
+- Optional `X-API-Key` auth (`crates/api/src/auth.rs`)
 - `/v1` API versioning (health kept at root for LB probes)
 - Graceful shutdown (SIGTERM/Ctrl-C) for zero-downtime deploys
 
@@ -438,8 +461,10 @@ All data endpoints are under `/v1` (configurable via `api.api_prefix`).
 | `GET` | `/v1/alerts?limit=` | Proactive alert dispatch log (v6) |
 | `POST` | `/v1/ask` | Natural-language Q&A over the data (v6) |
 
-`{source}` is one of `hkma`, `datagovhk`, `press`, `landsd` — see
-`crates/common/src/model.rs` (`DataSource::parse`).
+`{source}` is one of `hkma`, `datagovhk`, `press`, `landsd`, `immigration`,
+`rvd`, `landregistry` — see `crates/common/src/model.rs` (`DataSource::parse`)
+and [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) for the verified endpoint
+table.
 
 **Dataset categories** (v8): every dataset declares exactly one of
 `monetary`, `fiscal`, `property`, `trade`, `population`, `livability`,
@@ -451,7 +476,9 @@ accepts a single tag (`?tag=hibor`), repeated tags
 `GET /v1/categories` for the browse entry point.
 
 When `api.api_key` is set, every `/v1` request must carry it via the
-`X-API-Key` header or `?api_key=` query param.
+`X-API-Key` header. (The `?api_key=` query-param fallback was deliberately
+removed as a security hardening — query strings leak into access logs, browser
+history, and `Referer` headers. See `crates/api/src/auth.rs`.)
 
 ---
 
@@ -519,7 +546,7 @@ HKGOV_API__BIND=0.0.0.0:9090              # bind address
 HKGOV_API__API_KEY=secret                 # enable API key auth
 HKGOV_API__MAX_CONCURRENCY=100000         # tower load-shedding ceiling
 HKGOV_API__RATE_PER_SEC=20                # per-IP req/s flood guard (0=unlimited; set before exposing publicly — see config.toml)
-HKGOV_STORE__BACKEND=memory               # memory (default/wired) | redis | pg (backends exist but are not yet wired into main.rs — see docs/CAPACITY.md)
+HKGOV_STORE__BACKEND=memory               # memory (default/wired) | redis | pg (backends exist but produce a startup error if selected — see docs/CAPACITY.md)
 HKGOV_STORE__REDIS_URL=redis://...        # only used when backend=redis (not yet wired)
 HKGOV_AGENT__ENABLED=true                 # turn on the AI agent
 HKGOV_AGENT__LLM_BASE_URL=https://...     # empty = heuristic mode
@@ -580,15 +607,16 @@ cargo fmt --all -- --check
 ```
 crates/
   common/      config, normalized model, errors, telemetry (otel-able)
-  connectors/  HKMA, data.gov.hk, press, LandsD + rate limiting/circuit breakers
+  connectors/  HKMA, data.gov.hk, press, LandsD, Immigration, RVD, Land Registry + rate limiting/circuit breakers
   store/       cache-first RecordStore: moka (default) / redis / pg
   ingest/      per-dataset refresh scheduler
-  agent/       LLM client trait + heuristic/http, anomaly detectors, insights
-  api/         the public axum binary (auth, /v1 versioning, /insights)
-dashboard/     static insights dashboard
-docs/          ARCHITECTURE, DATA_SOURCES, ROADMAP, CAPACITY
+  agent/       LLM client trait + heuristic/http, anomaly detectors, insights, product layer (silence/cite/signals/investigations/identity/bilingual/persist)
+  api/         the public axum binary (auth, /v1 versioning, /insights, routes/ module)
+dashboard/     static insights dashboard (index.html + JS modules)
+docs/          INDEX, ARCHITECTURE, DATA_SOURCES, ROADMAP, CAPACITY, PM_STRATEGY/, archive/
 loadtest/      k6 harness
 examples/      Python API client
+python/        hkgov-py typed Python client (pip install hkgov-py)
 ```
 
 ---
@@ -621,8 +649,8 @@ invariants, step-by-step guides for adding a connector or a detector).
 on GitHub — each is bounded, self-contained, and points at the file to change.
 A few representative ones:
 
-- Add a `detect_trend_break` detector (follows the existing detector pattern)
-- Wire `store.backend` config selection into `main.rs` (currently dead config)
+- ~~Add a `detect_trend_break` detector~~ ✅ shipped — see `crates/agent/src/analysis.rs`
+- ~~Wire `store.backend` config selection into `main.rs`~~ ✅ done — `build_store` now reads `store.backend`; `memory` works, `redis`/`pg` produce a loud startup error (the backends themselves still need wiring)
 - Add a `news.gov.hk` RSS connector (press connector v2)
 - Promote `seasonality`/`correlation` from experimental once they catch a real finding
 - Frontend: a richer dashboard with a chat UI for `/ask`
@@ -636,14 +664,21 @@ agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 ## Deeper docs
 
 Breadcrumbs for collaborators — read these in roughly this order to get fully
-oriented:
+oriented. The full navigation index is [docs/INDEX.md](docs/INDEX.md).
 
 | If you want to understand… | read this |
 |---|---|
+| **Navigation index — which doc answers which question** | [docs/INDEX.md](docs/INDEX.md) |
 | The end-to-end design and the "why" behind each crate | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | The scaling path (single node today → 100k design target) and current backend-wiring status | [docs/CAPACITY.md](docs/CAPACITY.md) |
 | What's done vs. what's next | [docs/ROADMAP.md](docs/ROADMAP.md) |
-| Which HKGOV endpoints we hit and why (verified live) | [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) |
+| Which HKGOV endpoints we hit and why (all 7 connectors, verified live) | [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) |
+| Does a specific feature work? (test status, expected behaviour) | [FEATURES_TRACKER.md](FEATURES_TRACKER.md) |
+| What defects exist / were found / were fixed? | [DEFECTS.md](DEFECTS.md) |
+| The product/UX strategy (personas, features P-001–P-109, release plan) | [docs/PM_STRATEGY/README.md](docs/PM_STRATEGY/README.md) |
+| Iconography rules (Remix Icon, no emoji) + i18n rules | [AGENT.md](AGENT.md) |
+| Real captured insights (proof the detectors work on live data) | [EXAMPLES.md](EXAMPLES.md) |
+| Historical QA audit reports (frozen, not current) | [docs/archive/README.md](docs/archive/README.md) |
 | The normalized data model every source maps onto | `crates/common/src/model.rs` |
 | Every runtime knob | `crates/common/src/config.rs` |
 | The scaling contract (how to add a new store backend) | `crates/store/src/lib.rs` (`RecordStore` trait) |
@@ -654,8 +689,9 @@ oriented:
 
 ## Data sources
 
-All public HKGOV open data — see [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md)
-for the verified endpoint table. The government-only
+All public HKGOV open data — HKMA, data.gov.hk, Immigration Department, Rating
+& Valuation Department, and Land Registry. See [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md)
+for the verified endpoint table (all 7 connectors). The government-only
 `api.portal.hkmapservice.gov.hk` is intentionally excluded; we use the open
 LandsD/CSDI endpoints on data.gov.hk instead.
 

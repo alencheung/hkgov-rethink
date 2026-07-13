@@ -537,6 +537,17 @@ fn run_detector_preview(
                 DEFAULT_SEASONALITY_R
             },
         ),
+        "trend_break" => {
+            // Mirror the scheduler: `threshold` is the min-run-length here
+            // (> 0 overrides DEFAULT_TREND_BREAK_MIN_RUN). Single-dataset
+            // detector, so previewable without a companion.
+            let min_run = if threshold > 0.0 {
+                threshold as usize
+            } else {
+                DEFAULT_TREND_BREAK_MIN_RUN
+            };
+            detect_trend_break(source, &target.dataset, records, field, min_run)
+        }
         _ => Vec::new(), // cross-source / companion detectors not previewable here
     }
 }
@@ -624,6 +635,41 @@ mod tests {
         let b = preview_signal(&store, &target, 90).await;
         assert_eq!(a.count, b.count);
         assert_eq!(a.fired_on, b.fired_on);
+    }
+
+    #[tokio::test]
+    async fn preview_trend_break_fires_on_reversal() {
+        // Guards the trend_break preview wiring: before the arm was added, a
+        // trend_break signal previewed empty even though it would fire in
+        // production. The same series (rising 3 periods, then a reversal) must
+        // preview >= 1 finding.
+        let store = Arc::new(hkgov_store::MemoryStore::new(100, 60));
+        let id = hkgov_store::DatasetId::new(DataSource::Hkma, "daily-interbank-liquidity");
+        let recs = vec![
+            rec("2026-06-20", "hibor_overnight", 1.0),
+            rec("2026-06-21", "hibor_overnight", 1.5), // rising
+            rec("2026-06-22", "hibor_overnight", 2.0), // rising
+            rec("2026-06-23", "hibor_overnight", 2.5), // rising (3-period run)
+            rec("2026-06-24", "hibor_overnight", 2.0), // reversal → break
+        ];
+        store.put_dataset(&id, recs).await.unwrap();
+        let target = ScanTarget {
+            source: "hkma".into(),
+            dataset: "daily-interbank-liquidity".into(),
+            detector: "trend_break".into(),
+            field: Some("hibor_overnight".into()),
+            threshold: Some(3.0),
+            direction: None,
+            cadence: Cadence::Daily,
+            comparison: Comparison::PeriodOverPeriod,
+            ..Default::default()
+        };
+        let preview = preview_signal(&store, &target, 90).await;
+        assert!(
+            preview.count >= 1,
+            "trend_break preview must fire on a 3-period rise then reversal"
+        );
+        assert!(!preview.fired_on.is_empty());
     }
 
     // ---- D-006 regression: preview MUST equal production detection ---------

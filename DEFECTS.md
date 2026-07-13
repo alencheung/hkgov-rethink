@@ -18,8 +18,13 @@
 | D-008 | 🟡 low | Cite `base_url` docstring claims `Host` header is used (it isn't) | F-017 | ✅ fixed (doc corrected) |
 | D-009 | ⚪ risk | No owner isolation on signals/investigations (shared-key model) | F-022/26/28/30 | ⚠️ waived (documented v1 design) |
 | D-010 | 🟠 medium | Sessions never expire (leaked bearer valid forever) | F-035 | ✅ fixed + verified (+ 3 regression tests) |
-| D-011 | 🟡 low | Python client missing 8 endpoint families (signals/auth/cite/…) | F-056 | ⏸️ deferred (separate Python task) |
+| D-011 | 🟡 low | Python client missing 8 endpoint families (signals/auth/cite/…) | F-056 | ✅ fixed + verified (+5 tests) |
 | D-012 | 🔴 critical | Widened HKMA catalog silently broke the agent: dead scan-target slug + hash record-ids + dropped `hibor` tag + agent runs before data warms | F-038,F-039,F-046,F-067,F-077,F-089 | ✅ fixed + verified (+ 7 regression tests) |
+| D-013 | 🟠 medium | `trend_break` detector wired into scheduler/tools but missing from signal preview (D-006 class) | F-023 | ✅ fixed + verified (+ 1 regression test) |
+| D-014 | 🔴 critical | Python `_investigation` parsed step timestamp from nonexistent `created_at` (Rust serializes `executed_at`) and silently dropped `answer` + `trace` | F-056 | ✅ fixed + verified (+ strengthened tests) |
+| D-015 | 🟠 medium | `append_investigation_step` crashed on `answer=`/`trace=` (dataclasses not JSON-serializable) | F-056 | ✅ fixed + verified (+ regression test) |
+| D-016 | 🟠 medium | Python client missing `update_signal` (PATCH /v1/signals/{id}); new models not exported | F-056 | ✅ fixed + verified (+ regression test) |
+| D-017 | 🟡 low | Docs/config drift: stale `?api_key=` auth claim, `routes.rs`→`routes/` path, ROADMAP missing v7/v8, detectors list missing trend_break/threshold_crossing | F-084 | ✅ fixed (doc/config only) |
 
 > **Third independent re-audit (D-006 → D-011).** A fresh, from-scratch QA cycle
 > was run with **no assumption** the prior audit (D-001 → D-005) was complete. It
@@ -27,7 +32,7 @@
 > v8/v9 product surface — signals, identity, cite, silence-index,
 > unprecedentedness, bilingual, the dashboard, and the Python client — for
 > defects the earlier passes missed. Details below; full per-test traces in
-> `docs/QA_PHASE2_3_TESTS_DEFECTS.md` and `docs/QA_PHASE5_REGRESSION.md`.
+> `docs/archive/QA_PHASE2_3_TESTS_DEFECTS.md` and `docs/archive/QA_PHASE5_REGRESSION.md`.
 
 > **Independent re-audit.** All four defects were re-verified end-to-end from
 > a clean rebuild with no assumption the fixes still held. All four reproduce
@@ -268,7 +273,7 @@ audits were complete. It re-verified D-001 → D-005 (all still fixed — their 
 guards are green) and then hunted across the v8/v9 product surface (signals,
 identity, cite, silence-index, unprecedentedness, bilingual, dashboard, Python
 client) for defects the earlier passes missed. Full per-test traces in
-`docs/QA_PHASE2_3_TESTS_DEFECTS.md`; regression in `docs/QA_PHASE5_REGRESSION.md`.
+`docs/archive/QA_PHASE2_3_TESTS_DEFECTS.md`; regression in `docs/archive/QA_PHASE5_REGRESSION.md`.
 
 ### Verification gates (this pass)
 
@@ -368,12 +373,20 @@ client) for defects the earlier passes missed. Full per-test traces in
 - **Stories:** F-056 (`hkgov-py` client coverage)
 - **Severity:** low — typed contract incomplete; endpoints still reachable via
   `_get`/`_post`
-- **Observed:** `dir(HkGov)` lacks methods for signals, investigations, auth,
+- **Observed:** `dir(HkGov)` lacked methods for signals, investigations, auth,
   cite, silence-index, unprecedentedness, insight-history, and the `since`/`lang`
   params — 8 endpoint families added in v8/v9 that the client never grew.
 - **Expected:** parity with the HTTP surface.
-- **Resolution (deferred, per approval):** scoped to a separate Python task
-  (different language/toolchain). Tracked here so it isn't lost.
+- **Resolution (fixed):** the 8 originally-listed families were added in a
+  prior pass (v7/v8 client methods + tests). This cycle closed the remaining
+  2 gaps the original enumeration didn't anticipate: `market_players()` (`GET
+  /v1/market-players` — the related-market-players directory) and
+  `append_investigation_step()` (`POST /v1/investigations/{id}/steps` — the
+  agent-driven step append). Also fixed a latent bug in
+  `add_investigation_note()` which sent `{"text": text}` but the Rust
+  `AddNoteRequest` expects `{"body": body}`. New `MarketPlayerGroup` +
+  `PlayerEntry` dataclasses added to `models.py`. +5 Python tests (32 total,
+  all passing).
 
 ### What this pass checked and cleared (no defect)
 
@@ -516,4 +529,111 @@ count became undeniable.
 - Signals preview, create, list, investigations create/steps/notes/delete,
   auth request-token/redeem/me, cite all five formats + bundle + manifest,
   unprecedentedness, since-filter (D-007), feedback round-trip.
+
+---
+
+## Fifth PM-coordinated audit (the pass that found D-013 → D-017)
+
+A project-manager-coordinated review fanned out three independent audit agents
+(Rust crates, Python client, docs/config/CI) across the full tree plus the
+uncommitted work-in-progress (the new `trend_break` detector, the Python
+v7/v8 client additions, the `include_str!` path hardening, and the doc
+reorganization). It re-verified D-001 → D-012 (all still fixed) and then
+hunted across the WIP surface for defects the earlier passes — which predated
+the `trend_break` work and the Python v7/v8 expansion — could not have seen.
+
+### Verification gates (this pass)
+
+| Gate | Result |
+|------|--------|
+| `cargo test --workspace` | ✅ **268 passed**, 0 failed (+1 new `preview_trend_break` test) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ clean |
+| `cargo fmt --all -- --check` | ✅ clean |
+| Python `pytest tests/` | ✅ **35 passed** (baseline 32; +3 new tests) |
+
+### D-013 — `trend_break` missing from signal preview (D-006 class)
+
+- **Stories:** F-023 (`POST /v1/signals/preview`)
+- **Severity:** medium — same defect class as the documented D-006: preview ≠
+  production for a detector. A `trend_break` signal previewed empty even though
+  the scheduler would fire it in production.
+- **Root cause:** the new `trend_break` detector was wired into the scheduler
+  (`run_one_target`) and the tool belt (`RunDetectorTool`) but the preview
+  dispatcher (`run_detector_preview` in `signal.rs`) — whose module docstring
+  states the invariant "preview IS what will fire" — had no `trend_break` arm.
+- **Fix:** added a `"trend_break" =>` arm mirroring the scheduler (`threshold`
+  as min-run-length, defaulting to `DEFAULT_TREND_BREAK_MIN_RUN`).
+- **Verification:** new test `preview_trend_break_fires_on_reversal` asserts a
+  3-period-rise-then-reversal previews ≥1 finding (was 0 before the arm).
+
+### D-014 — Python `_investigation` dropped step `answer`/`trace` + wrong timestamp field
+
+- **Stories:** F-056 (Python client coverage)
+- **Severity:** critical — silently lost data on every investigation read. The
+  Rust `InvestigationStep` serializes `executed_at`, `answer`, and `trace`; the
+  Python helper read the nonexistent `created_at` (always `None`) and never
+  parsed `answer` or `trace`.
+- **Root cause:** the helper predated the agent-driven step endpoint and was
+  never updated when `answer`/`trace`/`executed_at` were added to the Rust
+  struct. The existing tests mocked rich payloads but only asserted `kind`/
+  `prompt`, masking the drop.
+- **Fix:** renamed the dataclass field `created_at` → `executed_at`; the helper
+  now parses `executed_at`, `answer` (via a new `_answer` helper), and `trace`
+  (via a new `_trace` helper). Existing step tests strengthened to assert on
+  the previously-dropped fields.
+
+### D-015 — `append_investigation_step` crashed on `answer=`/`trace=`
+
+- **Stories:** F-056
+- **Severity:** medium — runtime `TypeError` on a documented parameter.
+  `Answer`/`TraceStep` are dataclasses; `requests` cannot JSON-serialize them,
+  so passing an `Answer` returned from `ask()` crashed at call time.
+- **Fix:** added `_trace_to_dict` serializer; `answer.trace` and `trace` are
+  now serialized to dicts before going into the request body.
+- **Verification:** new test `test_append_investigation_step_serializes_trace`
+  passes a `TraceStep` list and asserts the serialized body (would have raised
+  before the fix).
+
+### D-016 — Python client missing `update_signal`; new models not exported
+
+- **Stories:** F-056
+- **Severity:** medium — API parity gap. The Rust router exposes
+  `PATCH /v1/signals/{id}` but the client had no method for it. `MarketPlayerGroup`
+  and `PlayerEntry` were added to `models.py` but not re-exported from the
+  package `__all__`. (`auth_me` also hardcoded `/v1` instead of the configured
+  prefix — fixed in the same pass.)
+- **Fix:** added `update_signal(signal_id, *, question, compiled, channels,
+  enabled)` (+ a `_patch` HTTP helper); exported the two new models; `auth_me`
+  now uses `_get("/auth/me")` and respects the prefix.
+- **Verification:** new tests `test_update_signal` + `test_update_signal_requires_a_field`.
+
+### D-017 — Docs/config drift (stale claims, missing milestones, missing detectors)
+
+- **Stories:** F-084 (docs accuracy)
+- **Severity:** low — documentation only.
+- **Root cause:** incremental WIP left several surfaces stale: README claimed
+  `?api_key=` query auth (removed as security hardening) and referenced
+  `routes.rs` (now `routes/`); `docs/ROADMAP.md` documented only v1–v6 while
+  README/CHANGELOG listed v7/v8 as shipped; `config.toml`'s detector list
+  omitted `threshold_crossing` and `trend_break` despite both being real,
+  dispatched detectors.
+- **Fix:** corrected all stale references; added v7/v8 sections to ROADMAP and
+  synced INDEX (`v1–v6` → `v1–v8`); documented `threshold_crossing` +
+  `trend_break` in `config.toml`; refreshed the `run_detector` tool description
+  to list all 10 detectors.
+
+### What this pass checked and cleared (no new defect beyond D-013 → D-017)
+
+- The `include_str!` `CARGO_MANIFEST_DIR` path change resolves correctly
+  (`crates/api` + `/../../dashboard/` = `dashboard/`); all 7 referenced files
+  exist; `cargo check`/`clippy` clean.
+- `detect_trend_break` math (run-length counting, reversal detection, index
+  mapping, division-by-zero guard, `min_run.max(2)` clamp) — verified by hand
+  and by 8 passing unit tests.
+- All README curl examples reference real routes; all referenced files exist
+  (`scripts/demo.sh`, `EXAMPLES.md`, `CHANGELOG.md`, etc.).
+- Local tooling artifacts (`.agentic/`, `.zcode/`, `skills-staging/`, `data/`,
+  `agentic.json`) now `.gitignore`d — were previously at risk of an accidental
+  `git add .` commit.
+
 

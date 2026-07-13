@@ -20,9 +20,9 @@
 use crate::analysis::{
     coerce_to_period, detect_benchmark_deviation, detect_correlation, detect_cross_source_gaps,
     detect_outliers, detect_proxy_divergence, detect_seasonality, detect_series_jumps_cadenced,
-    detect_year_over_year, Finding, DEFAULT_BENCHMARK_PCT, DEFAULT_CORRELATION_R,
-    DEFAULT_OUTLIER_Z, DEFAULT_PCT_THRESHOLD, DEFAULT_PROXY_DELTA_PCT, DEFAULT_PROXY_R,
-    DEFAULT_SEASONALITY_R,
+    detect_trend_break, detect_year_over_year, Finding, DEFAULT_BENCHMARK_PCT,
+    DEFAULT_CORRELATION_R, DEFAULT_OUTLIER_Z, DEFAULT_PCT_THRESHOLD, DEFAULT_PROXY_DELTA_PCT,
+    DEFAULT_PROXY_R, DEFAULT_SEASONALITY_R, DEFAULT_TREND_BREAK_MIN_RUN,
 };
 use async_trait::async_trait;
 use hkgov_common::{Cadence, Category, DataSource, NormalizedRecord, RecordValue, Result};
@@ -427,8 +427,9 @@ impl Tool for RunDetectorTool {
     fn description(&self) -> &'static str {
         "Run one anomaly detector against a dataset and return the structured \
          findings it surfaces. Detectors: series_jump, outlier, seasonality, \
-         correlation, cross_source_gap. Each returns findings with evidence \
-         pointers back into the store."
+         correlation, cross_source_gap, year_over_year, proxy_divergence, \
+         benchmark_deviation, threshold_crossing, trend_break. Each returns \
+         findings with evidence pointers back into the store."
     }
     fn schema(&self) -> Value {
         json!({
@@ -436,13 +437,13 @@ impl Tool for RunDetectorTool {
             "properties": {
                 "detector": {
                     "type": "string",
-                    "enum": ["series_jump", "year_over_year", "outlier", "seasonality", "correlation", "cross_source_gap", "proxy_divergence", "benchmark_deviation"]
+                    "enum": ["series_jump", "year_over_year", "outlier", "seasonality", "correlation", "cross_source_gap", "proxy_divergence", "benchmark_deviation", "threshold_crossing", "trend_break"]
                 },
                 "source": { "type": "string", "enum": ["hkma", "datagovhk", "press", "landsd"] },
                 "dataset": { "type": "string" },
                 "field": {
                     "type": "string",
-                    "description": "Numeric field for series_jump/year_over_year/outlier/seasonality/correlation/proxy_divergence/benchmark_deviation, or the date column for cross_source_gap."
+                    "description": "Numeric field for series_jump/year_over_year/outlier/seasonality/correlation/proxy_divergence/benchmark_deviation/threshold_crossing/trend_break, or the date column for cross_source_gap."
                 },
                 "field_b": {
                     "type": "string",
@@ -596,6 +597,14 @@ impl Tool for RunDetectorTool {
                     field_b,
                     threshold.unwrap_or(DEFAULT_CORRELATION_R),
                 )
+            }
+            "trend_break" => {
+                let min_run = if threshold.unwrap_or(0.0) > 0.0 {
+                    threshold.unwrap() as usize
+                } else {
+                    DEFAULT_TREND_BREAK_MIN_RUN
+                };
+                detect_trend_break(source, &dataset, &records, field, min_run)
             }
             other => {
                 return Err(hkgov_common::Error::Internal(format!(

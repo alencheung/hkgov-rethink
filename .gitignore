@@ -22,6 +22,17 @@ Thumbs.db
 /data-local/
 NDH6SA~M
 
+# Local runtime persistence dir (v8 identity/insights/signals/investigations/
+# feedback snapshots written by the file-based persist layer; configurable via
+# HKGOV_PERSIST__DIR — local state, not source).
+/data/
+
+# Local agent tooling / session artifacts (not source of this project)
+.agentic/
+.zcode/
+skills-staging/
+agentic.json
+
 # data dumps
 .archive_all.json
 *.archive.json
@@ -31,3 +42,6 @@ press.html
 
 # Scratch / probe working dir (live endpoint verification artifacts, not source)
 .probe/
+
+# Local Netlify folder
+.netlify

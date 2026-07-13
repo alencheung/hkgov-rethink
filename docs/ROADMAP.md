@@ -43,7 +43,8 @@ what remains. Each milestone is independently runnable.
 
 - **Postgres** `RecordStore` (`--features pg`) for the persistent cold/historical
   tier.
-- **API auth** (optional `X-API-Key` / `?api_key=`) + **API versioning**
+- **API auth** (optional `X-API-Key`; the `?api_key=` query fallback was later
+  removed as security hardening) + **API versioning**
   (`/v1` prefix; health kept at root for probes).
 - **OpenTelemetry** trace export (`--features otel`).
 - **Load-test harness** (k6) + capacity model with the
@@ -89,6 +90,45 @@ unconditional (no new deps, heuristic baseline intact). `HttpLlmClient::step`
 extends the `llm` feature. `WebhookSink` adds the `alerts` feature
 (`alerts = ["dep:reqwest"]`).
 
+## v7 — Product layer (✅ shipped)
+
+The first features from the PM strategy, turning the agent's findings into a
+citable, quotable product surface.
+
+- **Silence Index** — `GET /v1/silence-index?period=`. A deterministic 0–100
+  "opacity" score: how much did HKGOV not explain this period? Built from the
+  cross-source gaps + unattributed moves, so the same critique anyone levels at
+  the score can be checked against the exact missing dates.
+- **Unprecedentedness Score** — `GET /v1/unprecedentedness?...`. Percentile
+  rank, normal-range band, 1-in-N return period, and "last exceeded" comparator
+  for a value against its history.
+- **Cite-It** — `GET /v1/insights/{id}/cite?format=`. A stable permalink +
+  citation strings (BibTeX/RIS/APA/Chicago/Markdown) + a CI-reproducibility
+  manifest (SHA-256 over the evidence) so a citation never false-claims
+  reproducibility.
+- New detectors: `year_over_year`, `proxy_divergence`, `benchmark_deviation`,
+  `threshold_crossing`. Each is pure-Rust and deterministic.
+
+## v8 — Product layer II (✅ shipped)
+
+Turns the one-shot findings into a trackable, subscribable, bilingual product.
+
+- **Insight Lifeline** — `GET /v1/insights?since=` + `GET /v1/insights/{id}/history`.
+  Evolution tracking: what's new since a timestamp, and prior versions of an
+  insight.
+- **Signal Subscriptions** — `POST /v1/signals` / `POST /v1/signals/preview`.
+  Author a detector watch in natural language; the preview reuses the
+  scheduler's detector dispatch so "preview IS what will fire" (the D-006 fix).
+- **Drill-In Investigations** — `POST /v1/investigations` + `/steps` + `/notes`.
+  Saved, resumable, shareable case files from any insight.
+- **Bilingual (zh-HK)** — deterministic zh-HK summary reframers; `?lang=zh-HK`.
+- **Identity Tier** — `POST /v1/auth/request-token` / `/redeem` / `GET /me`.
+  Email + magic-link; the principal for per-user state. Sessions now expire.
+- **Market Players** — `GET /v1/market-players`. A curated directory of the
+  named private-sector operators holding each department's licences.
+- `threshold_crossing` detector wired into the scheduler; `trend_break`
+  detector added (regime-change detection).
+
 ## Remaining (future)
 
 - ISD/info.gov.hk HTML scraping + news.gov.hk RSS (press connector v2).
@@ -100,11 +140,12 @@ extends the `llm` feature. `WebhookSink` adds the `alerts` feature
   agent works against Redis/Postgres backends (currently `Arc<MemoryStore>`).
 - **Wire Redis/Postgres store backends into the binary.** `RedisStore`
   (`--features redis`) and `PgStore` (`--features pg`) are implemented behind
-  feature flags and have tests, but `store.backend` is currently dead config in
-  `main.rs` — nothing instantiates them at runtime. Connecting them also means
-  addressing known issues: `RedisStore` serializes the whole dataset as one
-  blob (re-key per record), and `PgStore` guards its client behind a single
-  `Mutex` (would serialize under load). See [docs/CAPACITY.md](CAPACITY.md).
+  feature flags and have tests, but `build_store` in `main.rs` only
+  instantiates `MemoryStore` — selecting `redis` or `pg` produces a loud
+  startup error. Connecting them also means addressing known issues:
+  `RedisStore` serializes the whole dataset as one blob (re-key per record),
+  and `PgStore` guards its client behind a single `Mutex` (would serialize
+  under load). See [docs/CAPACITY.md](CAPACITY.md).
 - **Validate the 100k concurrency target with a real load test against an LB
   tier.** The k6 harness exists but defaults to 500 VUs (a smoke test, not a
   ceiling test) and is not in CI. The 100k figure is a design target; verifying

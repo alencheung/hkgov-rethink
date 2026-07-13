@@ -96,6 +96,14 @@ llm_model = "gpt-4o-mini"
 #                                                Needs: field, companion (the
 #                                                benchmark dataset),
 #                                                companion_field, [join_field].
+#   threshold_crossing — flags a numeric field crossing `threshold` in a given
+#                      `direction` (above|below; default above). Single-period,
+#                      point-in-time.             Needs: field, threshold, direction.
+#   trend_break     — flags a regime change: a field that rose (or fell) for
+#                      `threshold`+ consecutive periods then reversed. Complementary
+#                      to series_jump (single-period magnitude) and outlier
+#                      (statistical anomaly). `threshold` is the min run length
+#                      (default 3).               Needs: field.
 #
 # Uncomment to override the defaults:
 # [[agent.scan]]
@@ -171,6 +179,13 @@ llm_model = "gpt-4o-mini"
 # detector = "cross_source_gap"
 # field = "date"
 # companion = { source = "hkma", dataset = "daily-interbank-liquidity" }
+#
+# [[agent.scan]]
+# source = "hkma"
+# dataset = "daily-figures-interbank-liquidity"
+# detector = "trend_break"
+# field = "hibor_overnight"
+# threshold = 3.0         # min consecutive same-direction periods before a reversal is flagged
 
 [alerts]
 # Proactive webhook alerting (v6). Push insights at or above min_severity to
