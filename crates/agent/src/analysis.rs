@@ -574,6 +574,16 @@ pub fn detect_correlation(
 /// Default % move at a daily cadence. Higher cadences scale this up — see
 /// [`scale_threshold_for_cadence`].
 pub const DEFAULT_PCT_THRESHOLD: f64 = 15.0;
+/// Dispatch-level default for `series_jump` (the watch-level % move, before
+/// cadence scaling). D-024: the scheduler, the signal preview, and the agent
+/// tool belt each carried an undocumented magic literal `25.0` for this, while
+/// the detector fn's own fallback ([`DEFAULT_PCT_THRESHOLD`]) is `15.0`. The two
+/// intentionally differ: `25.0` is the *subscription/watch* sensitivity (a
+/// move worth alerting on), `15.0` is the *detector* sensitivity (a move worth
+/// flagging in a full scan). Naming the constant keeps the three dispatch sites
+/// in lockstep and makes the distinction auditable instead of a drifting
+/// literal. Tests + config defaults lock the `25.0` value.
+pub const DEFAULT_SERIES_JUMP_WATCH_PCT: f64 = 25.0;
 /// Default minimum records either side of a YoY comparison before we'll opine.
 pub const MIN_YOY_SAMPLES: usize = 4;
 /// Default |delta/value| above which a proxy divergence is flagged.
@@ -1050,6 +1060,120 @@ fn numeric(r: &NormalizedRecord, field: &str) -> Option<f64> {
         RecordValue::Int(v) => Some(*v as f64),
         _ => None,
     }
+}
+
+/// Default minimum number of consecutive same-direction periods required
+/// before a reversal is flagged as a trend break. Too low → noisy; too high →
+/// misses short regimes.
+pub const DEFAULT_TREND_BREAK_MIN_RUN: usize = 3;
+
+/// Detect a trend break: the point where a series that was consistently
+/// moving in one direction (increasing or decreasing) for `min_run`+ periods
+/// reverses. This is complementary to [`detect_series_jumps`] (which catches
+/// single-period magnitude moves) and [`detect_outliers`] (which catches
+/// statistical anomalies) — a trend break can be small in any single period
+/// but significant as a directional change.
+///
+/// - `threshold` is the minimum run length of the prior trend (defaults to
+///   [`DEFAULT_TREND_BREAK_MIN_RUN`]). A higher value means only well-
+///   established trends trigger a finding on reversal.
+///
+/// Emits one finding per detected break point. The evidence points to the
+/// last point in the prior trend and the first point in the new direction.
+pub fn detect_trend_break(
+    source: DataSource,
+    dataset: &str,
+    records: &[NormalizedRecord],
+    field: &str,
+    min_run: usize,
+) -> Vec<Finding> {
+    let series = numeric_series(records, field);
+    if series.len() < 3 {
+        return Vec::new();
+    }
+    let min_run = min_run.max(2);
+
+    // Compute period-over-period deltas: positive = increasing, negative = decreasing.
+    // deltas[i] = change from series[i] to series[i+1].
+    let deltas: Vec<f64> = series.windows(2).map(|w| w[1].1 - w[0].1).collect();
+
+    let mut findings = Vec::new();
+    let mut run_start = 0usize; // index into deltas
+    let mut run_dir: i8 = 0; // +1 = increasing, -1 = decreasing, 0 = flat
+
+    for (i, &d) in deltas.iter().enumerate() {
+        let dir = if d > 0.0 {
+            1
+        } else if d < 0.0 {
+            -1
+        } else {
+            0
+        };
+        if dir == 0 {
+            // Flat period — resets the run (neither increasing nor decreasing).
+            run_start = i + 1;
+            run_dir = 0;
+            continue;
+        }
+        if run_dir != 0 && dir != run_dir {
+            // Direction changed — check if the prior run was long enough.
+            let run_len = i - run_start;
+            if run_len >= min_run {
+                // deltas[i] is the change from series[i] to series[i+1].
+                // The last point of the prior trend is series[i]; the first
+                // point of the new direction is series[i+1].
+                let (prev_id, prev_v) = series[i];
+                let (break_id, break_v) = series[i + 1];
+                let from_dir = if run_dir > 0 { "rising" } else { "falling" };
+                let to_dir = if dir > 0 { "rising" } else { "falling" };
+                let delta = break_v - prev_v;
+                let pct = if prev_v.abs() > 1e-12 {
+                    (delta / prev_v.abs()) * 100.0
+                } else {
+                    0.0
+                };
+                findings.push(Finding {
+                    kind: "trend_break".into(),
+                    source,
+                    dataset: dataset.into(),
+                    title: format!(
+                        "{field} trend break at {break_id}: {from_dir} for {run_len} periods, now {to_dir} ({prev_v:.2} → {break_v:.2})"
+                    ),
+                    heuristic_summary: format!(
+                        "The {field} series was {from_dir} for {run_len} consecutive periods \
+                         through {prev_id} ({prev_v:.2}), then reversed at {break_id} ({break_v:.2}). \
+                         The directional shift is {delta:+.2} ({pct:+.1}%). This signals a regime \
+                         change — the prior trend has broken."
+                    ),
+                    severity: "warning".into(),
+                    confidence: 0.7,
+                    evidence: vec![
+                        EvidenceRef {
+                            record_id: prev_id.to_string(),
+                            field: field.into(),
+                            value: serde_json::json!(prev_v),
+                            context: Some(format!("last point of the {from_dir} trend")),
+                        },
+                        EvidenceRef {
+                            record_id: break_id.to_string(),
+                            field: field.into(),
+                            value: serde_json::json!(break_v),
+                            context: Some(format!("first point of the new {to_dir} direction")),
+                        },
+                    ],
+                });
+            }
+            run_start = i;
+            run_dir = dir;
+        } else if run_dir == 0 {
+            // Starting a new run.
+            run_start = i;
+            run_dir = dir;
+        }
+        // else: same direction, run continues.
+    }
+
+    findings
 }
 
 /// Median of a (non-empty) slice. Sorts a copy; callers pass small vectors.
@@ -1746,5 +1870,127 @@ mod tests {
         assert!(!CrossDirection::Above.crossed(3.0, 4.0));
         assert!(CrossDirection::Below.crossed(3.0, 4.0));
         assert!(!CrossDirection::Below.crossed(5.0, 4.0));
+    }
+
+    // ── trend_break ────────────────────────────────────────────────────────
+
+    #[test]
+    fn trend_break_detects_rising_to_falling() {
+        // 3 rising periods, then a fall — min_run=3 should flag the break.
+        let recs = vec![
+            rec("2026-01", "v", 1.0),
+            rec("2026-02", "v", 2.0),
+            rec("2026-03", "v", 3.0),
+            rec("2026-04", "v", 4.0),
+            rec("2026-05", "v", 3.5), // break: was rising 3 periods, now falling
+        ];
+        let f = detect_trend_break(DataSource::Hkma, "x", &recs, "v", 3);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, "trend_break");
+        assert!(f[0].title.contains("trend break"));
+        assert!(f[0].title.contains("rising"));
+        assert!(f[0].title.contains("falling"));
+        assert_eq!(f[0].severity, "warning");
+        assert_eq!(f[0].evidence.len(), 2);
+        // Last rising point = 2026-04 (4.0); first falling = 2026-05 (3.5)
+        assert_eq!(f[0].evidence[0].record_id, "2026-04");
+        assert_eq!(f[0].evidence[1].record_id, "2026-05");
+    }
+
+    #[test]
+    fn trend_break_detects_falling_to_rising() {
+        let recs = vec![
+            rec("2026-01", "v", 5.0),
+            rec("2026-02", "v", 4.0),
+            rec("2026-03", "v", 3.0),
+            rec("2026-04", "v", 2.0),
+            rec("2026-05", "v", 3.0), // break: was falling 3 periods, now rising
+        ];
+        let f = detect_trend_break(DataSource::Hkma, "x", &recs, "v", 3);
+        assert_eq!(f.len(), 1);
+        assert!(f[0].title.contains("falling"));
+        assert!(f[0].title.contains("rising"));
+    }
+
+    #[test]
+    fn trend_break_ignores_short_run() {
+        // Only 2 rising periods before the fall — below min_run=3.
+        let recs = vec![
+            rec("2026-01", "v", 1.0),
+            rec("2026-02", "v", 2.0),
+            rec("2026-03", "v", 1.5),
+        ];
+        let f = detect_trend_break(DataSource::Hkma, "x", &recs, "v", 3);
+        assert!(f.is_empty(), "run too short to flag");
+    }
+
+    #[test]
+    fn trend_break_no_break_on_continued_trend() {
+        // All rising — no break.
+        let recs = vec![
+            rec("2026-01", "v", 1.0),
+            rec("2026-02", "v", 2.0),
+            rec("2026-03", "v", 3.0),
+            rec("2026-04", "v", 4.0),
+        ];
+        let f = detect_trend_break(DataSource::Hkma, "x", &recs, "v", 3);
+        assert!(f.is_empty());
+    }
+
+    #[test]
+    fn trend_break_flat_period_resets_run() {
+        // Rising, then flat, then falling — the flat period resets the run,
+        // so the fall doesn't have a long-enough prior trend to flag.
+        let recs = vec![
+            rec("2026-01", "v", 1.0),
+            rec("2026-02", "v", 2.0),
+            rec("2026-03", "v", 3.0),
+            rec("2026-04", "v", 3.0), // flat — resets
+            rec("2026-05", "v", 2.5), // falling, but prior run is only 1 period
+        ];
+        let f = detect_trend_break(DataSource::Hkma, "x", &recs, "v", 3);
+        assert!(f.is_empty(), "flat period reset the run");
+    }
+
+    #[test]
+    fn trend_break_too_few_records() {
+        let recs = vec![rec("2026-01", "v", 1.0), rec("2026-02", "v", 2.0)];
+        let f = detect_trend_break(DataSource::Hkma, "x", &recs, "v", 3);
+        assert!(f.is_empty());
+    }
+
+    #[test]
+    fn trend_break_multiple_breaks() {
+        // Rising 3, falling 3, rising — two breaks.
+        let recs = vec![
+            rec("2026-01", "v", 1.0),
+            rec("2026-02", "v", 2.0),
+            rec("2026-03", "v", 3.0),
+            rec("2026-04", "v", 4.0),
+            rec("2026-05", "v", 3.0), // break 1: rising → falling
+            rec("2026-06", "v", 2.0),
+            rec("2026-07", "v", 1.0),
+            rec("2026-08", "v", 2.0), // break 2: falling → rising
+        ];
+        let f = detect_trend_break(DataSource::Hkma, "x", &recs, "v", 3);
+        assert_eq!(f.len(), 2);
+        assert!(f[0].title.contains("rising"));
+        assert!(f[0].title.contains("falling"));
+        assert!(f[1].title.contains("falling"));
+        assert!(f[1].title.contains("rising"));
+    }
+
+    #[test]
+    fn trend_break_default_min_run_clamped_to_2() {
+        // min_run=1 is clamped to 2 internally. A 2-period rising run then a
+        // fall has run_len=2, which meets the clamped min_run=2.
+        let recs = vec![
+            rec("2026-01", "v", 1.0),
+            rec("2026-02", "v", 2.0),
+            rec("2026-03", "v", 3.0),
+            rec("2026-04", "v", 2.5), // 2 rising periods (deltas 0,1), then fall at delta 2
+        ];
+        let f = detect_trend_break(DataSource::Hkma, "x", &recs, "v", 1);
+        assert_eq!(f.len(), 1, "clamped min_run=2 flags a 2-period run");
     }
 }

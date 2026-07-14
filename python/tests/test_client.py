@@ -9,8 +9,9 @@ Run with:
 from __future__ import annotations
 
 import responses
+import pytest
 
-from hkgov import HkGov, HkGovError
+from hkgov import Answer, HkGov, HkGovError, TraceStep
 
 BASE = "http://localhost:8080"
 PREFIX = "/v1"
@@ -212,8 +213,6 @@ def test_source_health() -> None:
 @responses.activate
 def test_error_on_non_2xx() -> None:
     responses.add(responses.GET, f"{BASE}{PREFIX}/sources", json={"error": "down"}, status=503)
-    import pytest
-
     with pytest.raises(HkGovError, match="503"):
         _client().sources()
 
@@ -603,10 +602,233 @@ def test_delete_investigation_and_add_note() -> None:
     responses.add(
         responses.POST,
         f"{BASE}{PREFIX}/investigations/inv1/notes",
-        json={**SAMPLE_INVESTIGATION, "notes": [{"text": "a note"}]},
+        json={**SAMPLE_INVESTIGATION, "notes": [{"body": "a note"}]},
         status=200,
     )
     c = _client()
     assert c.delete_investigation("inv1", session_token="ses456") is True
     inv = c.add_investigation_note("inv1", "a note", session_token="ses456")
-    assert inv.notes[-1]["text"] == "a note"
+    assert inv.notes[-1]["body"] == "a note"
+    # Verify the request body uses "body" (matching the Rust AddNoteRequest schema)
+    sent = responses.calls[-1].request.body
+    assert b'"body"' in sent and b'a note' in sent
+
+
+# ── D-011 remaining: market_players + append_investigation_step ──────────────
+
+SAMPLE_MARKET_PLAYERS = [
+    {
+        "dept": "HKMA",
+        "category": "monetary",
+        "players": [
+            {"name": "HSBC", "note": "Largest HK bank", "url": "https://hsbc.com.hk"},
+            {"name": "BOCHK", "note": "2nd largest"},
+        ],
+    },
+    {
+        "dept": "IA",
+        "category": "livability",
+        "players": [
+            {"name": "AIA", "note": "Largest insurer"},
+        ],
+    },
+]
+
+
+@responses.activate
+def test_market_players_no_filter() -> None:
+    responses.add(
+        responses.GET,
+        f"{BASE}{PREFIX}/market-players",
+        json=SAMPLE_MARKET_PLAYERS,
+        status=200,
+    )
+    c = _client()
+    groups = c.market_players()
+    assert len(groups) == 2
+    assert groups[0].dept == "HKMA"
+    assert groups[0].category == "monetary"
+    assert len(groups[0].players) == 2
+    assert groups[0].players[0].name == "HSBC"
+    assert groups[0].players[0].url == "https://hsbc.com.hk"
+    assert groups[0].players[1].name == "BOCHK"
+    assert groups[0].players[1].url is None
+    assert groups[1].dept == "IA"
+    assert groups[1].players[0].note == "Largest insurer"
+
+
+@responses.activate
+def test_market_players_filtered_by_dept() -> None:
+    responses.add(
+        responses.GET,
+        f"{BASE}{PREFIX}/market-players",
+        json=[SAMPLE_MARKET_PLAYERS[0]],
+        status=200,
+    )
+    c = _client()
+    groups = c.market_players(dept="HKMA")
+    assert len(groups) == 1
+    assert groups[0].dept == "HKMA"
+    # Verify the dept query param was sent
+    assert "dept=HKMA" in responses.calls[-1].request.url
+
+
+@responses.activate
+def test_market_players_filtered_by_category() -> None:
+    responses.add(
+        responses.GET,
+        f"{BASE}{PREFIX}/market-players",
+        json=[SAMPLE_MARKET_PLAYERS[1]],
+        status=200,
+    )
+    c = _client()
+    groups = c.market_players(category="livability")
+    assert len(groups) == 1
+    assert groups[0].category == "livability"
+    assert "category=livability" in responses.calls[-1].request.url
+
+
+@responses.activate
+def test_append_investigation_step() -> None:
+    step_response = {
+        **SAMPLE_INVESTIGATION,
+        "steps": [
+            {
+                "id": "s1",
+                "kind": "qa",
+                "prompt": "Why did HIBOR spike?",
+                "answer": {
+                    "text": "Liquidity tightened",
+                    "confidence": 0.8,
+                    "trace": [
+                        {"tool": "query_dataset", "arguments": {"x": 1}, "result": [1, 2]}
+                    ],
+                },
+                "trace": [
+                    {"tool": "run_detector", "arguments": {"d": "x"}, "result": {}}
+                ],
+                "executed_at": "2026-07-13T00:00:00Z",
+                "annotation": None,
+            }
+        ],
+    }
+    responses.add(
+        responses.POST,
+        f"{BASE}{PREFIX}/investigations/inv1/steps",
+        json=step_response,
+        status=200,
+    )
+    c = _client()
+    inv = c.append_investigation_step(
+        "inv1",
+        kind="qa",
+        prompt="Why did HIBOR spike?",
+        session_token="ses456",
+    )
+    assert inv.id.startswith("inv:")
+    assert len(inv.steps) == 1
+    assert inv.steps[0].kind == "qa"
+    assert inv.steps[0].prompt == "Why did HIBOR spike?"
+    # answer + trace + executed_at must be parsed (regression: previously dropped)
+    assert inv.steps[0].answer is not None
+    assert inv.steps[0].answer.text == "Liquidity tightened"
+    assert inv.steps[0].answer.confidence == 0.8
+    assert len(inv.steps[0].answer.trace) == 1
+    assert inv.steps[0].answer.trace[0].tool == "query_dataset"
+    assert len(inv.steps[0].trace) == 1
+    assert inv.steps[0].trace[0].tool == "run_detector"
+    assert inv.steps[0].executed_at == "2026-07-13T00:00:00Z"
+    # Verify the request body has the right shape
+    sent = responses.calls[0].request.body
+    assert b'"kind"' in sent and b'qa' in sent
+    assert b'"prompt"' in sent
+    # Verify the bearer token was sent
+    assert responses.calls[0].request.headers["Authorization"] == "Bearer ses456"
+
+
+@responses.activate
+def test_append_investigation_step_chip_with_annotation() -> None:
+    step_response = {
+        **SAMPLE_INVESTIGATION,
+        "steps": [
+            {
+                "id": "s1",
+                "kind": "chip",
+                "prompt": "query_dataset",
+                "trace": [],
+                "executed_at": "2026-07-13T00:00:00Z",
+                "annotation": "checked liquidity",
+            }
+        ],
+    }
+    responses.add(
+        responses.POST,
+        f"{BASE}{PREFIX}/investigations/inv1/steps",
+        json=step_response,
+        status=200,
+    )
+    c = _client()
+    inv = c.append_investigation_step(
+        "inv1",
+        kind="chip",
+        prompt="query_dataset",
+        annotation="checked liquidity",
+        session_token="ses456",
+    )
+    assert inv.steps[0].annotation == "checked liquidity"
+    sent = responses.calls[0].request.body
+    assert b'"annotation"' in sent and b'checked liquidity' in sent
+
+
+@responses.activate
+def test_append_investigation_step_serializes_trace() -> None:
+    """Passing a TraceStep list (e.g. from ask()) must serialize to JSON —
+    regression: dataclasses aren't JSON-serializable by default."""
+    step_response = {**SAMPLE_INVESTIGATION, "steps": []}
+    responses.add(
+        responses.POST,
+        f"{BASE}{PREFIX}/investigations/inv1/steps",
+        json=step_response,
+        status=200,
+    )
+    c = _client()
+    trace = [TraceStep(tool="query_dataset", arguments={"a": 1}, result=[1, 2])]
+    ans = Answer(text="ok", confidence=0.5, trace=list(trace))
+    c.append_investigation_step(
+        "inv1", kind="qa", prompt="p", answer=ans, trace=trace
+    )
+    sent = responses.calls[0].request.body
+    # If serialization had failed, requests would have raised before this line.
+    assert b'"tool": "query_dataset"' in sent
+    assert b'"arguments": {"a": 1}' in sent
+
+
+@responses.activate
+def test_update_signal() -> None:
+    updated = {
+        **SAMPLE_SIGNAL,
+        "question": "renamed",
+        "enabled": False,
+    }
+    responses.add(
+        responses.PATCH,
+        f"{BASE}{PREFIX}/signals/sig1",
+        json=updated,
+        status=200,
+    )
+    c = _client()
+    sig = c.update_signal("sig1", question="renamed", enabled=False, session_token="ses456")
+    assert sig.question == "renamed"
+    assert sig.enabled is False
+    # PATCH verb + only the changed fields are sent.
+    assert responses.calls[0].request.method == "PATCH"
+    sent = responses.calls[0].request.body
+    assert b'"question": "renamed"' in sent
+    assert b'"enabled": false' in sent
+    assert responses.calls[0].request.headers["Authorization"] == "Bearer ses456"
+
+
+def test_update_signal_requires_a_field() -> None:
+    c = _client()
+    with pytest.raises(ValueError):
+        c.update_signal("sig1")

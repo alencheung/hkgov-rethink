@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" width="1200" height="360" role="img" aria-label="Launch hkgov-rethink in 60 seconds: demo script, server boot, and dashboard">
+  <defs>
+    <linearGradient id="lbg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f1a2e"/>
+      <stop offset="100%" stop-color="#0b1426"/>
+    </linearGradient>
+    <marker id="larr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#7fd1ff"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="360" fill="url(#lbg)"/>
+
+  <text x="40" y="46" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="22" font-weight="700" fill="#e8eefc">Launch in 60 seconds</text>
+  <rect x="40" y="58" width="180" height="4" fill="#f5306b"/>
+
+  <!-- terminal pane 1: demo -->
+  <rect x="40" y="86" width="360" height="226" rx="10" fill="#0a1322" stroke="#243a5e"/>
+  <circle cx="62" cy="106" r="5" fill="#f5306b"/>
+  <circle cx="80" cy="106" r="5" fill="#ff8a3d"/>
+  <circle cx="98" cy="106" r="5" fill="#3da9fc"/>
+  <text x="120" y="110" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#7fd1ff">one&#8209;shot demo</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5">
+    <text x="60" y="146" fill="#9fb2d4">$</text>
+    <text x="74" y="146" fill="#e8eefc">./scripts/demo.sh</text>
+    <text x="60" y="174" fill="#6b7f9e">boots · warms cache</text>
+    <text x="60" y="192" fill="#6b7f9e">prints 3 real insights</text>
+    <text x="60" y="210" fill="#6b7f9e">exits — no server left</text>
+    <text x="60" y="250" fill="#ff8a3d">hibor_overnight +99.3%</text>
+    <text x="60" y="268" fill="#ff8a3d">8&#8209;day outlier regime</text>
+    <text x="60" y="286" fill="#ff8a3d">3 cross&#8209;source gaps</text>
+  </g>
+
+  <line x1="410" y1="199" x2="450" y2="199" stroke="#7fd1ff" stroke-width="3" marker-end="url(#larr)"/>
+
+  <!-- terminal pane 2: server -->
+  <rect x="460" y="86" width="360" height="226" rx="10" fill="#0a1322" stroke="#243a5e"/>
+  <circle cx="482" cy="106" r="5" fill="#f5306b"/>
+  <circle cx="500" cy="106" r="5" fill="#ff8a3d"/>
+  <circle cx="518" cy="106" r="5" fill="#3da9fc"/>
+  <text x="540" y="110" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#7fd1ff">run the server</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5">
+    <text x="480" y="146" fill="#9fb2d4">$</text>
+    <text x="494" y="146" fill="#e8eefc">cargo run --release</text>
+    <text x="494" y="164" fill="#e8eefc">  -p hkgov-api</text>
+    <text x="480" y="194" fill="#6b7f9e">binds 0.0.0.0:8080</text>
+    <text x="480" y="212" fill="#6b7f9e">warms from HKGOV</text>
+    <text x="480" y="230" fill="#6b7f9e">agent on its own timer</text>
+    <text x="480" y="266" fill="#7fd1ff">$ curl :8080/v1/insights</text>
+    <text x="480" y="286" fill="#7fd1ff">$ curl :8080/v1/silence-index</text>
+  </g>
+
+  <line x1="830" y1="199" x2="870" y2="199" stroke="#7fd1ff" stroke-width="3" marker-end="url(#larr)"/>
+
+  <!-- pane 3: dashboard -->
+  <rect x="880" y="86" width="280" height="226" rx="10" fill="#0a1322" stroke="#243a5e"/>
+  <circle cx="902" cy="106" r="5" fill="#f5306b"/>
+  <circle cx="920" cy="106" r="5" fill="#ff8a3d"/>
+  <circle cx="938" cy="106" r="5" fill="#3da9fc"/>
+  <text x="960" y="110" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#7fd1ff">open the dashboard</text>
+  <!-- mock dashboard -->
+  <rect x="900" y="132" width="240" height="160" rx="8" fill="#13243f" stroke="#243a5e"/>
+  <text x="912" y="154" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="700" fill="#e8eefc">HK City Pulse</text>
+  <rect x="912" y="166" width="216" height="2" fill="#243a5e"/>
+  <text x="912" y="188" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#9fb2d4">Today's brief</text>
+  <rect x="912" y="196" width="216" height="20" rx="4" fill="#1f2a14" stroke="#4a5e2e"/>
+  <text x="920" y="210" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#ff8a3d">critical · HIBOR +99.3%</text>
+  <rect x="912" y="222" width="216" height="20" rx="4" fill="#13243f" stroke="#2a456e"/>
+  <text x="920" y="236" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#7fd1ff">warning · outlier regime</text>
+  <text x="912" y="266" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#9fb2d4">Silence Index</text>
+  <text x="1020" y="266" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="700" fill="#f5306b">75.8</text>
+  <text x="912" y="284" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#6b7f9e">http://localhost:8080/dashboard</text>
+</svg>

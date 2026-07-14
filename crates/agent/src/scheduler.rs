@@ -17,9 +17,9 @@ use crate::alerts::AlertDispatcher;
 use crate::analysis::{
     coerce_to_period, detect_benchmark_deviation, detect_correlation, detect_cross_source_gaps,
     detect_outliers, detect_proxy_divergence, detect_seasonality, detect_series_jumps_cadenced,
-    detect_threshold_crossing, detect_year_over_year, CrossDirection, Finding,
+    detect_threshold_crossing, detect_trend_break, detect_year_over_year, CrossDirection, Finding,
     DEFAULT_CORRELATION_R, DEFAULT_OUTLIER_Z, DEFAULT_PCT_THRESHOLD, DEFAULT_PROXY_DELTA_PCT,
-    DEFAULT_PROXY_R, DEFAULT_SEASONALITY_R,
+    DEFAULT_PROXY_R, DEFAULT_SEASONALITY_R, DEFAULT_TREND_BREAK_MIN_RUN,
 };
 use crate::insight::{Insight, InsightStore};
 use crate::llm::LlmClient;
@@ -248,7 +248,11 @@ async fn run_one_target(
                 )
             } else {
                 // Cadence-scaled PoP (Unknown cadence → unchanged v3 behavior).
-                let t = if threshold > 0.0 { threshold } else { 25.0 };
+                let t = if threshold > 0.0 {
+                    threshold
+                } else {
+                    crate::analysis::DEFAULT_SERIES_JUMP_WATCH_PCT
+                };
                 detect_series_jumps_cadenced(
                     source,
                     &target.dataset,
@@ -334,6 +338,16 @@ async fn run_one_target(
                 threshold,
                 direction,
             )
+        }
+        "trend_break" => {
+            // The threshold field is reused as the minimum run length
+            // (clamped internally to ≥2). Zero/absent → the default.
+            let min_run = if threshold > 0.0 {
+                threshold as usize
+            } else {
+                DEFAULT_TREND_BREAK_MIN_RUN
+            };
+            detect_trend_break(source, &target.dataset, &records, field, min_run)
         }
         other => {
             tracing::warn!(detector = other, "agent: unknown detector, skipping");

@@ -20,9 +20,10 @@
 use crate::analysis::{
     coerce_to_period, detect_benchmark_deviation, detect_correlation, detect_cross_source_gaps,
     detect_outliers, detect_proxy_divergence, detect_seasonality, detect_series_jumps_cadenced,
-    detect_year_over_year, Finding, DEFAULT_BENCHMARK_PCT, DEFAULT_CORRELATION_R,
-    DEFAULT_OUTLIER_Z, DEFAULT_PCT_THRESHOLD, DEFAULT_PROXY_DELTA_PCT, DEFAULT_PROXY_R,
-    DEFAULT_SEASONALITY_R,
+    detect_threshold_crossing, detect_trend_break, detect_year_over_year, CrossDirection, Finding,
+    DEFAULT_BENCHMARK_PCT, DEFAULT_CORRELATION_R, DEFAULT_OUTLIER_Z, DEFAULT_PCT_THRESHOLD,
+    DEFAULT_PROXY_DELTA_PCT, DEFAULT_PROXY_R, DEFAULT_SEASONALITY_R, DEFAULT_SERIES_JUMP_WATCH_PCT,
+    DEFAULT_TREND_BREAK_MIN_RUN,
 };
 use async_trait::async_trait;
 use hkgov_common::{Cadence, Category, DataSource, NormalizedRecord, RecordValue, Result};
@@ -427,8 +428,9 @@ impl Tool for RunDetectorTool {
     fn description(&self) -> &'static str {
         "Run one anomaly detector against a dataset and return the structured \
          findings it surfaces. Detectors: series_jump, outlier, seasonality, \
-         correlation, cross_source_gap. Each returns findings with evidence \
-         pointers back into the store."
+         correlation, cross_source_gap, year_over_year, proxy_divergence, \
+         benchmark_deviation, threshold_crossing, trend_break. Each returns \
+         findings with evidence pointers back into the store."
     }
     fn schema(&self) -> Value {
         json!({
@@ -436,13 +438,13 @@ impl Tool for RunDetectorTool {
             "properties": {
                 "detector": {
                     "type": "string",
-                    "enum": ["series_jump", "year_over_year", "outlier", "seasonality", "correlation", "cross_source_gap", "proxy_divergence", "benchmark_deviation"]
+                    "enum": ["series_jump", "year_over_year", "outlier", "seasonality", "correlation", "cross_source_gap", "proxy_divergence", "benchmark_deviation", "threshold_crossing", "trend_break"]
                 },
                 "source": { "type": "string", "enum": ["hkma", "datagovhk", "press", "landsd"] },
                 "dataset": { "type": "string" },
                 "field": {
                     "type": "string",
-                    "description": "Numeric field for series_jump/year_over_year/outlier/seasonality/correlation/proxy_divergence/benchmark_deviation, or the date column for cross_source_gap."
+                    "description": "Numeric field for series_jump/year_over_year/outlier/seasonality/correlation/proxy_divergence/benchmark_deviation/threshold_crossing/trend_break, or the date column for cross_source_gap."
                 },
                 "field_b": {
                     "type": "string",
@@ -554,7 +556,7 @@ impl Tool for RunDetectorTool {
                 &dataset,
                 &records,
                 field,
-                threshold.unwrap_or(25.0),
+                threshold.unwrap_or(DEFAULT_SERIES_JUMP_WATCH_PCT),
                 cadence,
             ),
             "year_over_year" => {
@@ -595,6 +597,34 @@ impl Tool for RunDetectorTool {
                     field,
                     field_b,
                     threshold.unwrap_or(DEFAULT_CORRELATION_R),
+                )
+            }
+            "trend_break" => {
+                let min_run = if threshold.unwrap_or(0.0) > 0.0 {
+                    threshold.unwrap() as usize
+                } else {
+                    DEFAULT_TREND_BREAK_MIN_RUN
+                };
+                detect_trend_break(source, &dataset, &records, field, min_run)
+            }
+            // D-021: `threshold_crossing` was wired into the scheduler and the
+            // signal preview, but absent from the agent tool belt — so the
+            // flagship "HIBOR above X%" signal was unreachable from the LLM
+            // agent-loop tool surface (POST /v1/ask with run_detector). The
+            // direction arg mirrors the scheduler/tools convention: "below" →
+            // Below, anything else (incl. unset) → Above (the watch-level case).
+            "threshold_crossing" => {
+                let dir = match args.get("direction").and_then(Value::as_str) {
+                    Some("below") => CrossDirection::Below,
+                    _ => CrossDirection::Above,
+                };
+                detect_threshold_crossing(
+                    source,
+                    &dataset,
+                    &records,
+                    field,
+                    threshold.unwrap_or(0.0),
+                    dir,
                 )
             }
             other => {
@@ -1004,6 +1034,99 @@ mod tests {
         });
         let r = rt().block_on(belt.invoke("run_detector", &args));
         assert!(r.is_err());
+    }
+
+    // ---- D-021: threshold_crossing must be reachable from the tool belt ------
+    //
+    // Before D-021, `threshold_crossing` was wired into the scheduler and the
+    // signal preview but absent from the agent tool belt's run_detector match,
+    // so it hit the `other =>` error arm. The flagship "HIBOR above X%" signal
+    // was unreachable from the LLM agent-loop tool surface. This test would
+    // have failed (is_err) before the fix.
+
+    #[test]
+    fn d021_run_detector_threshold_crossing_works() {
+        let store = Arc::new(MemoryStore::new(10, 60));
+        seed_record(
+            &store,
+            DataSource::Hkma,
+            "daily-interbank-liquidity",
+            vec![
+                make_record("2026-01", "hibor_overnight", 2.0),
+                make_record("2026-02", "hibor_overnight", 2.93), // crosses above 2.5
+            ],
+        );
+        let belt = ToolBelt::for_store(store);
+        let args = json!({
+            "detector": "threshold_crossing",
+            "source": "hkma",
+            "dataset": "daily-interbank-liquidity",
+            "field": "hibor_overnight",
+            "threshold": 2.5,
+            "direction": "above"
+        });
+        let out = rt().block_on(belt.invoke("run_detector", &args)).unwrap();
+        let findings = out["findings"].as_array().unwrap();
+        assert_eq!(
+            findings.len(),
+            1,
+            "D-021: threshold_crossing must fire when value crosses the threshold"
+        );
+        assert_eq!(findings[0]["kind"], "threshold_crossing");
+    }
+
+    #[test]
+    fn d021_run_detector_threshold_crossing_silent_when_not_crossed() {
+        let store = Arc::new(MemoryStore::new(10, 60));
+        seed_record(
+            &store,
+            DataSource::Hkma,
+            "x",
+            vec![make_record("2026-01", "v", 1.0)], // below 5.0
+        );
+        let belt = ToolBelt::for_store(store);
+        let args = json!({
+            "detector": "threshold_crossing",
+            "source": "hkma",
+            "dataset": "x",
+            "field": "v",
+            "threshold": 5.0,
+            "direction": "above"
+        });
+        let out = rt().block_on(belt.invoke("run_detector", &args)).unwrap();
+        assert!(
+            out["findings"].as_array().unwrap().is_empty(),
+            "no crossing → no findings"
+        );
+    }
+
+    #[test]
+    fn d021_run_detector_threshold_crossing_below_direction() {
+        let store = Arc::new(MemoryStore::new(10, 60));
+        seed_record(
+            &store,
+            DataSource::Hkma,
+            "x",
+            vec![
+                make_record("2026-01", "v", 5.0),
+                make_record("2026-02", "v", 1.0), // drops below 3.0
+            ],
+        );
+        let belt = ToolBelt::for_store(store);
+        let args = json!({
+            "detector": "threshold_crossing",
+            "source": "hkma",
+            "dataset": "x",
+            "field": "v",
+            "threshold": 3.0,
+            "direction": "below"
+        });
+        let out = rt().block_on(belt.invoke("run_detector", &args)).unwrap();
+        assert_eq!(
+            out["findings"].as_array().unwrap().len(),
+            1,
+            "below-direction crossing must fire"
+        );
     }
 
     #[test]

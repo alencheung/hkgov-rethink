@@ -21,7 +21,9 @@ from .models import (
     Investigation,
     InvestigationStep,
     LastExceeded,
+    MarketPlayerGroup,
     NormalRange,
+    PlayerEntry,
     Record,
     RecordPage,
     ReproducibilityManifest,
@@ -100,6 +102,21 @@ class HkGov:
         h = {"Content-Type": "application/json", **self._headers, **(headers or {})}
         try:
             r = requests.post(
+                self._url(path), headers=h, json=body, timeout=self._timeout
+            )
+        except requests.RequestException as e:
+            raise HkGovError(f"transport error: {e}") from e
+        return self._json(r)
+
+    def _patch(
+        self,
+        path: str,
+        body: dict[str, Any],
+        headers: Optional[dict[str, str]] = None,
+    ) -> Any:
+        h = {"Content-Type": "application/json", **self._headers, **(headers or {})}
+        try:
+            r = requests.patch(
                 self._url(path), headers=h, json=body, timeout=self._timeout
             )
         except requests.RequestException as e:
@@ -294,14 +311,7 @@ class HkGov:
 
     def ask(self, question: str) -> Answer:
         d = self._post("/ask", {"question": question})
-        return Answer(
-            text=d.get("text", ""),
-            confidence=float(d.get("confidence", 0.0)),
-            trace=[
-                TraceStep(tool=s["tool"], arguments=s.get("arguments"), result=s.get("result"))
-                for s in d.get("trace", [])
-            ],
-        )
+        return self._answer(d)
 
     # ---- v7 product surface: Silence Index + Unprecedentedness + Cite-It ------
 
@@ -419,14 +429,11 @@ class HkGov:
 
         Raises ``HkGovError`` (401) if the session is invalid/expired.
         """
-        r = requests.get(
-            f"{self._base}/v1/auth/me",
-            headers={**self._headers, "Authorization": f"Bearer {session_token}"},
-            timeout=self._timeout,
+        d = self._get(
+            "/auth/me",
+            headers={"Authorization": f"Bearer {session_token}"},
         )
-        if not r.ok:
-            raise HkGovError(f"{r.status_code}: {r.text}")
-        return self._user(r.json())
+        return self._user(d)
 
     def list_signals(self, *, limit: int = 20, session_token: Optional[str] = None) -> list[Signal]:
         """List the authenticated caller's signals (ownership-scoped)."""
@@ -456,6 +463,39 @@ class HkGov:
         headers = self._auth_headers(session_token)
         d = self._get(f"/signals/{signal_id}", headers=headers)
         return self._signal(d) if d else None
+
+    def update_signal(
+        self,
+        signal_id: str,
+        *,
+        question: Optional[str] = None,
+        compiled: Optional[ScanTarget] = None,
+        channels: Optional[list[SignalChannel]] = None,
+        enabled: Optional[bool] = None,
+        session_token: Optional[str] = None,
+    ) -> Signal:
+        """Partially update a signal subscription (PATCH).
+
+        Only the fields you pass are sent; omitted fields are left unchanged
+        on the server (mirrors the all-optional ``SignalPatch`` body). At
+        least one field must be provided.
+        """
+        body: dict[str, Any] = {}
+        if question is not None:
+            body["question"] = question
+        if compiled is not None:
+            body["compiled"] = self._scan_target_to_dict(compiled)
+        if channels is not None:
+            body["channels"] = [
+                {"kind": c.kind, **({"target": c.target} if c.target else {})} for c in channels
+            ]
+        if enabled is not None:
+            body["enabled"] = enabled
+        if not body:
+            raise ValueError("update_signal requires at least one field to update")
+        headers = self._auth_headers(session_token)
+        d = self._patch(f"/signals/{signal_id}", body, headers=headers)
+        return self._signal(d)
 
     def delete_signal(self, signal_id: str, *, session_token: Optional[str] = None) -> bool:
         headers = self._auth_headers(session_token)
@@ -521,7 +561,40 @@ class HkGov:
     ) -> Investigation:
         """Add a free-text note to an investigation."""
         headers = self._auth_headers(session_token)
-        d = self._post(f"/investigations/{inv_id}/notes", {"text": text}, headers=headers)
+        d = self._post(f"/investigations/{inv_id}/notes", {"body": text}, headers=headers)
+        return self._investigation(d)
+
+    def append_investigation_step(
+        self,
+        inv_id: str,
+        kind: str,
+        prompt: str,
+        *,
+        answer: Optional[Answer] = None,
+        trace: Optional[list[TraceStep]] = None,
+        annotation: Optional[str] = None,
+        session_token: Optional[str] = None,
+    ) -> Investigation:
+        """Append a step (chip/qa/finding_promotion) to an investigation.
+
+        This is the agent-driven step endpoint: for ``kind="qa"`` the server
+        runs ``run_agent_loop`` against the investigation's seed insight and
+        appends the result. For ``kind="chip"`` it's a one-click preset tool
+        call. Returns the updated investigation with the new step appended.
+        """
+        body: dict[str, Any] = {"kind": kind, "prompt": prompt}
+        if answer is not None:
+            body["answer"] = {
+                "text": answer.text,
+                "confidence": answer.confidence,
+                "trace": [self._trace_to_dict(t) for t in answer.trace],
+            }
+        if trace is not None:
+            body["trace"] = [self._trace_to_dict(t) for t in trace]
+        if annotation is not None:
+            body["annotation"] = annotation
+        headers = self._auth_headers(session_token)
+        d = self._post(f"/investigations/{inv_id}/steps", body, headers=headers)
         return self._investigation(d)
 
     def insight_history(self, insight_id: str) -> list[Insight]:
@@ -529,7 +602,39 @@ class HkGov:
         d = self._get(f"/insights/{insight_id}/history")
         return [self._insight(x) for x in d]
 
+    def market_players(
+        self, *, dept: Optional[str] = None, category: Optional[str] = None
+    ) -> list[MarketPlayerGroup]:
+        """The curated related-market-players directory.
+
+        Filter by ``dept`` (e.g. ``"HKMA"``) or ``category`` (e.g.
+        ``"monetary"``). With no filters, returns every department group.
+        """
+        params: dict[str, Any] = {}
+        if dept:
+            params["dept"] = dept
+        if category:
+            params["category"] = category
+        d = self._get("/market-players", params=params or None)
+        return [self._market_player_group(x) for x in d]
+
     # ---- helpers --------------------------------------------------------------
+
+    @staticmethod
+    def _player_entry(x: dict[str, Any]) -> PlayerEntry:
+        return PlayerEntry(
+            name=x.get("name", ""),
+            note=x.get("note", ""),
+            url=x.get("url"),
+        )
+
+    @staticmethod
+    def _market_player_group(x: dict[str, Any]) -> MarketPlayerGroup:
+        return MarketPlayerGroup(
+            dept=x.get("dept", ""),
+            category=x.get("category", "other"),
+            players=[HkGov._player_entry(p) for p in x.get("players", [])],
+        )
 
     @staticmethod
     def _meta(x: dict[str, Any]) -> DatasetMeta:
@@ -730,14 +835,38 @@ class HkGov:
                     id=s.get("id", ""),
                     kind=s.get("kind", ""),
                     prompt=s.get("prompt", ""),
+                    answer=cls._answer(s["answer"]) if s.get("answer") else None,
+                    trace=cls._trace(s.get("trace", [])),
                     annotation=s.get("annotation"),
-                    created_at=s.get("created_at"),
+                    executed_at=s.get("executed_at"),
                 )
                 for s in x.get("steps", [])
             ],
             notes=x.get("notes", []),
             created_at=x.get("created_at", ""),
             updated_at=x.get("updated_at", ""),
+        )
+
+    @staticmethod
+    def _trace(items: Any) -> list[TraceStep]:
+        return [
+            TraceStep(tool=s["tool"], arguments=s.get("arguments"), result=s.get("result"))
+            for s in items or []
+        ]
+
+    @staticmethod
+    def _trace_to_dict(t: TraceStep) -> dict[str, Any]:
+        """Serialize a TraceStep for the request body (dataclasses aren't JSON-
+        serializable by default, so callers passing a trace from `ask()` would
+        otherwise hit TypeError at request time)."""
+        return {"tool": t.tool, "arguments": t.arguments, "result": t.result}
+
+    @classmethod
+    def _answer(cls, x: dict[str, Any]) -> Answer:
+        return Answer(
+            text=x.get("text", ""),
+            confidence=float(x.get("confidence", 0.0)),
+            trace=cls._trace(x.get("trace", [])),
         )
 
     @staticmethod

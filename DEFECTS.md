@@ -18,8 +18,20 @@
 | D-008 | 🟡 low | Cite `base_url` docstring claims `Host` header is used (it isn't) | F-017 | ✅ fixed (doc corrected) |
 | D-009 | ⚪ risk | No owner isolation on signals/investigations (shared-key model) | F-022/26/28/30 | ⚠️ waived (documented v1 design) |
 | D-010 | 🟠 medium | Sessions never expire (leaked bearer valid forever) | F-035 | ✅ fixed + verified (+ 3 regression tests) |
-| D-011 | 🟡 low | Python client missing 8 endpoint families (signals/auth/cite/…) | F-056 | ⏸️ deferred (separate Python task) |
+| D-011 | 🟡 low | Python client missing 8 endpoint families (signals/auth/cite/…) | F-056 | ✅ fixed + verified (+5 tests) |
 | D-012 | 🔴 critical | Widened HKMA catalog silently broke the agent: dead scan-target slug + hash record-ids + dropped `hibor` tag + agent runs before data warms | F-038,F-039,F-046,F-067,F-077,F-089 | ✅ fixed + verified (+ 7 regression tests) |
+| D-013 | 🟠 medium | `trend_break` detector wired into scheduler/tools but missing from signal preview (D-006 class) | F-023 | ✅ fixed + verified (+ 1 regression test) |
+| D-014 | 🔴 critical | Python `_investigation` parsed step timestamp from nonexistent `created_at` (Rust serializes `executed_at`) and silently dropped `answer` + `trace` | F-056 | ✅ fixed + verified (+ strengthened tests) |
+| D-015 | 🟠 medium | `append_investigation_step` crashed on `answer=`/`trace=` (dataclasses not JSON-serializable) | F-056 | ✅ fixed + verified (+ regression test) |
+| D-016 | 🟠 medium | Python client missing `update_signal` (PATCH /v1/signals/{id}); new models not exported | F-056 | ✅ fixed + verified (+ regression test) |
+| D-017 | 🟡 low | Docs/config drift: stale `?api_key=` auth claim, `routes.rs`→`routes/` path, ROADMAP missing v7/v8, detectors list missing trend_break/threshold_crossing | F-084 | ✅ fixed (doc/config only) |
+| D-018 | 🔴 critical | Dashboard has no authentication UI — per-user features (signals, investigations, silence-watch) all 401 from the browser | F-020–F-025, F-053, F-061, F-062 | ⚠️ waived (missing feature, not a smallest-fix defect) |
+| D-019 | 🟠 high | `correlation` detector missing from signal preview (D-006/D-013 class) | F-022 | ✅ fixed + verified (+ 2 regression tests) |
+| D-020 | 🟠 high | Signal preview truncated at 500 rows (single `get_page`); scheduler paginates | F-022 | ✅ fixed + verified (+ 1 regression test) |
+| D-021 | 🟡 medium | `threshold_crossing` missing from agent tool belt (`run_detector`) — unreachable from LLM loop | F-043 | ✅ fixed + verified (+ 3 regression tests) |
+| D-022 | 🟡 low | `funding` tab missing from boot hash-route whitelist (`#funding` cold load → overview) | F-067 | ✅ fixed + verified |
+| D-023 | 🟡 low | `signal_id` omitted cadence/comparison/field_b/companion/join_field → distinct signals collided + overwrote | F-020 | ✅ fixed + verified (+ 5 regression tests) |
+| D-024 | 🟡 low | `series_jump` default-threshold magic literal `25.0` undocumented across 3 dispatch sites | F-041–F-043 | ✅ fixed + verified (named constant, no behavior change) |
 
 > **Third independent re-audit (D-006 → D-011).** A fresh, from-scratch QA cycle
 > was run with **no assumption** the prior audit (D-001 → D-005) was complete. It
@@ -27,7 +39,7 @@
 > v8/v9 product surface — signals, identity, cite, silence-index,
 > unprecedentedness, bilingual, the dashboard, and the Python client — for
 > defects the earlier passes missed. Details below; full per-test traces in
-> `docs/QA_PHASE2_3_TESTS_DEFECTS.md` and `docs/QA_PHASE5_REGRESSION.md`.
+> `docs/archive/QA_PHASE2_3_TESTS_DEFECTS.md` and `docs/archive/QA_PHASE5_REGRESSION.md`.
 
 > **Independent re-audit.** All four defects were re-verified end-to-end from
 > a clean rebuild with no assumption the fixes still held. All four reproduce
@@ -268,7 +280,7 @@ audits were complete. It re-verified D-001 → D-005 (all still fixed — their 
 guards are green) and then hunted across the v8/v9 product surface (signals,
 identity, cite, silence-index, unprecedentedness, bilingual, dashboard, Python
 client) for defects the earlier passes missed. Full per-test traces in
-`docs/QA_PHASE2_3_TESTS_DEFECTS.md`; regression in `docs/QA_PHASE5_REGRESSION.md`.
+`docs/archive/QA_PHASE2_3_TESTS_DEFECTS.md`; regression in `docs/archive/QA_PHASE5_REGRESSION.md`.
 
 ### Verification gates (this pass)
 
@@ -368,12 +380,20 @@ client) for defects the earlier passes missed. Full per-test traces in
 - **Stories:** F-056 (`hkgov-py` client coverage)
 - **Severity:** low — typed contract incomplete; endpoints still reachable via
   `_get`/`_post`
-- **Observed:** `dir(HkGov)` lacks methods for signals, investigations, auth,
+- **Observed:** `dir(HkGov)` lacked methods for signals, investigations, auth,
   cite, silence-index, unprecedentedness, insight-history, and the `since`/`lang`
   params — 8 endpoint families added in v8/v9 that the client never grew.
 - **Expected:** parity with the HTTP surface.
-- **Resolution (deferred, per approval):** scoped to a separate Python task
-  (different language/toolchain). Tracked here so it isn't lost.
+- **Resolution (fixed):** the 8 originally-listed families were added in a
+  prior pass (v7/v8 client methods + tests). This cycle closed the remaining
+  2 gaps the original enumeration didn't anticipate: `market_players()` (`GET
+  /v1/market-players` — the related-market-players directory) and
+  `append_investigation_step()` (`POST /v1/investigations/{id}/steps` — the
+  agent-driven step append). Also fixed a latent bug in
+  `add_investigation_note()` which sent `{"text": text}` but the Rust
+  `AddNoteRequest` expects `{"body": body}`. New `MarketPlayerGroup` +
+  `PlayerEntry` dataclasses added to `models.py`. +5 Python tests (32 total,
+  all passing).
 
 ### What this pass checked and cleared (no defect)
 
@@ -516,4 +536,294 @@ count became undeniable.
 - Signals preview, create, list, investigations create/steps/notes/delete,
   auth request-token/redeem/me, cite all five formats + bundle + manifest,
   unprecedentedness, since-filter (D-007), feedback round-trip.
+
+---
+
+## Fifth PM-coordinated audit (the pass that found D-013 → D-017)
+
+A project-manager-coordinated review fanned out three independent audit agents
+(Rust crates, Python client, docs/config/CI) across the full tree plus the
+uncommitted work-in-progress (the new `trend_break` detector, the Python
+v7/v8 client additions, the `include_str!` path hardening, and the doc
+reorganization). It re-verified D-001 → D-012 (all still fixed) and then
+hunted across the WIP surface for defects the earlier passes — which predated
+the `trend_break` work and the Python v7/v8 expansion — could not have seen.
+
+### Verification gates (this pass)
+
+| Gate | Result |
+|------|--------|
+| `cargo test --workspace` | ✅ **268 passed**, 0 failed (+1 new `preview_trend_break` test) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ clean |
+| `cargo fmt --all -- --check` | ✅ clean |
+| Python `pytest tests/` | ✅ **35 passed** (baseline 32; +3 new tests) |
+
+### D-013 — `trend_break` missing from signal preview (D-006 class)
+
+- **Stories:** F-023 (`POST /v1/signals/preview`)
+- **Severity:** medium — same defect class as the documented D-006: preview ≠
+  production for a detector. A `trend_break` signal previewed empty even though
+  the scheduler would fire it in production.
+- **Root cause:** the new `trend_break` detector was wired into the scheduler
+  (`run_one_target`) and the tool belt (`RunDetectorTool`) but the preview
+  dispatcher (`run_detector_preview` in `signal.rs`) — whose module docstring
+  states the invariant "preview IS what will fire" — had no `trend_break` arm.
+- **Fix:** added a `"trend_break" =>` arm mirroring the scheduler (`threshold`
+  as min-run-length, defaulting to `DEFAULT_TREND_BREAK_MIN_RUN`).
+- **Verification:** new test `preview_trend_break_fires_on_reversal` asserts a
+  3-period-rise-then-reversal previews ≥1 finding (was 0 before the arm).
+
+### D-014 — Python `_investigation` dropped step `answer`/`trace` + wrong timestamp field
+
+- **Stories:** F-056 (Python client coverage)
+- **Severity:** critical — silently lost data on every investigation read. The
+  Rust `InvestigationStep` serializes `executed_at`, `answer`, and `trace`; the
+  Python helper read the nonexistent `created_at` (always `None`) and never
+  parsed `answer` or `trace`.
+- **Root cause:** the helper predated the agent-driven step endpoint and was
+  never updated when `answer`/`trace`/`executed_at` were added to the Rust
+  struct. The existing tests mocked rich payloads but only asserted `kind`/
+  `prompt`, masking the drop.
+- **Fix:** renamed the dataclass field `created_at` → `executed_at`; the helper
+  now parses `executed_at`, `answer` (via a new `_answer` helper), and `trace`
+  (via a new `_trace` helper). Existing step tests strengthened to assert on
+  the previously-dropped fields.
+
+### D-015 — `append_investigation_step` crashed on `answer=`/`trace=`
+
+- **Stories:** F-056
+- **Severity:** medium — runtime `TypeError` on a documented parameter.
+  `Answer`/`TraceStep` are dataclasses; `requests` cannot JSON-serialize them,
+  so passing an `Answer` returned from `ask()` crashed at call time.
+- **Fix:** added `_trace_to_dict` serializer; `answer.trace` and `trace` are
+  now serialized to dicts before going into the request body.
+- **Verification:** new test `test_append_investigation_step_serializes_trace`
+  passes a `TraceStep` list and asserts the serialized body (would have raised
+  before the fix).
+
+### D-016 — Python client missing `update_signal`; new models not exported
+
+- **Stories:** F-056
+- **Severity:** medium — API parity gap. The Rust router exposes
+  `PATCH /v1/signals/{id}` but the client had no method for it. `MarketPlayerGroup`
+  and `PlayerEntry` were added to `models.py` but not re-exported from the
+  package `__all__`. (`auth_me` also hardcoded `/v1` instead of the configured
+  prefix — fixed in the same pass.)
+- **Fix:** added `update_signal(signal_id, *, question, compiled, channels,
+  enabled)` (+ a `_patch` HTTP helper); exported the two new models; `auth_me`
+  now uses `_get("/auth/me")` and respects the prefix.
+- **Verification:** new tests `test_update_signal` + `test_update_signal_requires_a_field`.
+
+### D-017 — Docs/config drift (stale claims, missing milestones, missing detectors)
+
+- **Stories:** F-084 (docs accuracy)
+- **Severity:** low — documentation only.
+- **Root cause:** incremental WIP left several surfaces stale: README claimed
+  `?api_key=` query auth (removed as security hardening) and referenced
+  `routes.rs` (now `routes/`); `docs/ROADMAP.md` documented only v1–v6 while
+  README/CHANGELOG listed v7/v8 as shipped; `config.toml`'s detector list
+  omitted `threshold_crossing` and `trend_break` despite both being real,
+  dispatched detectors.
+- **Fix:** corrected all stale references; added v7/v8 sections to ROADMAP and
+  synced INDEX (`v1–v6` → `v1–v8`); documented `threshold_crossing` +
+  `trend_break` in `config.toml`; refreshed the `run_detector` tool description
+  to list all 10 detectors.
+
+### What this pass checked and cleared (no new defect beyond D-013 → D-017)
+
+- The `include_str!` `CARGO_MANIFEST_DIR` path change resolves correctly
+  (`crates/api` + `/../../dashboard/` = `dashboard/`); all 7 referenced files
+  exist; `cargo check`/`clippy` clean.
+- `detect_trend_break` math (run-length counting, reversal detection, index
+  mapping, division-by-zero guard, `min_run.max(2)` clamp) — verified by hand
+  and by 8 passing unit tests.
+- All README curl examples reference real routes; all referenced files exist
+  (`scripts/demo.sh`, `EXAMPLES.md`, `CHANGELOG.md`, etc.).
+- Local tooling artifacts (`.agentic/`, `.zcode/`, `skills-staging/`, `data/`,
+  `agentic.json`) now `.gitignore`d — were previously at risk of an accidental
+  `git add .` commit.
+
+---
+
+> **Fourth independent re-audit (D-018 → D-024).** A fresh, from-scratch QA cycle
+> was run with **no assumption** the prior audits (D-001 → D-017) were complete.
+> It re-verified the full feature surface (73 features across 4 roles: every
+> route, every dashboard screen, every operator config knob) and hunted for
+> defects the earlier passes missed — focusing on the agent detection layer's
+> three dispatch sites (scheduler / signal preview / tool belt), the dashboard's
+> auth model, and id-dedup correctness.
+
+## D-018 — Dashboard has no authentication UI (per-user features all 401)
+
+- **Stories:** F-020–F-025 (signals/investigations CRUD), F-053 (silence-watch),
+  F-061 (investigations UI), F-062 (signal subscriptions UI)
+- **Severity:** critical — an entire UX surface (Signals tab, Cases tab,
+  "Save a watch") is non-functional from the browser.
+- **Observed:** Every per-user action from the dashboard returns
+  `401 Unauthorized`: "authentication required: send a valid
+  `Authorization: Bearer {session}`". `saveSignal`, `loadSignals`,
+  `investigate`, `loadCases`, `watchSilenceIndex` all fail. The dashboard's
+  API client (`api.js`) only ever attaches an `X-API-Key` header (the operator
+  credential, R2), never a `Bearer` session token (the user credential, R3).
+  The signal/case requests carry a dead `owner:'dashboard'` body field that
+  the server ignores (V-004 derived owner from the session).
+- **Expected:** The dashboard provides a login flow (`POST /v1/auth/request-token`
+  with an email → magic link → `POST /v1/auth/redeem` → store the session
+  token → attach `Authorization: Bearer {session}` on per-user requests), so a
+  user can manage their own signals and investigations.
+- **Root cause:** The identity tier (P-108) shipped the server-side store +
+  HTTP routes but the dashboard was never given a login UI or session
+  management. `require_principal` (the guard on every mutating per-user route)
+  returns 401 when no Bearer session is present — which is always, from the
+  dashboard. This is a **missing feature**, not a regression.
+- **Waiver rationale:** Implementing a magic-link login flow in the dashboard
+  (email input → token request → delivery → redeem → session persistence →
+  header injection on every per-user call → session-expiry handling →
+  bilingual strings → i18n wiring per AGENT.md) is a multi-file feature build,
+  not the "smallest, safest code fix" the QA remediation phase targets. It is
+  documented here as a known gap and tracked as future work. The server-side
+  contract is correct and fully tested; the gap is purely client-side.
+- **Status:** ⚠️ waived (documented missing feature).
+
+## D-019 — `correlation` detector missing from signal preview
+
+- **Stories:** F-022 (signal preview)
+- **Severity:** high — a documented, single-dataset detector previews as 0
+  findings even when production fires. Violates the module's core invariant
+  ("preview IS what will fire").
+- **Observed:** `POST /v1/signals/preview` with a `correlation` scan target
+  returns `{count: 0, findings: []}` regardless of data, even when the
+  scheduler's `run_one_target` would fire the same target.
+- **Expected:** Preview runs the same detector the scheduler does. `correlation`
+  is a single-dataset detector (both fields on the same records,
+  `analysis.rs:507`), so — unlike `proxy_divergence`/`benchmark_deviation`/
+  `cross_source_gap` — it needs no companion dataset and IS previewable.
+- **Root cause:** `run_detector_preview` (`signal.rs`) is a hand-maintained
+  mirror of the scheduler's dispatch. It had arms for `threshold_crossing`,
+  `series_jump`, `year_over_year`, `outlier`, `seasonality`, `trend_break`,
+  but **no `correlation` arm** — it fell through to `_ => Vec::new()`. The
+  scheduler (`scheduler.rs:300`) and the tool belt (`tools.rs:586`) both
+  handle `correlation`. This is the exact D-006/D-013 defect class (a detector
+  wired into the scheduler but silently empty in preview); the module doc at
+  `signal.rs:432` even claims every self-contained detector arm calls the same
+  function the scheduler does, and `correlation` broke that claim.
+- **Fix:** Added a `correlation` arm to `run_detector_preview` (`signal.rs`)
+  that mirrors the scheduler's guard (requires `field_b`, else empty) and calls
+  `detect_correlation` with the same threshold-defaulting (`DEFAULT_CORRELATION_R`).
+- **Verification:** new tests `d019_correlation_preview_fires_when_decoupled`
+  (asserts preview == production on decoupled series) +
+  `d019_correlation_preview_missing_field_b_is_empty`. Both pass.
+
+## D-020 — Signal preview truncated at 500 rows
+
+- **Stories:** F-022 (signal preview)
+- **Severity:** high — preview silently scores a strict subset of the data the
+  scheduler sees, so a finding on row 600 is invisible to preview.
+- **Observed:** `preview_signal` called a single `store.get_page(id, 0, 500)`.
+  The store's `get_page` caps at 500 rows (`memory.rs:114`), so any dataset
+  with >500 records was scored on its first 500 only.
+- **Expected:** Preview sees the whole feed, same as the scheduler.
+- **Root cause:** The scheduler paginates via `collect_all_records`
+  (`scheduler.rs:105-128`) — a helper written precisely because a single
+  `get_page` truncated. Its own doc comment (`scheduler.rs:99-104`) explains
+  the rationale. `preview_signal` did not use that pattern; it took one page.
+  A finding on record 600 (e.g. a HIBOR jump on the 600th day) would fire in
+  production but not in preview — the "preview IS what will fire" invariant
+  broken by truncation rather than by a dispatch mismatch.
+- **Fix:** Added `collect_all_records_for_preview` (`signal.rs`), mirroring the
+  scheduler's `collect_all_records`, and switched `preview_signal` to use it.
+- **Verification:** new test `d020_preview_sees_records_beyond_first_page`
+  (seeds 600 records with a jump on row 600; asserts preview fires). Passes.
+
+## D-021 — `threshold_crossing` missing from agent tool belt
+
+- **Stories:** F-043 (agent tool belt)
+- **Severity:** medium — the flagship "HIBOR above X%" signal is unreachable
+  from the LLM agent-loop tool surface (`POST /v1/ask` → `run_detector`).
+- **Observed:** `run_detector` (`tools.rs`) with `detector: "threshold_crossing"`
+  returned `Error::Internal("run_detector: unknown detector \`threshold_crossing\`")`.
+  It hit the `other =>` catch-all.
+- **Expected:** The tool belt dispatches every detector the scheduler does.
+  `threshold_crossing` is wired into the scheduler (`scheduler.rs:321`) and the
+  signal preview (`signal.rs:455`).
+- **Root cause:** Same class as D-019 — three dispatch sites (scheduler /
+  preview / tools), each hand-maintained. `threshold_crossing` was added to
+  the scheduler (v7 wiring, P-102 prerequisite) and to preview (D-013 class),
+  but the tool belt's match was not updated in parallel.
+- **Fix:** Added a `threshold_crossing` arm to `run_detector` (`tools.rs`),
+  mirroring the scheduler's direction handling (`"below"` → Below, else Above)
+  and calling `detect_threshold_crossing`. Added `detect_threshold_crossing` +
+  `CrossDirection` to the analysis import.
+- **Verification:** new tests `d021_run_detector_threshold_crossing_works`
+  (fires on a crossing) + `d021_run_detector_threshold_crossing_silent_when_not_crossed`
+  + `d021_run_detector_threshold_crossing_below_direction`. All pass.
+
+## D-022 — `funding` tab missing from boot hash-route whitelist
+
+- **Stories:** F-067 (Funding & Credits page)
+- **Severity:** low — a cold load of `#funding` lands on overview instead of
+  the Funding tab.
+- **Observed:** Visiting `https://app/#funding` on a fresh page load activates
+  the overview tab, not funding. The `go('funding')` call is never made.
+- **Expected:** A cold load of `#funding` activates the funding tab (same as
+  every other tab).
+- **Root cause:** `boot.js:7` whitelists the 7 original tabs for hash-route
+  activation but `funding` (added in v10) was not added to the list:
+  `['overview','datasets','divergence','signals','cases','health','licences']`.
+- **Fix:** Added `'funding'` to the whitelist array.
+- **Verification:** traced `boot.js` — `initTab` now matches `'funding'` →
+  `go('funding')` → `renderFund()`. Manual: `#funding` cold load now activates
+  the tab.
+
+## D-023 — `signal_id` omitted detection-affecting fields (collision + overwrite)
+
+- **Stories:** F-020 (create signal)
+- **Severity:** low (risk) — two semantically distinct signals with the same
+  owner collide and one silently overwrites the other on create.
+- **Observed:** Creating a `series_jump` signal with `cadence=Daily` then
+  another with `cadence=Quarterly` (all else equal) produces the **same id**
+  → the second `SignalStore::create` (`BTreeMap::insert`) silently overwrites
+  the first. Same for `comparison` (PoP vs YoY), `field_b` (correlation),
+  `companion` source (cross-source detectors).
+- **Expected:** Two signals that the scheduler would score differently get
+  different ids.
+- **Root cause:** `signal_id` (`signal.rs`) hashed only `(owner, source,
+  dataset, detector, field, threshold, direction)`, omitting `cadence`,
+  `comparison`, `field_b`, `companion`, `companion_field`, `join_field`. The
+  cadence/comparison omission is most acute: D-006 fixed cadence/comparison
+  at the *detection* level, but the *id* still treated them as identical, so
+  the dedup undone the fix at the subscription level.
+- **Fix:** Added the six omitted fields to the hash. `Cadence`/`Comparison`
+  are `Eq` but not `Hash` (no derive on the enums) and `CompanionRef` is a
+  struct in another crate, so the id hashes stable string slugs
+  (`cadence_slug`/`comparison_slug`, mirroring the serde renames) and the
+  companion's `(source, dataset)` with a presence tag, instead of the values.
+- **Verification:** new tests `d023_different_cadence_yields_different_id` +
+  `d023_different_comparison_yields_different_id` +
+  `d023_different_field_b_yields_different_id` +
+  `d023_different_companion_yields_different_id` +
+  `d023_identical_targets_still_dedup` (regression guard). All pass.
+
+## D-024 — `series_jump` default-threshold magic literal `25.0` undocumented
+
+- **Stories:** F-041–F-043 (scheduler / preview / tool belt dispatch)
+- **Severity:** low — no behavior bug, but an undocumented magic literal drifts
+  across three dispatch sites while the detector fn's own default
+  (`DEFAULT_PCT_THRESHOLD = 15.0`) is a named constant.
+- **Observed:** The scheduler (`scheduler.rs:251`), signal preview
+  (`signal.rs:490`), and tool belt (`tools.rs:558`) each carried a bare `25.0`
+  for the `series_jump` no-threshold default. The cadenced detector's own
+  fallback (`analysis.rs:618`) is `DEFAULT_PCT_THRESHOLD = 15.0`.
+- **Expected:** The dispatch-level default is a named, documented constant,
+  not a drifting literal, so the intentional distinction (25 = watch
+  sensitivity; 15 = scan sensitivity) is auditable.
+- **Root cause:** The literal was copy-pasted across the three sites without a
+  named constant; nothing documented why it differs from the detector default.
+- **Fix:** Added `DEFAULT_SERIES_JUMP_WATCH_PCT = 25.0` (`analysis.rs`) with a
+  doc comment explaining the distinction, and replaced all three literals.
+  **No behavior change** — the value stays 25.0; it is now named and centralized.
+- **Verification:** existing D-006 regression tests (which assert 25.0 behavior)
+  still pass unchanged; `cargo clippy -D warnings` clean.
+
+
 

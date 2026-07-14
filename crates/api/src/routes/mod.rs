@@ -335,8 +335,17 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
 /// Serve the static insights dashboard. The HTML is embedded at compile time
 /// (`include_str!`) so the deployed binary — and the Docker image — carry it
 /// with no external file dependency. Open `http://host:port/dashboard`.
+///
+/// The path uses `CARGO_MANIFEST_DIR` (the api crate's directory) + a relative
+/// hop to the workspace `dashboard/` dir. This is more robust than
+/// `include_str!("../../../../...")` which can resolve incorrectly on network
+/// mounts (Z: drive) and doesn't trigger recompilation when the dashboard file
+/// changes (cargo doesn't track include_str! dependencies outside src/).
 async fn dashboard(State(_): State<AppState>) -> axum::response::Response {
-    const HTML: &str = include_str!("../../../../dashboard/index.html");
+    const HTML: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../dashboard/index.html"
+    ));
     (
         [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
         axum::response::Html(HTML),
@@ -349,7 +358,11 @@ async fn dashboard(State(_): State<AppState>) -> axum::response::Response {
 macro_rules! dashboard_js_handler {
     ($fn_name:ident, $file:literal) => {
         async fn $fn_name(State(_): State<AppState>) -> axum::response::Response {
-            const JS: &str = include_str!($file);
+            const JS: &str = include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../dashboard/",
+                $file
+            ));
             (
                 [(
                     axum::http::header::CONTENT_TYPE,
@@ -362,11 +375,11 @@ macro_rules! dashboard_js_handler {
     };
 }
 
-dashboard_js_handler!(dashboard_js_api, "../../../../dashboard/api.js");
-dashboard_js_handler!(dashboard_js_i18n, "../../../../dashboard/i18n.js");
-dashboard_js_handler!(dashboard_js_features, "../../../../dashboard/features.js");
-dashboard_js_handler!(dashboard_js_pages, "../../../../dashboard/pages.js");
-dashboard_js_handler!(dashboard_js_boot, "../../../../dashboard/boot.js");
+dashboard_js_handler!(dashboard_js_api, "api.js");
+dashboard_js_handler!(dashboard_js_i18n, "i18n.js");
+dashboard_js_handler!(dashboard_js_features, "features.js");
+dashboard_js_handler!(dashboard_js_pages, "pages.js");
+dashboard_js_handler!(dashboard_js_boot, "boot.js");
 
 /// Serve the curated agent index (`llms.txt`). This is a single static
 /// markdown file that orients AI agents to the app, its data, and its API. It
@@ -379,7 +392,10 @@ dashboard_js_handler!(dashboard_js_boot, "../../../../dashboard/boot.js");
 /// Content type is `text/markdown` (no negotiation: by the llms.txt convention
 /// `/llms.txt` is always markdown).
 async fn llms_txt(State(_): State<AppState>) -> axum::response::Response {
-    const MD: &str = include_str!("../../../../dashboard/llms.txt");
+    const MD: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../dashboard/llms.txt"
+    ));
     (
         [(
             axum::http::header::CONTENT_TYPE,

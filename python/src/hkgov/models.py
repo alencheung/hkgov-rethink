@@ -236,7 +236,7 @@ class InvestigationStep:
     answer: Optional[Answer] = None
     trace: list[TraceStep] = field(default_factory=list)
     annotation: Optional[str] = None
-    created_at: Optional[str] = None
+    executed_at: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -283,3 +283,19 @@ class Finding:
     severity: str
     confidence: float
     evidence: list[EvidenceRef] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PlayerEntry:
+    """One named private-sector operator in a market-player group."""
+    name: str
+    note: str
+    url: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MarketPlayerGroup:
+    """A department's curated directory of related market players."""
+    dept: str
+    category: str
+    players: list[PlayerEntry] = field(default_factory=list)

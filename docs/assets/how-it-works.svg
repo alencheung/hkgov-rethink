@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" width="1200" height="640" role="img" aria-label="How hkgov-rethink works: a one-way data pipeline from HKGOV sources through connectors, ingest, store, and API, with a decoupled agent reading from the store">
+  <defs>
+    <linearGradient id="hbg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f1a2e"/>
+      <stop offset="100%" stop-color="#0b1426"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#3da9fc"/>
+      <stop offset="100%" stop-color="#7fd1ff"/>
+    </linearGradient>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#7fd1ff"/>
+    </marker>
+    <marker id="arrA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#ff8a3d"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="640" fill="url(#hbg)"/>
+
+  <text x="600" y="40" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="22" font-weight="700" fill="#e8eefc">How it works — a one&#8209;way data pipeline</text>
+  <text x="600" y="64" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" fill="#9fb2d4">Detection is pure Rust &amp; deterministic. The LLM only frames results. The serving API never calls a connector — it reads from cache.</text>
+
+  <!-- Row 1: upstream sources -->
+  <text x="40" y="118" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" fill="#7fd1ff">HKGOV open data (public, free)</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#cdd9ee">
+    <rect x="40"  y="132" width="150" height="34" rx="8" fill="#15243f" stroke="#243a5e"/>
+    <text x="115" y="154" text-anchor="middle">HKMA · 151 datasets</text>
+    <rect x="200" y="132" width="150" height="34" rx="8" fill="#15243f" stroke="#243a5e"/>
+    <text x="275" y="154" text-anchor="middle">data.gov.hk · 33</text>
+    <rect x="360" y="132" width="130" height="34" rx="8" fill="#15243f" stroke="#243a5e"/>
+    <text x="425" y="154" text-anchor="middle">Press releases</text>
+    <rect x="500" y="132" width="130" height="34" rx="8" fill="#15243f" stroke="#243a5e"/>
+    <text x="565" y="154" text-anchor="middle">Immigration</text>
+    <rect x="640" y="132" width="110" height="34" rx="8" fill="#15243f" stroke="#243a5e"/>
+    <text x="695" y="154" text-anchor="middle">RVD</text>
+    <rect x="760" y="132" width="120" height="34" rx="8" fill="#15243f" stroke="#243a5e"/>
+    <text x="820" y="154" text-anchor="middle">Land Registry</text>
+    <rect x="890" y="132" width="110" height="34" rx="8" fill="#15243f" stroke="#243a5e"/>
+    <text x="945" y="154" text-anchor="middle">LandsD/CSDI</text>
+  </g>
+  <line x1="540" y1="176" x2="540" y2="208" stroke="#7fd1ff" stroke-width="2.5" marker-end="url(#arr)"/>
+
+  <!-- Row 2: connectors -->
+  <rect x="120" y="212" width="800" height="86" rx="12" fill="#13243f" stroke="#2a456e"/>
+  <text x="148" y="236" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" font-weight="700" fill="#e8eefc">connectors</text>
+  <text x="148" y="258" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#9fb2d4">per&#8209;source · token&#8209;bucket rate limit · three&#8209;state circuit breaker · retry + backoff</text>
+  <text x="148" y="280" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#7fd1ff">normalizes every source onto one NormalizedRecord dialect</text>
+  <line x1="540" y1="298" x2="540" y2="330" stroke="#7fd1ff" stroke-width="2.5" marker-end="url(#arr)"/>
+
+  <!-- Row 3: ingest -->
+  <rect x="240" y="334" width="560" height="56" rx="12" fill="#13243f" stroke="#2a456e"/>
+  <text x="268" y="358" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="700" fill="#e8eefc">ingest</text>
+  <text x="268" y="378" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#9fb2d4">one tokio task per dataset, own cadence · put_dataset() into the store</text>
+  <line x1="540" y1="390" x2="540" y2="422" stroke="#7fd1ff" stroke-width="2.5" marker-end="url(#arr)"/>
+
+  <!-- Row 4: store + agent (side by side) -->
+  <!-- store -->
+  <rect x="80" y="426" width="520" height="92" rx="12" fill="#13243f" stroke="#2a456e"/>
+  <text x="108" y="450" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="700" fill="#e8eefc">store · RecordStore trait (the scaling contract)</text>
+  <text x="108" y="472" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#9fb2d4">moka in&#8209;process cache (default, wired) · Redis (cluster) · Postgres (cold)</text>
+  <text x="108" y="494" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#7fd1ff">CPU at ingest, not at request — the hot path is just JSON + gzip</text>
+
+  <!-- agent (reads from store) -->
+  <rect x="640" y="426" width="400" height="92" rx="12" fill="#1f2a14" stroke="#4a5e2e"/>
+  <text x="668" y="450" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="700" fill="#e8eefc">agent · decoupled scheduler</text>
+  <text x="668" y="472" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#cdd9ee">reads store → runs detectors → writes Insights</text>
+  <text x="668" y="494" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#ff8a3d">series_jump · outlier · trend_break · cross_source_gap · …</text>
+
+  <!-- store -> agent (read) -->
+  <line x1="600" y1="472" x2="640" y2="472" stroke="#ff8a3d" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrA)"/>
+
+  <!-- Row 5: API + clients -->
+  <rect x="120" y="556" width="800" height="60" rx="12" fill="#13243f" stroke="#2a456e"/>
+  <text x="148" y="580" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="700" fill="#e8eefc">api (axum) — the only thing deployed</text>
+  <text x="148" y="600" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#7fd1ff">/insights · /silence-index · /brief · /ask · /signals · dashboard  →  clients + browser</text>
+  <line x1="340" y1="518" x2="340" y2="556" stroke="#7fd1ff" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="840" y1="518" x2="840" y2="556" stroke="#ff8a3d" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrA)"/>
+
+  <!-- legend -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11.5">
+    <line x1="990" y1="440" x2="1030" y2="440" stroke="#7fd1ff" stroke-width="2.5"/>
+    <text x="1038" y="444" fill="#9fb2d4">data flow (write)</text>
+    <line x1="990" y1="462" x2="1030" y2="462" stroke="#ff8a3d" stroke-width="2" stroke-dasharray="5 4"/>
+    <text x="1038" y="466" fill="#9fb2d4">read&#8209;only (agent / API)</text>
+  </g>
+</svg>
