@@ -574,6 +574,16 @@ pub fn detect_correlation(
 /// Default % move at a daily cadence. Higher cadences scale this up — see
 /// [`scale_threshold_for_cadence`].
 pub const DEFAULT_PCT_THRESHOLD: f64 = 15.0;
+/// Dispatch-level default for `series_jump` (the watch-level % move, before
+/// cadence scaling). D-024: the scheduler, the signal preview, and the agent
+/// tool belt each carried an undocumented magic literal `25.0` for this, while
+/// the detector fn's own fallback ([`DEFAULT_PCT_THRESHOLD`]) is `15.0`. The two
+/// intentionally differ: `25.0` is the *subscription/watch* sensitivity (a
+/// move worth alerting on), `15.0` is the *detector* sensitivity (a move worth
+/// flagging in a full scan). Naming the constant keeps the three dispatch sites
+/// in lockstep and makes the distinction auditable instead of a drifting
+/// literal. Tests + config defaults lock the `25.0` value.
+pub const DEFAULT_SERIES_JUMP_WATCH_PCT: f64 = 25.0;
 /// Default minimum records either side of a YoY comparison before we'll opine.
 pub const MIN_YOY_SAMPLES: usize = 4;
 /// Default |delta/value| above which a proxy divergence is flagged.

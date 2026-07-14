@@ -248,7 +248,11 @@ async fn run_one_target(
                 )
             } else {
                 // Cadence-scaled PoP (Unknown cadence → unchanged v3 behavior).
-                let t = if threshold > 0.0 { threshold } else { 25.0 };
+                let t = if threshold > 0.0 {
+                    threshold
+                } else {
+                    crate::analysis::DEFAULT_SERIES_JUMP_WATCH_PCT
+                };
                 detect_series_jumps_cadenced(
                     source,
                     &target.dataset,

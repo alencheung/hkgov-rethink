@@ -4,7 +4,7 @@
     restoreConfig();
     applyI18n(); // translate chrome to the restored/browser language on first paint
     const initTab=(location.hash||'').replace('#','').split('/')[0];
-    if(['overview','datasets','divergence','signals','cases','health','licences'].includes(initTab)) go(initTab);
+    if(['overview','datasets','divergence','signals','cases','health','licences','funding'].includes(initTab)) go(initTab);
     loadAll();
     applyI18n(); // re-apply after dynamic content (empty states) may have rendered
     showOnboardIfFirstRun(); // PR-010: orient a first-run visitor (overview)

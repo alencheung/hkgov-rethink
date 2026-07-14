@@ -25,6 +25,13 @@
 | D-015 | 🟠 medium | `append_investigation_step` crashed on `answer=`/`trace=` (dataclasses not JSON-serializable) | F-056 | ✅ fixed + verified (+ regression test) |
 | D-016 | 🟠 medium | Python client missing `update_signal` (PATCH /v1/signals/{id}); new models not exported | F-056 | ✅ fixed + verified (+ regression test) |
 | D-017 | 🟡 low | Docs/config drift: stale `?api_key=` auth claim, `routes.rs`→`routes/` path, ROADMAP missing v7/v8, detectors list missing trend_break/threshold_crossing | F-084 | ✅ fixed (doc/config only) |
+| D-018 | 🔴 critical | Dashboard has no authentication UI — per-user features (signals, investigations, silence-watch) all 401 from the browser | F-020–F-025, F-053, F-061, F-062 | ⚠️ waived (missing feature, not a smallest-fix defect) |
+| D-019 | 🟠 high | `correlation` detector missing from signal preview (D-006/D-013 class) | F-022 | ✅ fixed + verified (+ 2 regression tests) |
+| D-020 | 🟠 high | Signal preview truncated at 500 rows (single `get_page`); scheduler paginates | F-022 | ✅ fixed + verified (+ 1 regression test) |
+| D-021 | 🟡 medium | `threshold_crossing` missing from agent tool belt (`run_detector`) — unreachable from LLM loop | F-043 | ✅ fixed + verified (+ 3 regression tests) |
+| D-022 | 🟡 low | `funding` tab missing from boot hash-route whitelist (`#funding` cold load → overview) | F-067 | ✅ fixed + verified |
+| D-023 | 🟡 low | `signal_id` omitted cadence/comparison/field_b/companion/join_field → distinct signals collided + overwrote | F-020 | ✅ fixed + verified (+ 5 regression tests) |
+| D-024 | 🟡 low | `series_jump` default-threshold magic literal `25.0` undocumented across 3 dispatch sites | F-041–F-043 | ✅ fixed + verified (named constant, no behavior change) |
 
 > **Third independent re-audit (D-006 → D-011).** A fresh, from-scratch QA cycle
 > was run with **no assumption** the prior audit (D-001 → D-005) was complete. It
@@ -635,5 +642,188 @@ the `trend_break` work and the Python v7/v8 expansion — could not have seen.
 - Local tooling artifacts (`.agentic/`, `.zcode/`, `skills-staging/`, `data/`,
   `agentic.json`) now `.gitignore`d — were previously at risk of an accidental
   `git add .` commit.
+
+---
+
+> **Fourth independent re-audit (D-018 → D-024).** A fresh, from-scratch QA cycle
+> was run with **no assumption** the prior audits (D-001 → D-017) were complete.
+> It re-verified the full feature surface (73 features across 4 roles: every
+> route, every dashboard screen, every operator config knob) and hunted for
+> defects the earlier passes missed — focusing on the agent detection layer's
+> three dispatch sites (scheduler / signal preview / tool belt), the dashboard's
+> auth model, and id-dedup correctness.
+
+## D-018 — Dashboard has no authentication UI (per-user features all 401)
+
+- **Stories:** F-020–F-025 (signals/investigations CRUD), F-053 (silence-watch),
+  F-061 (investigations UI), F-062 (signal subscriptions UI)
+- **Severity:** critical — an entire UX surface (Signals tab, Cases tab,
+  "Save a watch") is non-functional from the browser.
+- **Observed:** Every per-user action from the dashboard returns
+  `401 Unauthorized`: "authentication required: send a valid
+  `Authorization: Bearer {session}`". `saveSignal`, `loadSignals`,
+  `investigate`, `loadCases`, `watchSilenceIndex` all fail. The dashboard's
+  API client (`api.js`) only ever attaches an `X-API-Key` header (the operator
+  credential, R2), never a `Bearer` session token (the user credential, R3).
+  The signal/case requests carry a dead `owner:'dashboard'` body field that
+  the server ignores (V-004 derived owner from the session).
+- **Expected:** The dashboard provides a login flow (`POST /v1/auth/request-token`
+  with an email → magic link → `POST /v1/auth/redeem` → store the session
+  token → attach `Authorization: Bearer {session}` on per-user requests), so a
+  user can manage their own signals and investigations.
+- **Root cause:** The identity tier (P-108) shipped the server-side store +
+  HTTP routes but the dashboard was never given a login UI or session
+  management. `require_principal` (the guard on every mutating per-user route)
+  returns 401 when no Bearer session is present — which is always, from the
+  dashboard. This is a **missing feature**, not a regression.
+- **Waiver rationale:** Implementing a magic-link login flow in the dashboard
+  (email input → token request → delivery → redeem → session persistence →
+  header injection on every per-user call → session-expiry handling →
+  bilingual strings → i18n wiring per AGENT.md) is a multi-file feature build,
+  not the "smallest, safest code fix" the QA remediation phase targets. It is
+  documented here as a known gap and tracked as future work. The server-side
+  contract is correct and fully tested; the gap is purely client-side.
+- **Status:** ⚠️ waived (documented missing feature).
+
+## D-019 — `correlation` detector missing from signal preview
+
+- **Stories:** F-022 (signal preview)
+- **Severity:** high — a documented, single-dataset detector previews as 0
+  findings even when production fires. Violates the module's core invariant
+  ("preview IS what will fire").
+- **Observed:** `POST /v1/signals/preview` with a `correlation` scan target
+  returns `{count: 0, findings: []}` regardless of data, even when the
+  scheduler's `run_one_target` would fire the same target.
+- **Expected:** Preview runs the same detector the scheduler does. `correlation`
+  is a single-dataset detector (both fields on the same records,
+  `analysis.rs:507`), so — unlike `proxy_divergence`/`benchmark_deviation`/
+  `cross_source_gap` — it needs no companion dataset and IS previewable.
+- **Root cause:** `run_detector_preview` (`signal.rs`) is a hand-maintained
+  mirror of the scheduler's dispatch. It had arms for `threshold_crossing`,
+  `series_jump`, `year_over_year`, `outlier`, `seasonality`, `trend_break`,
+  but **no `correlation` arm** — it fell through to `_ => Vec::new()`. The
+  scheduler (`scheduler.rs:300`) and the tool belt (`tools.rs:586`) both
+  handle `correlation`. This is the exact D-006/D-013 defect class (a detector
+  wired into the scheduler but silently empty in preview); the module doc at
+  `signal.rs:432` even claims every self-contained detector arm calls the same
+  function the scheduler does, and `correlation` broke that claim.
+- **Fix:** Added a `correlation` arm to `run_detector_preview` (`signal.rs`)
+  that mirrors the scheduler's guard (requires `field_b`, else empty) and calls
+  `detect_correlation` with the same threshold-defaulting (`DEFAULT_CORRELATION_R`).
+- **Verification:** new tests `d019_correlation_preview_fires_when_decoupled`
+  (asserts preview == production on decoupled series) +
+  `d019_correlation_preview_missing_field_b_is_empty`. Both pass.
+
+## D-020 — Signal preview truncated at 500 rows
+
+- **Stories:** F-022 (signal preview)
+- **Severity:** high — preview silently scores a strict subset of the data the
+  scheduler sees, so a finding on row 600 is invisible to preview.
+- **Observed:** `preview_signal` called a single `store.get_page(id, 0, 500)`.
+  The store's `get_page` caps at 500 rows (`memory.rs:114`), so any dataset
+  with >500 records was scored on its first 500 only.
+- **Expected:** Preview sees the whole feed, same as the scheduler.
+- **Root cause:** The scheduler paginates via `collect_all_records`
+  (`scheduler.rs:105-128`) — a helper written precisely because a single
+  `get_page` truncated. Its own doc comment (`scheduler.rs:99-104`) explains
+  the rationale. `preview_signal` did not use that pattern; it took one page.
+  A finding on record 600 (e.g. a HIBOR jump on the 600th day) would fire in
+  production but not in preview — the "preview IS what will fire" invariant
+  broken by truncation rather than by a dispatch mismatch.
+- **Fix:** Added `collect_all_records_for_preview` (`signal.rs`), mirroring the
+  scheduler's `collect_all_records`, and switched `preview_signal` to use it.
+- **Verification:** new test `d020_preview_sees_records_beyond_first_page`
+  (seeds 600 records with a jump on row 600; asserts preview fires). Passes.
+
+## D-021 — `threshold_crossing` missing from agent tool belt
+
+- **Stories:** F-043 (agent tool belt)
+- **Severity:** medium — the flagship "HIBOR above X%" signal is unreachable
+  from the LLM agent-loop tool surface (`POST /v1/ask` → `run_detector`).
+- **Observed:** `run_detector` (`tools.rs`) with `detector: "threshold_crossing"`
+  returned `Error::Internal("run_detector: unknown detector \`threshold_crossing\`")`.
+  It hit the `other =>` catch-all.
+- **Expected:** The tool belt dispatches every detector the scheduler does.
+  `threshold_crossing` is wired into the scheduler (`scheduler.rs:321`) and the
+  signal preview (`signal.rs:455`).
+- **Root cause:** Same class as D-019 — three dispatch sites (scheduler /
+  preview / tools), each hand-maintained. `threshold_crossing` was added to
+  the scheduler (v7 wiring, P-102 prerequisite) and to preview (D-013 class),
+  but the tool belt's match was not updated in parallel.
+- **Fix:** Added a `threshold_crossing` arm to `run_detector` (`tools.rs`),
+  mirroring the scheduler's direction handling (`"below"` → Below, else Above)
+  and calling `detect_threshold_crossing`. Added `detect_threshold_crossing` +
+  `CrossDirection` to the analysis import.
+- **Verification:** new tests `d021_run_detector_threshold_crossing_works`
+  (fires on a crossing) + `d021_run_detector_threshold_crossing_silent_when_not_crossed`
+  + `d021_run_detector_threshold_crossing_below_direction`. All pass.
+
+## D-022 — `funding` tab missing from boot hash-route whitelist
+
+- **Stories:** F-067 (Funding & Credits page)
+- **Severity:** low — a cold load of `#funding` lands on overview instead of
+  the Funding tab.
+- **Observed:** Visiting `https://app/#funding` on a fresh page load activates
+  the overview tab, not funding. The `go('funding')` call is never made.
+- **Expected:** A cold load of `#funding` activates the funding tab (same as
+  every other tab).
+- **Root cause:** `boot.js:7` whitelists the 7 original tabs for hash-route
+  activation but `funding` (added in v10) was not added to the list:
+  `['overview','datasets','divergence','signals','cases','health','licences']`.
+- **Fix:** Added `'funding'` to the whitelist array.
+- **Verification:** traced `boot.js` — `initTab` now matches `'funding'` →
+  `go('funding')` → `renderFund()`. Manual: `#funding` cold load now activates
+  the tab.
+
+## D-023 — `signal_id` omitted detection-affecting fields (collision + overwrite)
+
+- **Stories:** F-020 (create signal)
+- **Severity:** low (risk) — two semantically distinct signals with the same
+  owner collide and one silently overwrites the other on create.
+- **Observed:** Creating a `series_jump` signal with `cadence=Daily` then
+  another with `cadence=Quarterly` (all else equal) produces the **same id**
+  → the second `SignalStore::create` (`BTreeMap::insert`) silently overwrites
+  the first. Same for `comparison` (PoP vs YoY), `field_b` (correlation),
+  `companion` source (cross-source detectors).
+- **Expected:** Two signals that the scheduler would score differently get
+  different ids.
+- **Root cause:** `signal_id` (`signal.rs`) hashed only `(owner, source,
+  dataset, detector, field, threshold, direction)`, omitting `cadence`,
+  `comparison`, `field_b`, `companion`, `companion_field`, `join_field`. The
+  cadence/comparison omission is most acute: D-006 fixed cadence/comparison
+  at the *detection* level, but the *id* still treated them as identical, so
+  the dedup undone the fix at the subscription level.
+- **Fix:** Added the six omitted fields to the hash. `Cadence`/`Comparison`
+  are `Eq` but not `Hash` (no derive on the enums) and `CompanionRef` is a
+  struct in another crate, so the id hashes stable string slugs
+  (`cadence_slug`/`comparison_slug`, mirroring the serde renames) and the
+  companion's `(source, dataset)` with a presence tag, instead of the values.
+- **Verification:** new tests `d023_different_cadence_yields_different_id` +
+  `d023_different_comparison_yields_different_id` +
+  `d023_different_field_b_yields_different_id` +
+  `d023_different_companion_yields_different_id` +
+  `d023_identical_targets_still_dedup` (regression guard). All pass.
+
+## D-024 — `series_jump` default-threshold magic literal `25.0` undocumented
+
+- **Stories:** F-041–F-043 (scheduler / preview / tool belt dispatch)
+- **Severity:** low — no behavior bug, but an undocumented magic literal drifts
+  across three dispatch sites while the detector fn's own default
+  (`DEFAULT_PCT_THRESHOLD = 15.0`) is a named constant.
+- **Observed:** The scheduler (`scheduler.rs:251`), signal preview
+  (`signal.rs:490`), and tool belt (`tools.rs:558`) each carried a bare `25.0`
+  for the `series_jump` no-threshold default. The cadenced detector's own
+  fallback (`analysis.rs:618`) is `DEFAULT_PCT_THRESHOLD = 15.0`.
+- **Expected:** The dispatch-level default is a named, documented constant,
+  not a drifting literal, so the intentional distinction (25 = watch
+  sensitivity; 15 = scan sensitivity) is auditable.
+- **Root cause:** The literal was copy-pasted across the three sites without a
+  named constant; nothing documented why it differs from the detector default.
+- **Fix:** Added `DEFAULT_SERIES_JUMP_WATCH_PCT = 25.0` (`analysis.rs`) with a
+  doc comment explaining the distinction, and replaced all three literals.
+  **No behavior change** — the value stays 25.0; it is now named and centralized.
+- **Verification:** existing D-006 regression tests (which assert 25.0 behavior)
+  still pass unchanged; `cargo clippy -D warnings` clean.
+
 
 

@@ -325,8 +325,41 @@ pub struct SignalStoreSnapshot {
     pub signals: Vec<Signal>,
 }
 
+/// Stable lowercase slug for a [`Cadence`], mirroring its serde rename. Used
+/// only by [`signal_id`] so the identity hash uses the same canonical string a
+/// client sends, without requiring `Cadence` to derive `Hash`.
+fn cadence_slug(c: hkgov_common::Cadence) -> &'static str {
+    use hkgov_common::Cadence;
+    match c {
+        Cadence::Daily => "daily",
+        Cadence::Weekly => "weekly",
+        Cadence::Monthly => "monthly",
+        Cadence::Quarterly => "quarterly",
+        Cadence::Biannual => "biannual",
+        Cadence::Annual => "annual",
+        Cadence::Unknown => "unknown",
+    }
+}
+
+/// Stable snake_case slug for a [`Comparison`], mirroring its serde rename.
+fn comparison_slug(c: hkgov_common::Comparison) -> &'static str {
+    use hkgov_common::Comparison;
+    match c {
+        Comparison::PeriodOverPeriod => "period_over_period",
+        Comparison::YearOverYear => "year_over_year",
+    }
+}
+
 /// Compile a stable signal id from its owner + scan target. Two identical
 /// signals (same owner, same compiled target) share an id → dedup at create.
+///
+/// D-023: the identity set previously omitted `cadence`, `comparison`,
+/// `field_b`, `companion`, `companion_field`, and `join_field`. That made two
+/// semantically distinct signals collide — e.g. a `series_jump` with
+/// `cadence=Daily` and one with `cadence=Quarterly` got the same id, so the
+/// later create silently overwrote the earlier (the cadence changes the fire
+/// set, which is exactly what D-006 fixed at the detection level). Every field
+/// that affects detection is now part of the id.
 pub fn signal_id(owner: &str, compiled: &ScanTarget) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -339,6 +372,25 @@ pub fn signal_id(owner: &str, compiled: &ScanTarget) -> String {
     // f64 isn't Hash (NaN), so hash the bit pattern instead.
     compiled.threshold.map(|t| t.to_le_bytes()).hash(&mut h);
     compiled.direction.hash(&mut h);
+    // D-023: the detection-affecting fields that were missing. `Cadence` and
+    // `Comparison` are Eq but not Hash (no Hash derive on the enums), and
+    // `CompanionRef` is a struct in another crate — so hash stable string
+    // forms instead of the values. The serde renames (lowercase /
+    // snake_case) give a canonical, version-stable representation, mirrored
+    // here so the id matches what a client would send over the wire.
+    cadence_slug(compiled.cadence).hash(&mut h);
+    comparison_slug(compiled.comparison).hash(&mut h);
+    compiled.field_b.hash(&mut h);
+    if let Some(c) = &compiled.companion {
+        h.write_u8(1);
+        c.source.hash(&mut h);
+        c.dataset.hash(&mut h);
+    } else {
+        // Distinguish Some from None when companion is unset.
+        h.write_u8(0);
+    }
+    compiled.companion_field.hash(&mut h);
+    compiled.join_field.hash(&mut h);
     format!("sig:{owner}:{:016x}", h.finish())
 }
 
@@ -352,27 +404,22 @@ pub async fn preview_signal(
     compiled: &ScanTarget,
     window_days: i64,
 ) -> SignalPreview {
-    use hkgov_store::{DatasetId, RecordStore};
+    use hkgov_store::DatasetId;
 
     let source = DataSource::parse(&compiled.source).unwrap_or(DataSource::Hkma);
     let id = DatasetId::new(source, &compiled.dataset);
-    let page = store
-        .get_page(&id, 0, 500)
-        .await
-        .unwrap_or_else(|_| hkgov_store::RecordPage {
-            source,
-            dataset: compiled.dataset.clone(),
-            total: 0,
-            offset: 0,
-            limit: 500,
-            records: Vec::new(),
-        });
+
+    // D-020: paginate through ALL records, not just the first 500-row page. The
+    // scheduler's `collect_all_records` exists for exactly this reason — a single
+    // `get_page(id, 0, 500)` silently truncated any dataset larger than 500 rows,
+    // so a jump on row 600 was invisible to preview but visible in production.
+    // This mirrors the scheduler's loader so preview sees the whole feed.
+    let all_records = collect_all_records_for_preview(store, &id).await;
 
     // Window-filter the records to the last `window_days` by record_id date.
     // HKGOV record_ids are ISO-date-ish (e.g. "2026-05-18", "2026-05").
     let cutoff = Utc::now() - chrono::Duration::days(window_days);
-    let windowed: Vec<hkgov_common::NormalizedRecord> = page
-        .records
+    let windowed: Vec<hkgov_common::NormalizedRecord> = all_records
         .into_iter()
         .filter(|r| record_after(r, cutoff))
         .collect();
@@ -398,6 +445,34 @@ pub async fn preview_signal(
         window_days,
         previewed_at: Utc::now(),
     }
+}
+
+/// Paginate through ALL records for a dataset for preview, mirroring the
+/// scheduler's `collect_all_records`. The store's `get_page` caps at 500 rows,
+/// so a single page silently truncated any larger dataset (D-020). This pages
+/// until a short/empty batch so the detector sees the whole feed.
+async fn collect_all_records_for_preview(
+    store: &Arc<hkgov_store::MemoryStore>,
+    id: &hkgov_store::DatasetId,
+) -> Vec<hkgov_common::NormalizedRecord> {
+    use hkgov_store::RecordStore;
+    let mut all = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let Ok(page) = store.get_page(id, offset, 500).await else {
+            break;
+        };
+        if page.records.is_empty() {
+            break;
+        }
+        let len = page.records.len();
+        all.extend(page.records);
+        if len < 500 {
+            break;
+        }
+        offset += len;
+    }
+    all
 }
 
 /// Is the record's date (parsed from its record_id) after `cutoff`? Lenient:
@@ -487,7 +562,11 @@ fn run_detector_preview(
                     ppy.max(1),
                 )
             } else {
-                let t = if threshold > 0.0 { threshold } else { 25.0 };
+                let t = if threshold > 0.0 {
+                    threshold
+                } else {
+                    crate::analysis::DEFAULT_SERIES_JUMP_WATCH_PCT
+                };
                 detect_series_jumps_cadenced(
                     source,
                     &target.dataset,
@@ -537,6 +616,29 @@ fn run_detector_preview(
                 DEFAULT_SEASONALITY_R
             },
         ),
+        // D-019: `correlation` is a single-dataset detector (both fields live on
+        // the same records) and so IS previewable — yet it was absent from this
+        // dispatch, so a correlation signal previewed as 0 findings even when the
+        // scheduler would fire. The scheduler arm (scheduler.rs:300) and the tool
+        // arm (tools.rs:586) both handle it; preview is the third dispatch site
+        // and must agree. The `field_b` requirement mirrors the scheduler's guard.
+        "correlation" => {
+            let Some(field_b) = target.field_b.as_deref() else {
+                return Vec::new();
+            };
+            detect_correlation(
+                source,
+                &target.dataset,
+                records,
+                field,
+                field_b,
+                if threshold > 0.0 {
+                    threshold
+                } else {
+                    DEFAULT_CORRELATION_R
+                },
+            )
+        }
         "trend_break" => {
             // Mirror the scheduler: `threshold` is the min-run-length here
             // (> 0 overrides DEFAULT_TREND_BREAK_MIN_RUN). Single-dataset
@@ -891,5 +993,259 @@ mod tests {
         let old = rec("2020-01-01", "v", 1.0);
         assert!(record_after(&recent, cutoff));
         assert!(!record_after(&old, cutoff));
+    }
+
+    // ---- D-019: correlation must be previewable (was missing from dispatch) --
+    //
+    // `correlation` is a single-dataset detector (both fields on the same
+    // records), so it is fully previewable — yet the preview dispatch had no
+    // `correlation` arm and fell through to the empty catch-all. A correlation
+    // signal previewed as 0 findings even when the scheduler would fire. This
+    // is the same defect class as the historical D-006/D-013 (a detector wired
+    // into the scheduler but silently empty in preview).
+
+    /// Build a record with TWO numeric fields (needed for correlation).
+    fn rec2(id: &str, a: &str, av: f64, b: &str, bv: f64) -> NormalizedRecord {
+        let mut f = BTreeMap::new();
+        f.insert(a.into(), RecordValue::Float(av));
+        f.insert(b.into(), RecordValue::Float(bv));
+        NormalizedRecord {
+            source: DataSource::Hkma,
+            dataset: "x".into(),
+            record_id: id.into(),
+            fields: f,
+            fetched_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn d019_correlation_preview_fires_when_decoupled() {
+        // Two fields that DECOUPLE: a rises monotonically while b is random →
+        // |r| is low → correlation detector fires (it flags LOW correlation).
+        let records: Vec<NormalizedRecord> = (1..20)
+            .map(|i| {
+                rec2(
+                    &format!("2026-{:02}-01", i),
+                    "price",
+                    i as f64, // rises monotonically
+                    "volume",
+                    ((i * 7) % 5) as f64, // pseudo-random, uncorrelated
+                )
+            })
+            .collect();
+        let target = ScanTarget {
+            source: "hkma".into(),
+            dataset: "x".into(),
+            detector: "correlation".into(),
+            field: Some("price".into()),
+            field_b: Some("volume".into()),
+            threshold: Some(0.3),
+            cadence: Cadence::Monthly,
+            comparison: Comparison::PeriodOverPeriod,
+            ..Default::default()
+        };
+        let prev = run_detector_preview(DataSource::Hkma, &target, &records);
+        // Cross-check against the production detector directly.
+        let prod = crate::analysis::detect_correlation(
+            DataSource::Hkma,
+            "x",
+            &records,
+            "price",
+            "volume",
+            0.3,
+        );
+        assert_eq!(
+            prev.len(),
+            prod.len(),
+            "D-019: correlation preview ({}) must equal production ({})",
+            prev.len(),
+            prod.len()
+        );
+        assert!(
+            !prev.is_empty(),
+            "D-019: decoupled series must surface a correlation finding in preview"
+        );
+        assert_eq!(prev[0].kind, "correlation");
+    }
+
+    #[test]
+    fn d019_correlation_preview_missing_field_b_is_empty() {
+        // No field_b → the arm returns empty (mirrors the scheduler's guard).
+        let records = vec![rec2("2026-01-01", "price", 1.0, "volume", 2.0)];
+        let target = ScanTarget {
+            source: "hkma".into(),
+            dataset: "x".into(),
+            detector: "correlation".into(),
+            field: Some("price".into()),
+            field_b: None,
+            ..Default::default()
+        };
+        let prev = run_detector_preview(DataSource::Hkma, &target, &records);
+        assert!(prev.is_empty(), "correlation without field_b must be empty");
+    }
+
+    // ---- D-020: preview must paginate, not truncate at 500 rows -------------
+    //
+    // Before D-020, preview called a single get_page(id, 0, 500), so a dataset
+    // with >500 rows was scored on its first 500 records only. A jump on row
+    // 600 was invisible to preview but visible in production. The scheduler
+    // paginates via collect_all_records; preview now does the same.
+
+    #[tokio::test]
+    async fn d020_preview_sees_records_beyond_first_page() {
+        let store = Arc::new(hkgov_store::MemoryStore::new(2000, 3600));
+        let id = hkgov_store::DatasetId::new(DataSource::Hkma, "daily-interbank-liquidity");
+        // Build 600 recent records: a flat baseline, then a +1000% jump on the
+        // very last record (row 600 — beyond the old 500-row truncation).
+        let today = chrono::Local::now().date_naive();
+        let mut recs = Vec::new();
+        for i in 0..599 {
+            let d = today - chrono::Duration::days(599 - i);
+            recs.push(rec(
+                &d.format("%Y-%m-%d").to_string(),
+                "hibor_overnight",
+                1.0,
+            ));
+        }
+        // The 600th record: a massive jump that a series_jump MUST catch.
+        recs.push(rec(
+            &today.format("%Y-%m-%d").to_string(),
+            "hibor_overnight",
+            11.0,
+        ));
+        store.put_dataset(&id, recs).await.unwrap();
+
+        let target = ScanTarget {
+            source: "hkma".into(),
+            dataset: "daily-interbank-liquidity".into(),
+            detector: "series_jump".into(),
+            field: Some("hibor_overnight".into()),
+            threshold: Some(100.0), // 1000% jump >> 100% threshold
+            cadence: Cadence::Daily,
+            comparison: Comparison::PeriodOverPeriod,
+            ..Default::default()
+        };
+        let preview = preview_signal(&store, &target, 3650).await;
+        assert!(
+            preview.count >= 1,
+            "D-020: preview must see the jump on record 600 (beyond the old 500-row truncation); got {} findings",
+            preview.count
+        );
+    }
+
+    // ---- D-023: signal_id must distinguish detection-affecting fields --------
+    //
+    // Before D-023, signal_id hashed only (owner, source, dataset, detector,
+    // field, threshold, direction) — omitting cadence, comparison, field_b,
+    // companion, companion_field, join_field. Two semantically distinct signals
+    // collided and one silently overwrote the other on create. The most acute
+    // case: series_jump where cadence changes the fire set.
+
+    #[test]
+    fn d023_different_cadence_yields_different_id() {
+        let base = ScanTarget {
+            source: "hkma".into(),
+            dataset: "x".into(),
+            detector: "series_jump".into(),
+            field: Some("v".into()),
+            threshold: Some(25.0),
+            ..Default::default()
+        };
+        let daily = ScanTarget {
+            cadence: Cadence::Daily,
+            ..base.clone()
+        };
+        let quarterly = ScanTarget {
+            cadence: Cadence::Quarterly,
+            ..base
+        };
+        assert_ne!(
+            signal_id("alice", &daily),
+            signal_id("alice", &quarterly),
+            "D-023: different cadence must not collide (cadence changes the fire set)"
+        );
+    }
+
+    #[test]
+    fn d023_different_comparison_yields_different_id() {
+        let base = ScanTarget {
+            source: "hkma".into(),
+            dataset: "x".into(),
+            detector: "series_jump".into(),
+            field: Some("v".into()),
+            threshold: Some(25.0),
+            cadence: Cadence::Quarterly,
+            ..Default::default()
+        };
+        let pop = ScanTarget {
+            comparison: Comparison::PeriodOverPeriod,
+            ..base.clone()
+        };
+        let yoy = ScanTarget {
+            comparison: Comparison::YearOverYear,
+            ..base
+        };
+        assert_ne!(
+            signal_id("alice", &pop),
+            signal_id("alice", &yoy),
+            "D-023: different comparison must not collide"
+        );
+    }
+
+    #[test]
+    fn d023_different_field_b_yields_different_id() {
+        let base = ScanTarget {
+            source: "hkma".into(),
+            dataset: "x".into(),
+            detector: "correlation".into(),
+            field: Some("a".into()),
+            threshold: Some(0.3),
+            ..Default::default()
+        };
+        let with_b1 = ScanTarget {
+            field_b: Some("b1".into()),
+            ..base.clone()
+        };
+        let with_b2 = ScanTarget {
+            field_b: Some("b2".into()),
+            ..base
+        };
+        assert_ne!(
+            signal_id("alice", &with_b1),
+            signal_id("alice", &with_b2),
+            "D-023: different field_b must not collide"
+        );
+    }
+
+    #[test]
+    fn d023_different_companion_yields_different_id() {
+        let mk = |comp_src: &str| ScanTarget {
+            source: "hkma".into(),
+            dataset: "x".into(),
+            detector: "cross_source_gap".into(),
+            field: Some("date".into()),
+            companion: Some(hkgov_common::CompanionRef {
+                source: comp_src.into(),
+                dataset: "y".into(),
+            }),
+            ..Default::default()
+        };
+        assert_ne!(
+            signal_id("alice", &mk("press")),
+            signal_id("alice", &mk("datagovhk")),
+            "D-023: different companion source must not collide"
+        );
+    }
+
+    #[test]
+    fn d023_identical_targets_still_dedup() {
+        // Regression guard: adding fields to the id must not break the dedup
+        // property for truly identical targets.
+        let t = hibor_target("above", 2.5);
+        assert_eq!(
+            signal_id("alice", &t),
+            signal_id("alice", &t),
+            "identical targets must still share an id"
+        );
     }
 }
