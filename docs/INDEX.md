@@ -19,7 +19,7 @@
 | Real captured insights (proof the detectors work on live data) | [`EXAMPLES.md`](../EXAMPLES.md) | Living |
 | Iconography rules (Remix Icon, no emoji) + i18n rules | [`AGENT.md`](../AGENT.md) | Living |
 | How to contribute + feature matrix + source-verification rules | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Living |
-| What shipped in each milestone (v1–v8) | [`CHANGELOG.md`](../CHANGELOG.md) | Living |
+| What shipped in each milestone (v1–v9) | [`CHANGELOG.md`](../CHANGELOG.md) | Living |
 | The product/UX strategy (personas, features P-001–P-109, release plan) | [`docs/PM_STRATEGY/README.md`](PM_STRATEGY/README.md) → [`PRODUCT_STRATEGY_TRACKER.md`](PM_STRATEGY/PRODUCT_STRATEGY_TRACKER.md) | Design rationale |
 | Historical QA audit reports (frozen, not current) | [`docs/archive/README.md`](archive/README.md) | Archive |
 
@@ -37,7 +37,7 @@
 3. `crates/connectors/src/registry.rs` — where to register it (wrap with rate limiter + circuit breaker).
 
 **Debugging a defect:**
-1. [`DEFECTS.md`](../DEFECTS.md) — the canonical defect log (D-001–D-012, all resolved/waived/deferred).
+1. [`DEFECTS.md`](../DEFECTS.md) — the canonical defect log (D-001–D-024, all resolved/waived/deferred).
 2. [`docs/archive/`](archive/) — the per-test traces that found each defect (frozen but detailed).
 
 **Understanding the AI agent layer:**
@@ -62,11 +62,11 @@
 |---|---|---|
 | `README.md` | Project overview, quick start, full API reference, roadmap status | `API reference`, `quick start`, `docker`, `python` |
 | `AGENT.md` | Agent working agreement: iconography (Remix Icon, no emoji) + i18n rules | `emoji`, `Remix Icon`, `i18n`, `data-i18n`, `zh-HK` |
-| `CHANGELOG.md` | What shipped in each milestone (v1–v8 + unreleased) | `v6`, `v7`, `v8`, `Silence Index`, `Cite-It` |
+| `CHANGELOG.md` | What shipped in each milestone (v1–v9 + unreleased) | `v6`, `v7`, `v8`, `v9`, `Silence Index`, `Cite-It` |
 | `CONTRIBUTING.md` | How to contribute: data-source verification, feature flags, architecture invariants, adding a connector/detector | `feature flags`, `invariants`, `Connector trait` |
-| `DEFECTS.md` | Canonical defect log (D-001–D-012), all resolved/waived/deferred | `D-006`, `D-012`, `fixed`, `waived`, `deferred` |
+| `DEFECTS.md` | Canonical defect log (D-001–D-024), all resolved/waived/deferred | `D-006`, `D-012`, `D-018`, `D-024`, `fixed`, `waived`, `deferred` |
 | `EXAMPLES.md` | Real captured insights (HIBOR +99.3%, March outlier cluster, cross-source gaps) | `series_jump`, `outlier`, `cross_source_gap`, `HIBOR` |
-| `FEATURES_TRACKER.md` | Canonical feature/user-story status (149 features, 200 tests, all passing) | `F-089`, `F-100`, `Phase 9`, `D-012` |
+| `FEATURES_TRACKER.md` | Canonical feature/user-story status (F-001–F-107, ~280 tests, all passing) | `F-089`, `F-100`, `Phase 9`, `D-012` |
 | `CODE_OF_CONDUCT.md` | Contributor Covenant | — |
 
 ### `docs/` — living architecture & ops docs
@@ -77,7 +77,8 @@
 | `docs/ARCHITECTURE.md` | Crate graph, data flow, the determinism guarantee, the four layers of v6 intelligence, proactive alerting | `crate graph`, `determinism`, `RecordStore`, `RecordStore trait` |
 | `docs/CAPACITY.md` | Scaling path: single-node ceiling, the 5-stage table, what "100k" means | `100k`, `moka`, `Redis`, `Postgres`, `wired`, `k6` |
 | `docs/DATA_SOURCES.md` | All 7 connectors' verified endpoints, envelopes, quirks, rate limits | `HKMA`, `data.gov.hk`, `Immigration`, `RVD`, `Land Registry`, `circuit breaker` |
-| `docs/ROADMAP.md` | Milestone status (v1–v8 shipped) + the "Remaining" future-work list | `Remaining`, `OAuth`, `k8s`, `LB tier` |
+| `docs/ROADMAP.md` | Milestone status (v1–v9 shipped) + the "Remaining" future-work list | `Remaining`, `OAuth`, `k8s`, `LB tier` |
+| `docs/AGENTIC_GATE_FINDINGS.md` | Agentic-gate quality-gate run record + false-positive suppression rationale (why blocking findings were not applied) | `agentic-gate`, `false positive`, `SKILL_DEAD_BRANCH` |
 
 ### `docs/PM_STRATEGY/` — product design rationale
 

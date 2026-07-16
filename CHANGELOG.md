@@ -184,7 +184,10 @@ public API surface (the HTTP API + the `hkgov-py` client).
 
 ### Added
 - Postgres `RecordStore` (`--features pg`).
-- API auth (optional `X-API-Key` / `?api_key=`) + `/v1` versioning.
+- API auth (optional `X-API-Key` header) + `/v1` versioning. (An initial
+  `?api_key=` query-string fallback was also present in v4 but was later
+  removed as a security hardening — query strings leak into access logs and
+  `Referer` headers; see `crates/api/src/auth.rs`, security fix V-002.)
 - OpenTelemetry trace export (`--features otel`).
 - k6 load-test harness + capacity model.
 
@@ -216,4 +219,5 @@ public API surface (the HTTP API + the `hkgov-py` client).
 
 ---
 
-<!-- Tags: v1 (ed4dbe2), v2–v5 (a967dda), v6 (cb26750). See `git tag`. -->
+<!-- Tags: v6 (990696a), v7 (47aeb93), v8 (aa2f457), v9 (ac548ab). See `git tag`.
+     (v1–v5 were never individually tagged; they predate the tagging convention.) -->

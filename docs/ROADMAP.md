@@ -124,10 +124,35 @@ Turns the one-shot findings into a trackable, subscribable, bilingual product.
 - **Bilingual (zh-HK)** — deterministic zh-HK summary reframers; `?lang=zh-HK`.
 - **Identity Tier** — `POST /v1/auth/request-token` / `/redeem` / `GET /me`.
   Email + magic-link; the principal for per-user state. Sessions now expire.
-- **Market Players** — `GET /v1/market-players`. A curated directory of the
-  named private-sector operators holding each department's licences.
 - `threshold_crossing` detector wired into the scheduler; `trend_break`
   detector added (regime-change detection).
+
+## v9 — Product layer III + UX overhaul (✅ shipped, tag `v9`)
+
+A ranked, feedback-driven surface plus a dashboard rewrite. (The **Related
+Market Players** endpoint and the full HKMA / data.gov.hk catalog widening
+were started in this cycle but are tracked under [Unreleased] below.)
+
+- **Ranked daily brief** — `GET /v1/brief?limit=`. The top findings, scored &
+  deduped into a daily brief (`crates/agent/src/brief.rs`).
+- **Insight feedback** — `POST` / `GET /v1/insights/{id}/feedback`. Records
+  usefulness + notes against an insight.
+- **Dashboard rewrite** — `dashboard/index.html` overhauled (510-line rewrite)
+  for a richer layout reading the live API.
+- **Alert dispatch expansion** — `alerts.rs` extended (email sink, dispatch log).
+
+## [Unreleased] — Dataset coverage expansion
+
+- **Related Market Players** — `GET /v1/market-players`. A curated directory of
+  the named private-sector operators holding each department's licences
+  (7 departments × 10 players), filterable by `?dept=` / `?category=`; shipped
+  defaults overridable via `[[reference.market_player]]`. See CHANGELOG.md
+  `[Unreleased]`.
+- **HKMA connector: full catalog (151 datasets)** — replaced the 2-dataset
+  hand-written mapping with a data-driven table covering every public HKMA
+  dataset. Per-row `segment` / `lang` params honored at fetch time.
+- **data.gov.hk connector: 33 verified resources** — extended from 1 to 33
+  probe-verified resources.
 
 ## Remaining (future)
 

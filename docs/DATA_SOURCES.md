@@ -253,7 +253,7 @@ enforced by per-source token-bucket rate limiters + circuit breakers (see
 
 | Source | Rate limit | Circuit breaker (failures → open) | Cooldown |
 |---|---|---|---|
-| HKMA | 5 req/s | 5 | 60s |
+| HKMA | 5 req/s (configurable via `upstream.hkma_rate_per_sec`) | 5 | 30s |
 | data.gov.hk | 3 req/s | 5 | 60s |
 | press | 2 req/s | 5 | 60s |
 | LandsD | 1 req/s | 3 | 120s |
