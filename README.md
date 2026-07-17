@@ -383,10 +383,19 @@ distroless runtime is a future hardening item.
 
 Netlify serves the static dashboard only — it cannot run the Rust binary. The
 recommended split is **dashboard → Netlify, API → Railway**. The repo already
-carries a [`railway.toml`](railway.toml) (healthcheck on `/ready`, restart
+carries a [`railway.toml`](railway.toml) (healthcheck on `/health`, restart
 policy), and the Dockerfile builds cleanly on Railway's builder (the
 BuildKit-only cache mounts were dropped for this in `4d5dce4`). The binary binds
 to Railway's injected `PORT` at runtime (see `crates/api/src/main.rs`).
+
+> **Why `/health` for the deploy healthcheck and not `/ready`?** `/health` is
+> pure liveness (process up + answering); `/ready` additionally folds in
+> upstream circuit-breaker state and warm-cache status, returning 503 when
+> degraded. A deploy healthcheck wants the former — a cold start or one flapping
+> upstream must not restart-loop a container that is otherwise serving cached
+> data + insights. `/ready` is the right signal for a load balancer to *drain*
+> a replica, which is why the `Dockerfile` `HEALTHCHECK` probes it
+> (`Dockerfile:64-65`). See `railway.toml:26-34` for the full rationale.
 
 **Deploy steps:**
 1. Railway → New → GitHub repo. Railway auto-detects the Dockerfile.
@@ -440,6 +449,7 @@ All data endpoints are under `/v1` (configurable via `api.api_prefix`).
 |---|---|---|
 | `GET` | `/` | Service name, version, and an endpoint directory |
 | `GET` | `/health` | Liveness probe (`{status, version}`) |
+| `GET` | `/ready` | Readiness probe — stricter than `/health`: returns 503 when any upstream circuit is open or no dataset has warmed. Use for LB/k8s readiness gates (drain a degraded replica), **not** for deploy healthchecks (use `/health` for those — see [Railway](#railway-backend-host)) |
 | `GET` | `/dashboard` | The static insights dashboard (served by the API; exempt from API-key auth) |
 | `GET` | `/v1/health/sources` | Per-source circuit-breaker state (closed/open/half-open) |
 | `GET` | `/v1/sources?category=&tag=&cadence=&source=&q=` | Datasets, filterable by domain/category, tags, cadence, and free text (v8) |
@@ -448,15 +458,19 @@ All data endpoints are under `/v1` (configurable via `api.api_prefix`).
 | `GET` | `/v1/datasets/{source}/{dataset}` | Metadata for one dataset |
 | `GET` | `/v1/datasets/{source}/{dataset}/records?offset=&limit=` | Paginated records from cache |
 | `GET` | `/v1/insights?limit=` | AI-agent generated insights with evidence |
+| `GET` · `POST` | `/v1/insights/{id}/feedback` | Insight feedback (thumbs up/down + note) — recorded against an insight |
 | `GET` | `/v1/brief?limit=` | Ranked daily brief — the top findings, scored & deduped |
 | `GET` | `/v1/silence-index?period=` | **HKMA Silence Index v1** — a 0–100 opacity score ("how much did HKGOV not explain this period"), built deterministically from cross-source gaps + unattributed moves (v7) |
 | `GET` | `/v1/unprecedentedness?source=&dataset=&field=&value=&k=` | **Unprecedentedness Score** — percentile rank, normal-range band, 1-in-N return period, and "last exceeded" comparator for a value against its history (v7) |
 | `GET` | `/v1/insights/{id}/cite?format=&base_url=` | **Cite-It** — a stable permalink + citation strings (BibTeX/RIS/APA/Chicago/Markdown) + a CI-reproducibility manifest (SHA-256 over the evidence) so a citation never false-claims reproducibility (v7) |
 | `GET` | `/v1/insights?since=&lang=` | **Lifeline** — insights, optionally filtered to what's new since a timestamp; `?lang=zh-HK` selects deterministic zh-HK summaries (v8) |
 | `GET` | `/v1/insights/{id}/history` | Prior versions of an insight — the evolution history (v8) |
-| `GET` | `/v1/signals` · `POST /v1/signals` | **Signal Subscriptions** — author a detector watch; preview shows what it would have fired (v8) |
+| `GET` · `POST` | `/v1/signals` | **Signal Subscriptions** — list subscriptions, or author a new detector watch (v8) |
 | `POST` | `/v1/signals/preview` | Run a compiled scan target against the last 90 days — the "preview IS what will fire" call (v8) |
-| `POST` | `/v1/investigations` · `/v1/investigations/{id}/steps` | **Drill-In Investigations** — saved, resumable, shareable case files from any insight (v8) |
+| `GET` · `PATCH` · `DELETE` | `/v1/signals/{id}` | Read, update, or cancel one signal subscription (v8) |
+| `POST` · `GET` | `/v1/investigations` | **Drill-In Investigations** — open a saved, resumable, shareable case file from any insight, or list them (v8) |
+| `GET` · `DELETE` | `/v1/investigations/{id}` | Fetch or discard one investigation case file (v8) |
+| `POST` | `/v1/investigations/{id}/steps` · `/v1/investigations/{id}/notes` | Append an investigation step (resumable chain) or a free-text note (v8) |
 | `POST` | `/v1/auth/request-token` · `/v1/auth/redeem` · `GET /v1/auth/me` | **Identity Tier** — email + magic-link; the principal for per-user state (v8) |
 | `GET` | `/v1/alerts?limit=` | Proactive alert dispatch log (v6) |
 | `POST` | `/v1/ask` | Natural-language Q&A over the data (v6) |
@@ -633,6 +647,12 @@ python/        hkgov-py typed Python client (pip install hkgov-py)
 | **v6** Intelligence & agentic | shipped | richer detectors, tool belt, agent loop, `/ask` NL Q&A, proactive alerting |
 | **v7** Product layer | shipped | **Silence Index** (opacity, quantified — the flagship) + **Unprecedentedness Score** (historical rarity) + **Cite-It** (citation-grade export w/ reproducibility manifest); first features from the PM strategy |
 | **v8** Product layer II | shipped | **Insight Lifeline** (evolution tracking) + **Signal Subscriptions** (NL authoring + preview) + **Drill-In Investigations** (case files) + **Bilingual** (zh-HK) + **Identity Tier** (magic-link) + `threshold_crossing` scheduler wiring |
+| **v9** Product layer III + UX overhaul | shipped | **Ranked daily brief** (`/v1/brief`, scored & deduped) + **insight feedback** (`/v1/insights/{id}/feedback`) + dashboard rewrite (510-line `index.html` overhaul, richer layout). Followed by an **unreleased** dataset-coverage expansion: **Related Market Players** (`/v1/market-players`) + the full HKMA catalog (**151 datasets**) + **33** data.gov.hk resources. |
+
+> **Tagged vs. unreleased.** v1–v9 are git tags (`v6`…`v9`; v1–v5 predate the
+> tagging convention and were never individually tagged). The dataset-coverage
+> expansion (market-players + 151/33 catalog widening) is documented under
+> `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
 
 Full detail, including the remaining/future work, in
 [docs/ROADMAP.md](docs/ROADMAP.md).
