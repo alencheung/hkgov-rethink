@@ -38,8 +38,19 @@ impl IntoResponse for ApiError {
         // unauthorized) and keep their detailed message so the client can self-correct.
         if status.is_server_error() {
             tracing::error!(error = %self.0, kind = %kind, "server error");
+            // D-031: StoreUnavailable is retryable and the client should know to
+            // retry (it's not an internal fault). Surface a clear, non-leaky
+            // message rather than the generic "internal server error" — the
+            // dashboard's cite drawer / comparator use this to show "data
+            // temporarily unavailable, retry" instead of an error toast.
+            let message = match &self.0 {
+                Error::StoreUnavailable(_) => {
+                    "data temporarily unavailable (refresh in progress or cache cold); retry shortly"
+                }
+                _ => "internal server error",
+            };
             let body = Json(json!({
-                "error": { "kind": kind, "message": "internal server error" }
+                "error": { "kind": kind, "message": message }
             }));
             return (status, body).into_response();
         }
@@ -61,6 +72,7 @@ fn kind_for(e: &Error) -> &'static str {
         Error::BadRequest(_) => "bad_request",
         Error::Unauthorized(_) => "unauthorized",
         Error::Store(_) => "store",
+        Error::StoreUnavailable(_) => "store_unavailable",
         Error::Agent(_) => "agent",
         Error::Config(_) => "config",
         Error::Io(_) => "io",

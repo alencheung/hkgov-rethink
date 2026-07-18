@@ -1,5 +1,5 @@
     // ============ connection + persistence ============
-    const LS_BASE='hkgov.base', LS_KEY='hkgov.key', LS_READ='hkgov.read', LS_LAST='hkgov.lastvisit', LS_SEEN='hkgov.seenids', LS_LANG='hkgov.lang', LS_ONBOARD='hkgov.onboard.dismissed';
+    const LS_BASE='hkgov.base', LS_KEY='hkgov.key', LS_LAST='hkgov.lastvisit', LS_SEEN='hkgov.seenids', LS_LANG='hkgov.lang', LS_ONBOARD='hkgov.onboard.dismissed', LS_SESSION='hkgov.session', LS_USER='hkgov.user';
     // Default upstream API origin. D-027 fix: empty = same-origin, which is
     // correct whenever hkgov-api serves the dashboard itself (local dev, the
     // Docker image, or a Railway/cloud deploy visited directly at its own
@@ -17,7 +17,13 @@
       // via the header input to point at a separately-hosted hkgov-api instance.
       let base = (document.getElementById('baseUrl').value || DEFAULT_API_BASE).replace(/\/$/, '');
       const key = document.getElementById('apiKey').value;
-      return { base, headers: key ? { 'X-API-Key': key } : {} };
+      // D-018/D-033: attach the saved session as a Bearer header so per-user
+      // routes (signals, investigations, silence-watch) work from the browser.
+      const session = sessionStorage.getItem(LS_SESSION) || localStorage.getItem(LS_SESSION) || '';
+      const headers = {};
+      if (key) headers['X-API-Key'] = key;
+      if (session) headers['Authorization'] = 'Bearer ' + session;
+      return { base, headers };
     }
     function persistConfig() { try { localStorage.setItem(LS_BASE, document.getElementById('baseUrl').value); localStorage.setItem(LS_KEY, document.getElementById('apiKey').value); } catch(e){} }
     function restoreConfig() { try { const b=localStorage.getItem(LS_BASE); if(b) document.getElementById('baseUrl').value=b; else if(DEFAULT_API_BASE) document.getElementById('baseUrl').value=DEFAULT_API_BASE; const k=localStorage.getItem(LS_KEY); if(k) document.getElementById('apiKey').value=k; } catch(e){} }

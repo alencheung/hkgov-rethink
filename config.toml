@@ -43,7 +43,12 @@ data_gov_hk_archive_url = "https://app.data.gov.hk/v1/historical-archive/list-fi
 
 [cache]
 max_entries = 200000
-ttl_secs = 600
+# D-031: 0 = no time-based eviction. Records stay cached until the ingest
+# supervisor refreshes each dataset on its declared cadence (or max_entries
+# evicts by LRU under pressure). The prior 600s was shorter than every refresh
+# interval (1800s–604800s), so records evaporated between refreshes and
+# /records, /cite, /unprecedentedness returned 502 for most of each cycle.
+ttl_secs = 0
 
 [store]
 # memory (in-process moka) or redis (needs --features redis + a running server)

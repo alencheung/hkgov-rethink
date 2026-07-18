@@ -12,6 +12,7 @@
     if(location.protocol.startsWith('http')){ document.getElementById('baseUrl').value=`${location.protocol}//${location.host}`; }
     restoreConfig();
     applyI18n(); // translate chrome to the restored/browser language on first paint
+    if(typeof refreshAuthModal==='function') refreshAuthModal(); // D-033: reflect saved session in header
     const initTab=(location.hash||'').replace('#','').split('/')[0];
     if(['overview','datasets','divergence','signals','cases','health','licences','funding'].includes(initTab)) go(initTab);
     loadAll();
@@ -67,6 +68,12 @@
         'noop':                   ()  => {},
         'vote':                   el => vote(el.dataset.id, el.dataset.useful === 'true', el),
         'open-cite':              el => openCite(el.dataset.id),
+        'open-auth':              ()  => openAuth(),
+        'close-auth':             ()  => closeAuth(),
+        'close-auth-on-backdrop': (el, ev) => { if(ev.target === el) closeAuth(); },
+        'send-auth-link':         ()  => sendAuthLink(),
+        'redeem-auth-token':      ()  => redeemAuthToken(),
+        'sign-out':               ()  => signOut(),
         'mark-read':              el => { markRead(el.dataset.id); const c=el.closest('.card'); if(c) c.classList.remove('unread'); },
         'load-history':           el => loadHistory(el.dataset.id, el),
         'investigate':            el => investigate(el.dataset.id, el.dataset.source, el.dataset.dataset, el.dataset.title),

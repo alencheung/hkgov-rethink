@@ -254,10 +254,16 @@
     // ============ inline unprecedentedness band (P-103) ============
     async function loadUnprec(source, dataset, field, value){
       const u=await getJSON('/v1/unprecedentedness?source='+encodeURIComponent(source)+'&dataset='+encodeURIComponent(dataset)+'&field='+encodeURIComponent(field)+'&value='+encodeURIComponent(value));
+      // D-031: a 503 means the records cache is cold (refresh in flight). Return
+      // a sentinel so the caller can show "retry shortly" rather than a blank
+      // panel — the user clicked a value expecting feedback.
+      if(u&&u.__error===503) return { __unavailable: true };
       if(!u||u.__error||!u.band) return null;
       return u;
     }
     function unprecBandHTML(u, source, dataset, field){
+      // D-031: cold-cache sentinel from loadUnprec.
+      if(u&&u.__unavailable) return '<div class="unprec" style="padding:8px;color:var(--warn)"><i class="ri-database-2-line"></i> '+t('sig_preview_data_unavailable')+'</div>';
       if(!u||!u.band) return '';
       const extreme=u.is_unprecedented;
       const lo=u.band.low, hi=u.band.high, min=u.hist_min??lo, max=u.hist_max??hi, val=u.value;
@@ -436,7 +442,12 @@
     // which is only the API's fallback when no base_url is supplied. PR-002.
     function citeBaseParam(){ return 'base_url='+encodeURIComponent(window.location.origin); }
     async function openCite(id){ citeId=id; document.getElementById('citeModal').classList.add('open'); // permalink first
-      const bundle=await getJSON('/v1/insights/'+encodeURIComponent(id)+'/cite?'+citeBaseParam()); citeBundleObj=(bundle&&!bundle.__error)?bundle:null; document.getElementById('citePermalink').textContent=citeBundleObj?citeBundleObj.permalink:('…/cite/'+id); setFmt('bibtex'); const m=citeBundleObj&&citeBundleObj.manifest; citeManifestObj=m; document.getElementById('citeManifest').innerHTML=m?`Reproducibility manifest · detector <code>${escapeHtml(m.detector)}</code> · data SHA-256 <code>${escapeHtml(m.data_sha256).slice(0,16)}…</code>${citeBundleObj.experimental?' · <i class="ri-alert-line" style="color:var(--crit)"></i> experimental':''}`:''; }
+      const bundle=await getJSON('/v1/insights/'+encodeURIComponent(id)+'/cite?'+citeBaseParam());
+      // D-031: 503 = records cache cold (refresh in flight); the manifest can't
+      // be hashed without the evidence records. Tell the user to retry shortly
+      // rather than showing a blank manifest that looks like the cite is broken.
+      if(bundle&&bundle.__error===503){ citeBundleObj=null; document.getElementById('citePermalink').textContent='…/cite/'+id; document.getElementById('citeOut').textContent=t('sig_preview_data_unavailable'); document.getElementById('citeManifest').innerHTML='<span style="color:var(--warn)"><i class="ri-database-2-line"></i> '+t('sig_preview_data_unavailable')+'</span>'; return; }
+      citeBundleObj=(bundle&&!bundle.__error)?bundle:null; document.getElementById('citePermalink').textContent=citeBundleObj?citeBundleObj.permalink:('…/cite/'+id); setFmt('bibtex'); const m=citeBundleObj&&citeBundleObj.manifest; citeManifestObj=m; document.getElementById('citeManifest').innerHTML=m?`Reproducibility manifest · detector <code>${escapeHtml(m.detector)}</code> · data SHA-256 <code>${escapeHtml(m.data_sha256).slice(0,16)}…</code>${citeBundleObj.experimental?' · <i class="ri-alert-line" style="color:var(--crit)"></i> experimental':''}`:''; }
     function closeCite(){ document.getElementById('citeModal').classList.remove('open'); }
     async function setFmt(fmt){ citeFmt=fmt; document.querySelectorAll('#fmtTabs button').forEach(b=>b.classList.toggle('active',b.dataset.fmt===fmt)); document.getElementById('citeOut').textContent='loading…'; const txt=await fetchText('/v1/insights/'+encodeURIComponent(citeId)+'/cite?format='+fmt+'&'+citeBaseParam()); document.getElementById('citeOut').textContent=txt||'(error loading)'; }
     async function copyCite(){ try { await navigator.clipboard.writeText(document.getElementById('citeOut').textContent); } catch(e){ const ta=document.createElement('textarea'); ta.value=document.getElementById('citeOut').textContent; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); } }
@@ -453,7 +464,7 @@
       if(!inv||inv.__error){ alert('Could not create case: '+(inv&&inv.__text?inv.__text:'HTTP '+(inv&&inv.__error))); return; }
       activeInvId=inv.id; go('cases'); openInvWorkspace(inv.id);
     }
-    async function loadCases(){ const list=await getJSON('/v1/investigations?limit=50'); const el=document.getElementById('casesList'); if(list&&list.__error===401){ el.innerHTML='<div class="empty">'+(t('auth_needed_cases'))+'</div>'; document.getElementById('navCases').textContent='0'; return; } if(!list||list.__error||!list.length){ el.innerHTML='<div class="empty">'+t('cases_none')+'</div>'; document.getElementById('navCases').textContent='0'; return; } document.getElementById('navCases').textContent=list.length; el.innerHTML=list.map(c=>`<div class="case-card" data-action="open-inv-workspace" data-id="${escapeHtml(c.id)}"><div class="ct">${escapeHtml(c.title||'(untitled)')} <i class="ri-arrow-right-line" style="color:var(--accent)"></i></div><div class="cm">seed: ${escapeHtml(c.seed_source||'?')}/${escapeHtml(c.seed_dataset||'?')} · ${escapeHtml(c.status||(c.steps&&c.steps.length?c.steps.length+' steps':'empty'))} · ${escapeHtml(relTime(c.updated_at||c.created_at))}</div></div>`).join(''); }
+    async function loadCases(){ const list=await getJSON('/v1/investigations?limit=50'); const el=document.getElementById('casesList'); if(list&&list.__error===401){ el.innerHTML='<div class="empty">'+(t('auth_needed_cases'))+' <button class="icon-btn" data-action="open-auth" style="margin-left:8px;"><i class="ri-login-circle-line"></i> '+t('auth_sign_in')+'</button></div>'; document.getElementById('navCases').textContent='0'; return; } if(!list||list.__error||!list.length){ el.innerHTML='<div class="empty">'+t('cases_none')+'</div>'; document.getElementById('navCases').textContent='0'; return; } document.getElementById('navCases').textContent=list.length; el.innerHTML=list.map(c=>`<div class="case-card" data-action="open-inv-workspace" data-id="${escapeHtml(c.id)}"><div class="ct">${escapeHtml(c.title||'(untitled)')} <i class="ri-arrow-right-line" style="color:var(--accent)"></i></div><div class="cm">seed: ${escapeHtml(c.seed_source||'?')}/${escapeHtml(c.seed_dataset||'?')} · ${escapeHtml(c.status||(c.steps&&c.steps.length?c.steps.length+' steps':'empty'))} · ${escapeHtml(relTime(c.updated_at||c.created_at))}</div></div>`).join(''); }
     async function openInvWorkspace(id){
       const inv=await getJSON('/v1/investigations/'+encodeURIComponent(id));
       const mount=document.getElementById('invWorkspaceMount');
@@ -486,9 +497,13 @@
     async function sigSourceFill(){ const sel=document.getElementById('sigSource'); if(sel.options.length) return; const srcs=await getJSON('/v1/sources'); if(!srcs||srcs.__error) return; const seen={}; for(const s of srcs) if(!seen[s.source]){ seen[s.source]=true; const o=document.createElement('option'); o.value=s.source; o.textContent=s.source; sel.appendChild(o); } sel.value='hkma'; sigDatasetFill(); }
     async function sigDatasetFill(){ const src=document.getElementById('sigSource').value; const sel=document.getElementById('sigDataset'); const field=(document.getElementById('sigField').value||'').trim(); sel.innerHTML=''; const srcs=await getJSON('/v1/sources?source='+encodeURIComponent(src)); if(!srcs||srcs.__error) return; for(const s of srcs){ const o=document.createElement('option'); o.value=s.dataset; o.textContent=s.dataset+' ('+s.record_count+')'; sel.appendChild(o); } if(field){ const preferred=src==='hkma'&&field==='hibor_overnight'?'daily-figures-interbank-liquidity':null; let chosen=null; if(preferred&&[...sel.options].some(o=>o.value===preferred)) chosen=preferred; else { for(const s of srcs.slice(0,12)){ try { const r=await getJSON('/v1/datasets/'+encodeURIComponent(s.source)+'/'+encodeURIComponent(s.dataset)+'/records?limit=1'); if(r&&!r.__error&&r.records&&r.records[0]&&(field in (r.records[0].fields||{}))){ chosen=s.dataset; break; } } catch(e){} } } if(chosen) sel.value=chosen; } }
     function buildScanTarget(){ return { source:document.getElementById('sigSource').value, dataset:document.getElementById('sigDataset').value, detector:document.getElementById('sigDetector').value, field:document.getElementById('sigField').value||null, threshold:parseFloat(document.getElementById('sigThreshold').value)||null, comparison:'period_over_period', cadence:document.getElementById('sigCadence').value||'daily', direction:document.getElementById('sigDirection').value }; }
-    async function previewSignal(){ const box=document.getElementById('sigPreview'); box.textContent=t('sig_previewing'); const compiled=buildScanTarget(); const p=await postJSON('/v1/signals/preview',{compiled, window_days:90}); if(!p||p.__error){ box.innerHTML='<span style="color:var(--crit)">'+t('sig_preview_err',{detail:escapeHtml((p&&p.__text)||('HTTP '+(p&&p.__error)))})+'</span>'; return; } const n=p.count==null?(p.findings||[]).length:p.count; box.innerHTML=t('sig_fired',{n,days:(p.window_days||90),s:(n===1?'':'s'),det:escapeHtml(p.compiled.detector),src:escapeHtml(p.compiled.source)+'/'+escapeHtml(p.compiled.dataset)})+'<br>'+(n?'<span style="color:var(--muted)">'+t('sig_recent',{list:((p.findings||[]).slice(0,3).map(f=>escapeHtml(f.record_id||f.title||'?')).join(', '))})+'</span>':'<span style="color:var(--ok)">'+t('sig_none_fired')+'</span>'); }
-    async function saveSignal(){ const q=document.getElementById('sigQuestion').value.trim(); const compiled=buildScanTarget(); const s=await postJSON('/v1/signals',{question:q||null, compiled, channels:[], owner:'dashboard'}); if(!s||s.__error){ alert(t('sig_could_not_save',{detail:((s&&s.__text)||('HTTP '+(s&&s.__error)))})); return; } document.getElementById('sigQuestion').value=''; const note=document.getElementById('sigSaveNote'); if(note){ note.textContent=t('sig_saved_ok'); note.style.display='block'; setTimeout(()=>{ note.style.display='none'; }, 6000); } loadSignals(); }
-    async function loadSignals(){ const list=await getJSON('/v1/signals?limit=50'); const el=document.getElementById('signalsList'); if(list&&list.__error===401){ el.innerHTML='<div class="empty">'+(t('auth_needed_signals'))+'</div>'; document.getElementById('navSignals').textContent='0'; return; } if(!list||list.__error||!list.length){ el.innerHTML='<div class="empty">'+t('sig_none')+'</div>'; document.getElementById('navSignals').textContent='0'; return; } document.getElementById('navSignals').textContent=list.length; el.innerHTML=list.map(s=>`<div class="case-card"><div class="ct">${escapeHtml(s.question||(s.compiled.detector+' on '+s.compiled.source+'/'+s.compiled.dataset))}</div><div class="cm"><code>${escapeHtml(s.compiled.detector)}</code> · ${escapeHtml(s.compiled.source)}/${escapeHtml(s.compiled.dataset)} · ${s.enabled?t('sig_enabled'):t('sig_paused')}</div><div class="actions"><button data-action="toggle-signal" data-id="${escapeHtml(s.id)}" data-enable="${!s.enabled}">${s.enabled?t('sig_pause'):t('sig_enable')}</button><button data-action="del-signal" data-id="${escapeHtml(s.id)}">${t('sig_delete')}</button><button data-action="load-dispatch-log" data-id="${escapeHtml(s.id)}"><i class="ri-history-line"></i> ${t('sig_dispatch')}</button></div><div class="dispatch-log" id="dlog-${escapeHtml(s.id)}" style="display:none;margin-top:8px;"></div></div>`).join(''); }
+    async function previewSignal(){ const box=document.getElementById('sigPreview'); box.textContent=t('sig_previewing'); const compiled=buildScanTarget(); const p=await postJSON('/v1/signals/preview',{compiled, window_days:90}); if(!p||p.__error){ box.innerHTML='<span style="color:var(--crit)">'+t('sig_preview_err',{detail:escapeHtml((p&&p.__text)||('HTTP '+(p&&p.__error)))})+'</span>'; return; } const n=p.count==null?(p.findings||[]).length:p.count; // D-032: when the records cache was cold the detector saw nothing — say so
+      // instead of a misleading "0 findings" that looks like the signal never fires.
+      if(n===0 && p.data_available===false){ box.innerHTML='<span style="color:var(--warn)"><i class="ri-database-2-line"></i> '+t('sig_preview_data_unavailable')+'</span>'; return; }
+      box.innerHTML=t('sig_fired',{n,days:(p.window_days||90),s:(n===1?'':'s'),det:escapeHtml(p.compiled.detector),src:escapeHtml(p.compiled.source)+'/'+escapeHtml(p.compiled.dataset)})+'<br>'+(n?'<span style="color:var(--muted)">'+t('sig_recent',{list:((p.findings||[]).slice(0,3).map(f=>escapeHtml(f.record_id||f.title||'?')).join(', '))})+'</span>':'<span style="color:var(--ok)">'+t('sig_none_fired')+'</span>'); }
+    async function saveSignal(){ const q=document.getElementById('sigQuestion').value.trim(); const compiled=buildScanTarget(); // D-033: 401 means no session — open the sign-in modal rather than a generic alert.
+      const s=await postJSON('/v1/signals',{question:q||null, compiled, channels:[]}); if(s&&s.__error===401){ openAuth(); return; } if(!s||s.__error){ alert(t('sig_could_not_save',{detail:((s&&s.__text)||('HTTP '+(s&&s.__error)))})); return; } document.getElementById('sigQuestion').value=''; const note=document.getElementById('sigSaveNote'); if(note){ note.textContent=t('sig_saved_ok'); note.style.display='block'; setTimeout(()=>{ note.style.display='none'; }, 6000); } loadSignals(); }
+    async function loadSignals(){ const list=await getJSON('/v1/signals?limit=50'); const el=document.getElementById('signalsList'); if(list&&list.__error===401){ el.innerHTML='<div class="empty">'+(t('auth_needed_signals'))+' <button class="icon-btn" data-action="open-auth" style="margin-left:8px;"><i class="ri-login-circle-line"></i> '+t('auth_sign_in')+'</button></div>'; document.getElementById('navSignals').textContent='0'; return; } if(!list||list.__error||!list.length){ el.innerHTML='<div class="empty">'+t('sig_none')+'</div>'; document.getElementById('navSignals').textContent='0'; return; } document.getElementById('navSignals').textContent=list.length; el.innerHTML=list.map(s=>`<div class="case-card"><div class="ct">${escapeHtml(s.question||(s.compiled.detector+' on '+s.compiled.source+'/'+s.compiled.dataset))}</div><div class="cm"><code>${escapeHtml(s.compiled.detector)}</code> · ${escapeHtml(s.compiled.source)}/${escapeHtml(s.compiled.dataset)} · ${s.enabled?t('sig_enabled'):t('sig_paused')}</div><div class="actions"><button data-action="toggle-signal" data-id="${escapeHtml(s.id)}" data-enable="${!s.enabled}">${s.enabled?t('sig_pause'):t('sig_enable')}</button><button data-action="del-signal" data-id="${escapeHtml(s.id)}">${t('sig_delete')}</button><button data-action="load-dispatch-log" data-id="${escapeHtml(s.id)}"><i class="ri-history-line"></i> ${t('sig_dispatch')}</button></div><div class="dispatch-log" id="dlog-${escapeHtml(s.id)}" style="display:none;margin-top:8px;"></div></div>`).join(''); }
     // P-110: surface the shipped GET /v1/alerts as a per-signal dispatch timeline.
     // Shows whether each signal fired / delivered / bounced — the "did my signal
     // actually reach me?" trust layer that was missing.
@@ -538,6 +553,79 @@
       if(hm){ id=decodeURIComponent(hm[1]); }
       else { const pm=location.pathname.match(/\/cite\/(.+)$/); if(pm){ id=decodeURIComponent(pm[1]); } }
       if(id){ openCite(id); }
+    }
+
+    // ============ auth (D-018/D-033) ============
+    // Per-user features (signals, cases, silence-watch) need a session. The
+    // prior dashboard told users to hand-craft curl to /v1/auth/request-token
+    // + /v1/auth/redeem; this is the in-page flow. Magic-link by default, with
+    // a manual token-paste fallback for prod servers that don't return the
+    // token inline (dev_return_auth_token off).
+    function openAuth(){
+      refreshAuthModal();
+      document.getElementById('authModal').classList.add('open');
+    }
+    function closeAuth(){ document.getElementById('authModal').classList.remove('open'); }
+    function isSignedIn(){ return !!(sessionStorage.getItem(LS_SESSION) || localStorage.getItem(LS_SESSION)); }
+    function refreshAuthModal(){
+      const step1=document.getElementById('authStep1'), step2=document.getElementById('authStep2');
+      const authBtn=document.getElementById('authBtn');
+      if(isSignedIn()){
+        step1.style.display='none'; step2.style.display='block';
+        document.getElementById('authUserEmail').textContent = localStorage.getItem(LS_USER) || sessionStorage.getItem(LS_USER) || '(session)';
+        authBtn.innerHTML='<i class="ri-user-line"></i> '+(localStorage.getItem(LS_USER)||sessionStorage.getItem(LS_USER)||'account');
+        authBtn.title=t('auth_signed_in');
+      } else {
+        step1.style.display='block'; step2.style.display='none';
+        authBtn.textContent=t('auth_sign_in');
+        authBtn.title=t('auth_sign_in');
+      }
+    }
+    async function sendAuthLink(){
+      const email=(document.getElementById('authEmail').value||'').trim();
+      const status=document.getElementById('authSendStatus');
+      if(!email||!email.includes('@')){ status.textContent=t('auth_bad_email'); return; }
+      status.textContent=t('auth_sending');
+      const r=await postJSON('/v1/auth/request-token',{email});
+      if(!r||r.__error){ status.textContent=t('auth_send_failed',{code:(r&&r.__error)}); return; }
+      // dev_return_auth_token on (dev/CI): the token comes back in the body;
+      // auto-redeem so the flow is one-click. Off (prod): reveal the manual
+      // paste field so the user can drop in the token from their email.
+      if(r.token){
+        status.textContent=t('auth_auto_redeeming');
+        const redeemed=await postJSON('/v1/auth/redeem',{token:r.token});
+        if(redeemed&&!redeemed.__error&&redeemed.session_token){ applySession(redeemed.session_token, redeemed.user&&redeemed.user.email||email, /*persist=*/false); status.textContent=t('auth_signed_in_ok'); refreshAuthModal(); go(lastTab||'overview'); loadSignals(); loadCases(); }
+        else { status.textContent=t('auth_redeem_failed'); }
+      } else {
+        status.textContent=t('auth_link_sent');
+        document.getElementById('authManualWrap').style.display='block';
+      }
+    }
+    async function redeemAuthToken(){
+      const raw=(document.getElementById('authManualToken').value||'').trim();
+      const status=document.getElementById('authSendStatus');
+      // Accept either a bare token or a magic-link URL ending in ?token=…
+      let token=raw;
+      const m=raw.match(/[?&]token=([^&]+)/);
+      if(m) token=decodeURIComponent(m[1]);
+      if(!token){ status.textContent=t('auth_no_token'); return; }
+      status.textContent=t('auth_redeeming');
+      const r=await postJSON('/v1/auth/redeem',{token});
+      if(r&&r.session_token){ applySession(r.session_token, r.user&&r.user.email||'', /*persist=*/true); status.textContent=t('auth_signed_in_ok'); refreshAuthModal(); go(lastTab||'overview'); loadSignals(); loadCases(); }
+      else { status.textContent=t('auth_redeem_failed_code',{code:(r&&r.__error)}); }
+    }
+    function applySession(token, email, persist){
+      // sessionStorage keeps the session to this tab by default (safer); the
+      // manual paste path persists to localStorage so a pasted link survives a
+      // page reload (the user clicked the link in email → new tab).
+      if(persist){ localStorage.setItem(LS_SESSION, token); if(email) localStorage.setItem(LS_USER, email); }
+      else { sessionStorage.setItem(LS_SESSION, token); if(email) sessionStorage.setItem(LS_USER, email); }
+    }
+    function signOut(){
+      sessionStorage.removeItem(LS_SESSION); sessionStorage.removeItem(LS_USER);
+      localStorage.removeItem(LS_SESSION); localStorage.removeItem(LS_USER);
+      refreshAuthModal();
+      loadSignals(); loadCases();
     }
 
     // ============ command palette ============

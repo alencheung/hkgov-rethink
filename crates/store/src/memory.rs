@@ -60,10 +60,24 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     pub fn new(max_entries: u64, ttl_secs: u64) -> Self {
-        let records = Cache::builder()
-            .max_capacity(max_entries)
-            .time_to_live(std::time::Duration::from_secs(ttl_secs))
-            .build();
+        // D-031 fix: a `ttl_secs` of 0 disables time-based eviction entirely
+        // (records stay cached until the ingest supervisor's per-dataset
+        // refresh replaces them, or `max_capacity` evicts by LRU under
+        // pressure). This is the correct default for a cache-aside store whose
+        // staleness is already bounded by the refresh interval: the previous
+        // default (600s) was far shorter than the typical refresh interval
+        // (1800s–604800s), so every dataset's records evaporated ~10 minutes
+        // after each refresh and stayed gone until the next one — up to an
+        // hour for the flagship interbank dataset, a week for some HKMA feeds.
+        // That made /records, /cite, and /unprecedentedness return 502 for
+        // most of each refresh cycle. Only set a non-zero TTL if you
+        // deliberately want records to expire between refreshes (e.g. a memory
+        //-constrained single-node where you'd rather 502 than hold the data).
+        let mut builder = Cache::builder().max_capacity(max_entries);
+        if ttl_secs > 0 {
+            builder = builder.time_to_live(std::time::Duration::from_secs(ttl_secs));
+        }
+        let records = builder.build();
         Self {
             records,
             registry: RwLock::new(HashMap::new()),
@@ -145,11 +159,23 @@ impl RecordStore for MemoryStore {
         limit: usize,
     ) -> Result<RecordPage> {
         let limit = limit.clamp(1, 500);
+        // D-031 defense-in-depth: if the cache is cold (fresh boot before the
+        // first fetch completes, LRU eviction under memory pressure, or an
+        // explicit non-zero TTL that has lapsed), return an honest empty page
+        // rather than a 502. The records endpoint is read-only and browse-
+        // oriented; "we have 0 rows cached right now" is a recoverable,
+        // non-fatal state — the ingest supervisor will repopulate on the next
+        // refresh tick. The prior 502 crashed the dashboard's record drill-
+        // down, the divergence explorer, and the unprecedentedness comparator.
         let Some(entry) = self.records.get(dataset_id).await else {
-            return Err(Error::Store(format!(
-                "no records cached for {}/{}",
-                dataset_id.source, dataset_id.dataset
-            )));
+            return Ok(RecordPage {
+                source: dataset_id.source,
+                dataset: dataset_id.dataset.clone(),
+                total: 0,
+                offset,
+                limit,
+                records: Vec::new(),
+            });
         };
         let total = entry.records.len();
         let page: Vec<NormalizedRecord> = entry
@@ -177,9 +203,16 @@ impl RecordStore for MemoryStore {
         dataset_id: &DatasetId,
         ids: &[String],
     ) -> Result<Vec<NormalizedRecord>> {
+        // Unlike `get_page`, a cache miss here is a real error: the cite
+        // manifest hashes the returned records, so silently returning an empty
+        // set would produce a wrong hash and falsely claim "reproduces as of
+        // {ts}". Surface it as `StoreUnavailable` (mapped to 503, retryable)
+        // rather than the prior generic `Store` (502) so the cite drawer can
+        // tell the user "data temporarily unavailable, retry" instead of
+        // showing an internal-error toast.
         let Some(entry) = self.records.get(dataset_id).await else {
-            return Err(Error::Store(format!(
-                "no records cached for {}/{}",
+            return Err(Error::StoreUnavailable(format!(
+                "records for {}/{} are not cached (refresh in progress or cache cold); retry shortly",
                 dataset_id.source, dataset_id.dataset
             )));
         };

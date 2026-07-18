@@ -251,6 +251,20 @@ fn derive_threshold(insight: &Insight) -> Option<f64> {
     None
 }
 
+/// Record_ids that detectors emit as `EvidenceRef.record_id` but that are
+/// **not** rows in the source dataset — they carry a detector-derived value in
+/// `evidence.value` (a median, a threshold line, a joined history blob). See
+/// `analysis.rs`: `"series"` (MAD baseline median), `"threshold"` (a watch
+/// line), `"joined_history"` (proxy-divergence companion series).
+///
+/// `get_by_ids` for these will (correctly) return nothing — they aren't
+/// records. The cite route uses this set to tell "a real evidence record went
+/// missing from the cache" (a partial set, which must NOT be silently hashed)
+/// from "this evidence ref is a derived-value marker" (expected, fine). (A-003.)
+pub fn is_synthetic_evidence_id(record_id: &str) -> bool {
+    matches!(record_id, "series" | "threshold" | "joined_history")
+}
+
 /// Compute the SHA-256 content hash over the evidence + the records it points
 /// into. This is the drift-detection anchor: recompute against current data and
 /// compare.
@@ -299,8 +313,39 @@ fn evidence_hash(evidence: &[EvidenceRef], records: &[hkgov_common::NormalizedRe
 /// so two semantically-equal values hash identically regardless of key order.
 fn canonical_json_string(value: &serde_json::Value) -> String {
     let canonical = canonicalize(value);
-    // serde_json::to_string is stable for our canonicalized (sorted-key) form.
-    serde_json::to_string(&canonical).unwrap_or_else(|_| "null".into())
+    // serde_json::to_string is stable for our canonicalized (sorted-key) form
+    // for finite numbers. Non-finite f64 (NaN/+inf/-inf) would serialize as
+    // `null` by default, silently collapsing three distinct values into one in
+    // the hash — so we canonicalize them to distinct tagged strings first.
+    // (A-007.)
+    canonical_value_to_string(&canonical)
+}
+
+/// Like `serde_json::to_string`, but renders non-finite f64 as distinct tagged
+/// strings (`"__nan__"`, `"__inf__"`, `"__ninf__"`) instead of collapsing them
+/// to `null`. Finite values, ints, bools, strings, arrays, and objects use the
+/// normal serde_json form. This keeps the reproducibility hash honest: a
+/// corrupt `NaN` upstream value hashes differently from a genuine `null` or
+/// from `+inf`, so the drift detector still fires. (A-007.)
+fn canonical_value_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                if f.is_nan() {
+                    return "\"__nan__\"".into();
+                }
+                if f.is_infinite() {
+                    return if f > 0.0 {
+                        "\"__inf__\"".into()
+                    } else {
+                        "\"__ninf__\"".into()
+                    };
+                }
+            }
+            serde_json::to_string(value).unwrap_or_else(|_| "null".into())
+        }
+        _ => serde_json::to_string(value).unwrap_or_else(|_| "null".into()),
+    }
 }
 
 /// Recursively sort object keys so the hash is order-independent.
@@ -325,11 +370,16 @@ fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
 }
 
 /// Stringify a record's numeric fields in a canonical (sorted) form for hashing.
+///
+/// `RecordValue::Float` is rendered via [`canonical_f64`] rather than
+/// `serde_json::to_string`, which maps NaN/Infinity to `null` — collapsing
+/// three distinct values into one hash bucket and breaking the drift detector.
+/// (A-007.)
 fn canonical_record_values(rec: &hkgov_common::NormalizedRecord) -> String {
     let mut pairs: Vec<(&str, String)> = rec
         .fields
         .iter()
-        .map(|(k, v)| (k.as_str(), serde_json::to_string(v).unwrap_or_default()))
+        .map(|(k, v)| (k.as_str(), canonical_record_value_string(v)))
         .collect();
     pairs.sort();
     pairs
@@ -337,6 +387,35 @@ fn canonical_record_values(rec: &hkgov_common::NormalizedRecord) -> String {
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join(";")
+}
+
+/// Stable, NaN/Inf-safe string form of a [`RecordValue`] for hashing. Finite
+/// floats use `serde_json`'s shortest-round-trip form (stable within a major
+/// version); non-finite floats get distinct tags so they don't collapse to the
+/// same hash as `Null`. (A-007.)
+fn canonical_record_value_string(v: &hkgov_common::RecordValue) -> String {
+    use hkgov_common::RecordValue;
+    match v {
+        RecordValue::Float(f) => canonical_f64(*f),
+        _ => serde_json::to_string(v).unwrap_or_default(),
+    }
+}
+
+/// Canonical string for an f64 that distinguishes NaN / +Inf / -Inf from each
+/// other and from any finite value, instead of serde_json's silent `null`.
+fn canonical_f64(f: f64) -> String {
+    if f.is_nan() {
+        "\"__nan__\"".into()
+    } else if f.is_infinite() {
+        if f > 0.0 {
+            "\"__inf__\"".into()
+        } else {
+            "\"__ninf__\"".into()
+        }
+    } else {
+        // Shortest-round-trip form; stable within a serde_json major version.
+        serde_json::to_string(&f).unwrap_or_else(|_| "null".into())
+    }
 }
 
 /// A short, display-friendly prefix of a SHA-256 (first 12 hex chars).
@@ -569,5 +648,69 @@ mod tests {
         let bib = c.render(CitationFormat::Bibtex);
         // Key should be hkp2026seriesjumphkmaxabc-ish (alphanumeric only).
         assert!(bib.starts_with("@misc{hkp2026"));
+    }
+
+    // ---- A-007: NaN/Inf f64 values must not collapse to the same hash as ----
+    // ---- Null or each other in the reproducibility manifest.              ----
+    //
+    // serde_json maps NaN, +Inf, and -Inf all to `null`. Without the canonical
+    // form, a record whose value drifted from `1.0` to `NaN` (an upstream
+    // connector bug) would hash identically to a record whose value was
+    // deleted (Null) — the drift detector would never fire on the corruption.
+
+    #[test]
+    fn canonical_f64_distinguishes_nan_inf_finite_and_null() {
+        // The four non-finite / empty cases must each hash distinctly.
+        assert_ne!(canonical_f64(f64::NAN), canonical_f64(f64::INFINITY));
+        assert_ne!(canonical_f64(f64::NAN), canonical_f64(f64::NEG_INFINITY));
+        assert_ne!(
+            canonical_f64(f64::INFINITY),
+            canonical_f64(f64::NEG_INFINITY)
+        );
+        // And none of them may equal the canonical form of a Null record value.
+        let null_str = canonical_record_value_string(&RecordValue::Null);
+        assert_ne!(canonical_f64(f64::NAN), null_str);
+        assert_ne!(canonical_f64(f64::INFINITY), null_str);
+        // A finite value must still use serde_json's normal form.
+        assert_eq!(canonical_f64(1.5), "1.5");
+    }
+
+    #[test]
+    fn manifest_hash_detects_drift_to_nan() {
+        // A record value changing from a finite number to NaN is a data
+        // corruption the manifest must catch — not silently hash as Null.
+        let ins = insight("id1", "series_jump", false);
+        let original = build_citation(&ins, &records(), "https://x", None);
+        let mut corrupted = records();
+        // Drift 2026-04-15's value 2.0 → NaN (e.g. an upstream divide-by-zero).
+        corrupted[1]
+            .fields
+            .insert("rate".into(), RecordValue::Float(f64::NAN));
+        let corrupted_citation = build_citation(&ins, &corrupted, "https://x", None);
+        assert_ne!(
+            original.manifest.data_sha256, corrupted_citation.manifest.data_sha256,
+            "drift from 2.0 to NaN must change the hash (A-007)"
+        );
+    }
+
+    #[test]
+    fn manifest_hash_distinguishes_nan_from_inf() {
+        // Two different corruptions (NaN vs +Inf) must hash differently, so a
+        // reviewer can tell which kind of corruption occurred.
+        let ins = insight("id1", "series_jump", false);
+        let mut nan_recs = records();
+        nan_recs[1]
+            .fields
+            .insert("rate".into(), RecordValue::Float(f64::NAN));
+        let mut inf_recs = records();
+        inf_recs[1]
+            .fields
+            .insert("rate".into(), RecordValue::Float(f64::INFINITY));
+        let nan_c = build_citation(&ins, &nan_recs, "https://x", None);
+        let inf_c = build_citation(&ins, &inf_recs, "https://x", None);
+        assert_ne!(
+            nan_c.manifest.data_sha256, inf_c.manifest.data_sha256,
+            "NaN and +Inf must hash differently (A-007)"
+        );
     }
 }

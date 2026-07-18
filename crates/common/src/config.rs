@@ -125,7 +125,15 @@ impl Default for CacheSettings {
     fn default() -> Self {
         Self {
             max_entries: 200_000,
-            ttl_secs: 600,
+            // D-031: 0 = no time-based eviction. Records stay cached until the
+            // ingest supervisor refreshes them on each dataset's declared
+            // cadence (or `max_entries` evicts by LRU under pressure). The
+            // prior 600s default was shorter than every refresh interval, so
+            // records evaporated between refreshes and /records, /cite, and
+            // /unprecedentedness returned 502 for most of each cycle. Set a
+            // non-zero value only if you want records to expire between
+            // refreshes (e.g. memory-constrained single-node).
+            ttl_secs: 0,
         }
     }
 }

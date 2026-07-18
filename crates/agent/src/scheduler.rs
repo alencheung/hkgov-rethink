@@ -106,18 +106,37 @@ async fn collect_all_records(store: &Arc<MemoryStore>, id: &DatasetId) -> Vec<No
     let mut all = Vec::new();
     let mut offset = 0usize;
     loop {
-        let Ok(page) = store.get_page(id, offset, 500).await else {
-            break;
-        };
-        if page.records.is_empty() {
-            break;
+        match store.get_page(id, offset, 500).await {
+            Ok(page) => {
+                if page.records.is_empty() {
+                    break;
+                }
+                let len = page.records.len();
+                all.extend(page.records);
+                if len < 500 {
+                    break;
+                }
+                offset += len;
+            }
+            // A-009: a mid-pagination error (transient DB fault on a pg/redis
+            // backend; not reachable on MemoryStore after D-031) must NOT be
+            // silently indistinguishable from "no more pages" — that would let
+            // a partial dataset feed the detectors as if it were complete. Log
+            // it so the partial result is observable, then stop paging (the
+            // A-004 cold-cache warn at the caller will flag a suspiciously
+            // small/empty result against the registry count).
+            Err(e) => {
+                tracing::warn!(
+                    source = %id.source,
+                    dataset = %id.dataset,
+                    offset = offset,
+                    error = %e,
+                    "get_page errored mid-pagination; collected {} records so far (A-009)",
+                    all.len()
+                );
+                break;
+            }
         }
-        let len = page.records.len();
-        all.extend(page.records);
-        if len < 500 {
-            break;
-        }
-        offset += len;
     }
     tracing::debug!(
         dataset = %id.dataset,
@@ -125,6 +144,44 @@ async fn collect_all_records(store: &Arc<MemoryStore>, id: &DatasetId) -> Vec<No
         "loaded records for detection"
     );
     all
+}
+
+/// D-031/A-004: when `collect_all_records` returns nothing, distinguish "the
+/// dataset genuinely has no records" from "the cache is cold (refresh in flight
+/// / LRU or TTL eviction) for a dataset the registry says should have rows".
+/// The production scheduler path silently produced zero findings in the latter
+/// case — indistinguishable from "ran, nothing fired" — so the Silence Index
+/// quietly read zero through a cold window with no log line to alert an
+/// operator. This mirrors the `data_available` logic the D-032 fix added to
+/// the signal-preview path. Returns `false` only when the cache is cold for a
+/// dataset that should have records; `true` otherwise (legitimately empty,
+/// unknown dataset, or non-empty result).
+async fn data_available(store: &Arc<MemoryStore>, id: &DatasetId, collected: usize) -> bool {
+    if collected > 0 {
+        return true;
+    }
+    // Mirror signal.rs:collect_all_records_for_preview. The registry's persisted
+    // record_count survives TTL eviction (D-029), so a registry count > 0 with
+    // an empty cache is a reliable cold-cache signal.
+    match store.meta(id).await {
+        Ok(Some(m)) => m.record_count == 0,
+        _ => true, // unknown dataset — don't raise a false alarm
+    }
+}
+
+/// Log a distinguishable warn when a detector skipped a target because the
+/// cache was cold (vs. genuinely empty). (A-004.)
+async fn warn_if_cold(store: &Arc<MemoryStore>, id: &DatasetId, collected: usize, detector: &str) {
+    if !data_available(store, id, collected).await {
+        tracing::warn!(
+            source = %id.source,
+            dataset = %id.dataset,
+            detector = detector,
+            "agent: cache cold for registered dataset — produced 0 findings this tick; \
+             this is NOT 'nothing fired', the data was unavailable (refresh in flight / eviction). \
+             Silence Index / insights for this source may read low this cycle (A-004)"
+        );
+    }
 }
 
 async fn run_pass(
@@ -217,6 +274,10 @@ async fn run_one_target(
 
     let records = collect_all_records(store, &id).await;
     if records.is_empty() {
+        // A-004: distinguish "nothing fired" from "cache cold, couldn't
+        // evaluate". Without this log line a cold-cache tick silently
+        // produced zero findings, and the Silence Index quietly read low.
+        warn_if_cold(store, &id, records.len(), &target.detector).await;
         return Vec::new();
     }
     let Some(field) = target.field.as_deref() else {
@@ -393,6 +454,15 @@ async fn run_cross_source_gap(
         })
         .collect();
     if press_dates.is_empty() {
+        // A-004: cold-cache warn — a registered press feed returning nothing
+        // is almost always a cold cache, not "no press releases exist".
+        warn_if_cold(
+            store,
+            &press_id,
+            press_records.len(),
+            "cross_source_gap/press",
+        )
+        .await;
         return Vec::new();
     }
 
@@ -400,6 +470,13 @@ async fn run_cross_source_gap(
     // "YYYY-MM" depending on the dataset). Page through ALL records.
     let data_id = DatasetId::new(comp_source, &companion.dataset);
     let data_records = collect_all_records(store, &data_id).await;
+    if data_records.is_empty() {
+        // A-004: an empty data side yields a vacuous "every press date is a
+        // gap" finding that would max the Silence Index on noise — refuse to
+        // run, and surface whether it was cold cache vs genuinely empty.
+        warn_if_cold(store, &data_id, 0, "cross_source_gap/data").await;
+        return Vec::new();
+    }
     let data_dates: Vec<String> = data_records.iter().map(|r| r.record_id.clone()).collect();
 
     // Cadence-aware period coercion. Press releases carry daily "YYYY-MM-DD"
@@ -468,6 +545,27 @@ async fn run_proxy_divergence(
     let primary = collect_all_records(store, &DatasetId::new(source, &target.dataset)).await;
     let companion_recs =
         collect_all_records(store, &DatasetId::new(comp_source, &companion.dataset)).await;
+    // A-004: proxy_divergence needs both sides. If either is empty because the
+    // cache is cold, log distinguishably rather than silently returning zero
+    // findings (the detector returns empty on empty inputs with no signal).
+    if primary.is_empty() {
+        warn_if_cold(
+            store,
+            &DatasetId::new(source, &target.dataset),
+            0,
+            "proxy_divergence/primary",
+        )
+        .await;
+    }
+    if companion_recs.is_empty() {
+        warn_if_cold(
+            store,
+            &DatasetId::new(comp_source, &companion.dataset),
+            0,
+            "proxy_divergence/companion",
+        )
+        .await;
+    }
 
     let threshold = target.threshold.unwrap_or(0.0);
     detect_proxy_divergence(
@@ -526,6 +624,26 @@ async fn run_benchmark_deviation(
     let actual = collect_all_records(store, &DatasetId::new(source, &target.dataset)).await;
     let benchmarks =
         collect_all_records(store, &DatasetId::new(bench_source, &bench_ref.dataset)).await;
+    // A-004: benchmark_deviation needs both sides; warn distinguishably on a
+    // cold cache instead of silently producing zero findings.
+    if actual.is_empty() {
+        warn_if_cold(
+            store,
+            &DatasetId::new(source, &target.dataset),
+            0,
+            "benchmark_deviation/actual",
+        )
+        .await;
+    }
+    if benchmarks.is_empty() {
+        warn_if_cold(
+            store,
+            &DatasetId::new(bench_source, &bench_ref.dataset),
+            0,
+            "benchmark_deviation/benchmark",
+        )
+        .await;
+    }
 
     let threshold = target.threshold.unwrap_or(0.0);
     detect_benchmark_deviation(
@@ -700,6 +818,133 @@ mod tests {
         let llm = Arc::new(HeuristicClient::new());
 
         run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        assert_eq!(insights.count().await, 0);
+    }
+
+    // ---- A-004: the scheduler must distinguish a cold cache (registered,  ----
+    // ---- had records, now evicted) from a genuinely-empty dataset, so an  ----
+    // ---- operator can tell "couldn't evaluate this tick" from "nothing    ----
+    // ---- fired". Before the fix, both paths silently returned 0 findings. ----
+    #[tokio::test]
+    async fn data_available_distinguishes_cold_cache_from_genuinely_empty() {
+        // A 1s TTL lets us evict on demand (wait + touch) without holding the
+        // test for long. ttl_secs=0 would disable eviction entirely.
+        let store = Arc::new(MemoryStore::new(100, 1));
+
+        // Registered + previously populated, then evicted ⇒ cold cache.
+        let cold_id = DatasetId::new(DataSource::Hkma, "cold-dataset");
+        store
+            .register(
+                cold_id.clone(),
+                "Cold Dataset".into(),
+                None,
+                3600,
+                hkgov_common::Category::Monetary,
+                vec!["t".into()],
+                hkgov_common::Cadence::Daily,
+            )
+            .await;
+        store
+            .put_dataset(&cold_id, vec![rec("2026-01", "v", 1.0)])
+            .await
+            .unwrap();
+        // Let the TTL lapse + touch to trigger lazy eviction.
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let _ = store.meta(&cold_id).await;
+
+        // Registered but never populated ⇒ genuinely empty.
+        let empty_id = DatasetId::new(DataSource::Hkma, "empty-dataset");
+        store
+            .register(
+                empty_id.clone(),
+                "Empty Dataset".into(),
+                None,
+                3600,
+                hkgov_common::Category::Monetary,
+                vec!["t".into()],
+                hkgov_common::Cadence::Daily,
+            )
+            .await;
+
+        // Never-registered ⇒ unknown (treated as available to avoid false alarms).
+        let unknown_id = DatasetId::new(DataSource::Hkma, "never-registered");
+
+        // Collected == 0 in all three cases (cache empty for cold + empty; no
+        // entry for unknown). The tri-state is what A-004 makes observable.
+        assert!(
+            !data_available(&store, &cold_id, 0).await,
+            "cold cache (registered + had records + evicted) must report data_available=false"
+        );
+        assert!(
+            data_available(&store, &empty_id, 0).await,
+            "genuinely empty dataset must report data_available=true"
+        );
+        assert!(
+            data_available(&store, &unknown_id, 0).await,
+            "unknown dataset must report data_available=true (lenient)"
+        );
+        // Sanity: a populated dataset reports available.
+        let warm_id = DatasetId::new(DataSource::Hkma, "warm-dataset");
+        store
+            .register(
+                warm_id.clone(),
+                "Warm".into(),
+                None,
+                3600,
+                hkgov_common::Category::Monetary,
+                vec!["t".into()],
+                hkgov_common::Cadence::Daily,
+            )
+            .await;
+        store
+            .put_dataset(&warm_id, vec![rec("2026-01", "v", 1.0)])
+            .await
+            .unwrap();
+        assert!(
+            data_available(&store, &warm_id, 1).await,
+            "populated dataset must report data_available=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_pass_cold_cache_produces_zero_findings_without_panic() {
+        // A-004 smoke: a registered-but-evicted dataset must not panic or hang
+        // the pass; it produces zero findings (the warn is logged, not asserted
+        // here — tracing asserts are out of scope for this unit test).
+        let scan = vec![ScanTarget {
+            source: "hkma".into(),
+            dataset: "daily-interbank-liquidity".into(),
+            detector: "series_jump".into(),
+            field: Some("hibor_overnight".into()),
+            threshold: Some(50.0),
+            ..Default::default()
+        }];
+        let settings = settings_with_scan(scan);
+        let store = Arc::new(MemoryStore::new(100, 1));
+        let id = DatasetId::new(DataSource::Hkma, "daily-interbank-liquidity");
+        store
+            .register(
+                id.clone(),
+                "Daily Interbank Liquidity".into(),
+                None,
+                3600,
+                hkgov_common::Category::Monetary,
+                vec!["hibor".into()],
+                hkgov_common::Cadence::Daily,
+            )
+            .await;
+        store
+            .put_dataset(&id, vec![rec("2026-01", "hibor_overnight", 1.0)])
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let _ = store.meta(&id).await; // evict
+
+        let insights = Arc::new(InsightStore::new());
+        let llm = Arc::new(HeuristicClient::new());
+        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        // Zero findings is correct (no data to evaluate); the point of A-004 is
+        // the *log line*, not a behavior change. The pass must still complete.
         assert_eq!(insights.count().await, 0);
     }
 
