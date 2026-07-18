@@ -243,8 +243,11 @@ mod tests {
         // hasn't fired yet. Update the data NOW so the single coalesced write
         // must pick up "updated".
         data.write().await.name = "updated".into();
-        // Wait well past the debounce + write.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // D-030: wait well past the debounce + write. The previous 300ms was
+        // too tight under concurrent test load on Windows (tokio scheduler
+        // latency pushed the debounce task past the window). 1s gives a wide
+        // margin while keeping the test fast.
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         let restored: Sample = restore_from_file(&path)
             .await
             .expect("snapshot was written");

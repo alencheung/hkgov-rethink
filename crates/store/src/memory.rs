@@ -15,6 +15,16 @@ use tokio::sync::RwLock;
 
 /// Titles/descriptions are registered once per dataset by the ingest layer;
 /// counts and refresh timestamps are updated by `put_dataset`.
+///
+/// D-029 fix: `last_record_count` and `last_refreshed_at` are persisted here
+/// (in the registry, which is NOT subject to the record cache's TTL) so the
+/// catalog's `record_count` survives a record-cache eviction. Before this,
+/// `record_count` was derived live from the moka cache — so once the TTL
+/// (default 600s) elapsed and the entry was evicted, `/v1/sources` showed 0
+/// records for every dataset until the next refresh (24h for datagovhk). The
+/// live cache count is still preferred when present (it reflects an in-flight
+/// refresh); the persisted count is the fallback that keeps the catalog honest
+/// between refreshes.
 #[derive(Debug, Clone, Default)]
 struct RegisteredMeta {
     title: String,
@@ -23,6 +33,11 @@ struct RegisteredMeta {
     category: Category,
     tags: Vec<String>,
     cadence: Cadence,
+    /// Persisted count from the last successful `put_dataset`. Survives
+    /// record-cache TTL expiry (D-029).
+    last_record_count: usize,
+    /// Persisted timestamp of the last successful `put_dataset`.
+    last_refreshed_at: Option<DateTime<Utc>>,
 }
 
 /// One cached dataset: its records plus the timestamp of the last `put_dataset`.
@@ -68,7 +83,13 @@ impl MemoryStore {
         tags: Vec<String>,
         cadence: Cadence,
     ) {
-        self.registry.write().await.insert(
+        let mut registry = self.registry.write().await;
+        // D-029: preserve the persisted count/timestamp across a re-register
+        // (ingest re-registers every dataset on each boot). Dropping them here
+        // would reset the catalog to 0 until the first fetch completes.
+        let preserved_count = registry.get(&id).map(|m| m.last_record_count).unwrap_or(0);
+        let preserved_last = registry.get(&id).and_then(|m| m.last_refreshed_at);
+        registry.insert(
             id,
             RegisteredMeta {
                 title,
@@ -77,6 +98,8 @@ impl MemoryStore {
                 category,
                 tags,
                 cadence,
+                last_record_count: preserved_count,
+                last_refreshed_at: preserved_last,
             },
         );
     }
@@ -90,6 +113,7 @@ impl RecordStore for MemoryStore {
         records: Vec<NormalizedRecord>,
     ) -> Result<()> {
         let now = Utc::now();
+        let count = records.len();
         // Single atomic publish: records + refreshed_at land together, so a
         // concurrent reader cannot observe new records with an old timestamp.
         let entry = CacheEntry {
@@ -97,6 +121,15 @@ impl RecordStore for MemoryStore {
             refreshed_at: now,
         };
         self.records.insert(dataset_id.clone(), entry).await;
+        // D-029: persist the count + timestamp in the registry so the catalog
+        // stays correct after the record cache's TTL evicts the entry.
+        {
+            let mut registry = self.registry.write().await;
+            if let Some(meta) = registry.get_mut(dataset_id) {
+                meta.last_record_count = count;
+                meta.last_refreshed_at = Some(now);
+            }
+        }
         tracing::debug!(
             source = %dataset_id.source,
             dataset = %dataset_id.dataset,
@@ -165,8 +198,13 @@ impl RecordStore for MemoryStore {
             return Ok(None);
         };
         let entry = self.records.get(dataset_id).await;
-        let count = entry.as_ref().map(|e| e.records.len()).unwrap_or(0);
-        let last = entry.as_ref().map(|e| e.refreshed_at);
+        // D-029: prefer the live cache count when present (reflects an in-flight
+        // refresh); fall back to the persisted count so the catalog stays
+        // correct after the record cache's TTL evicts the entry.
+        let (count, last) = match &entry {
+            Some(e) => (e.records.len(), Some(e.refreshed_at)),
+            None => (static_meta.last_record_count, static_meta.last_refreshed_at),
+        };
         Ok(Some(DatasetMeta {
             source: dataset_id.source,
             dataset: dataset_id.dataset.clone(),
@@ -195,8 +233,11 @@ impl RecordStore for MemoryStore {
         let mut out = Vec::new();
         for (id, static_meta) in snapshot {
             let entry = self.records.get(&id).await;
-            let count = entry.as_ref().map(|e| e.records.len()).unwrap_or(0);
-            let last = entry.as_ref().map(|e| e.refreshed_at);
+            // D-029: same live-then-persisted fallback as `meta()`.
+            let (count, last) = match &entry {
+                Some(e) => (e.records.len(), Some(e.refreshed_at)),
+                None => (static_meta.last_record_count, static_meta.last_refreshed_at),
+            };
             out.push(DatasetMeta {
                 source: id.source,
                 dataset: id.dataset.clone(),

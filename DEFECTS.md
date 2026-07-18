@@ -32,6 +32,12 @@
 | D-022 | 🟡 low | `funding` tab missing from boot hash-route whitelist (`#funding` cold load → overview) | F-067 | ✅ fixed + verified |
 | D-023 | 🟡 low | `signal_id` omitted cadence/comparison/field_b/companion/join_field → distinct signals collided + overwrote | F-020 | ✅ fixed + verified (+ 5 regression tests) |
 | D-024 | 🟡 low | `series_jump` default-threshold magic literal `25.0` undocumented across 3 dispatch sites | F-041–F-043 | ✅ fixed + verified (named constant, no behavior change) |
+| D-025 | 🟠 high | `/ask` heuristic matcher returns wrong dataset when question contains stop-words ("what is the interbank liquidity?") | F-056 | ✅ fixed + verified (+ 2 regression tests) |
+| D-026 | 🔴 critical | data.gov.hk catalog widened: 20 datasets return 0 records (incl. money-lenders-licensees, the documented flagship) — API returns 422 "Not a valid resource" | F-098 | ✅ fixed + verified (+ 1 regression test) |
+| D-027 | 🟠 high | Dashboard `DEFAULT_API_BASE` hardcoded to a specific Railway URL — API-served `/dashboard` deploy silently points at remote prod unless a port is in the URL | F-112 | ✅ fixed + verified |
+| D-028 | 🟡 low | Dashboard per-user tabs (signals/cases) show "no signals"/"no cases" on a 401 instead of prompting sign-in (misleading empty state) | F-141,F-143 | ✅ fixed + verified |
+| D-029 | 🔴 critical | `record_count` derived live from the TTL-bound moka cache → after 600s TTL all datasets show 0 records until next refresh (24h for datagovhk); breaks catalog + silence index + `/ready` | F-005,F-024,F-004 | ✅ fixed + verified (+ 1 regression test) |
+| D-030 | 🟠 medium | Flaky `persist::tests::debounced_snapshot_coalesces` — 100ms debounce + 300ms wait too tight under concurrent test load on Windows | F-155 | ✅ fixed (widened wait window) |
 
 > **Third independent re-audit (D-006 → D-011).** A fresh, from-scratch QA cycle
 > was run with **no assumption** the prior audit (D-001 → D-005) was complete. It
@@ -824,6 +830,134 @@ the `trend_break` work and the Python v7/v8 expansion — could not have seen.
   **No behavior change** — the value stays 25.0; it is now named and centralized.
 - **Verification:** existing D-006 regression tests (which assert 25.0 behavior)
   still pass unchanged; `cargo clippy -D warnings` clean.
+
+---
+
+## D-025 — `/ask` heuristic matcher returns wrong dataset on stop-word contamination
+
+- **Stories:** F-056 (`POST /v1/ask` heuristic mode)
+- **Severity:** high — the primary zero-config Q&A path returns the wrong
+  dataset for the most natural phrasings
+- **Observed (live, 192-dataset catalog):**
+  - `POST /ask {"question":"what is the interbank liquidity?"}` → returned
+    `hotlines-auth-retailbanks-rep` (29 records) instead of the interbank
+    dataset (1000 records). Confidence 0.5 (a "match").
+  - `POST /ask {"question":"what is hibor?"}` → returned `list-of-cmu-members`
+    instead of any interbank dataset.
+- **Expected:** the dataset whose title/name/source actually contains the
+  question's content tokens wins.
+- **Root cause:** `heuristic_answer` (`qa.rs:23`) scored every dataset by
+  counting how many **individual** question tokens appear as substrings in
+  `source+dataset+title`. With ~190 datasets, stop-words ("what", "is", "the")
+  matched many unrelated titles and tied the real match; the tie-break
+  (`sort_by_key` on `Reverse(score)` — unstable for equal keys) then picked
+  whichever dataset came first in the list. The unit test passed only because
+  it used a 1-dataset store where no tie was possible.
+- **Fix:** (1) strip English stop-words + tokens ≤2 chars before scoring
+  (`qa.rs` `STOP_WORDS` + `is_stop_word`); (2) add `tags` to the haystack so a
+  domain term present only in tags (e.g. `hibor`) still matches.
+- **Verification:** live — `what is the interbank liquidity?` now returns the
+  interbank dataset; `hibor` now matches via tags. Unit tests
+  `d025_stopwords_do_not_let_distractor_win` (multi-dataset, distractor with
+  stop-word "the") + `d025_is_stop_word_filters_common_words`.
+
+## D-026 — data.gov.hk: 20 resources return 422 "Not a valid resource" (upstream de-registration)
+
+- **Stories:** F-098 (data.gov.hk connector), F-005 (catalog)
+- **Severity:** critical — the documented flagship dataset
+  (`money-lenders-licensees`, F-031 in the old tracker) is dead, and 19 others
+  with it; they registered as 0-record ghosts polluting `/v1/sources`.
+- **Observed (live boot log):** `ingest: fetch failed source=datagovhk
+  dataset="money-lenders-licensees" error=upstream error for datagovhk: 422:
+  {"code":"422","message":"Not a valid resource"}` — for 20 of the 33
+  registered datagovhk resources. Direct probes against
+  `api.data.gov.hk/v2/filter` confirmed each returns 422 (the platform
+  de-registered the PSI URLs).
+- **Expected:** the catalog lists only resources that actually return data.
+- **Root cause:** upstream drift — the data.gov.hk platform de-registered 20
+  PSI resource URLs. The connector table (`datagovhk.rs RESOURCES`) still
+  listed them, so they registered eagerly and sat at 0 records forever.
+- **Fix:** removed the 20 confirmed-dead resources from `RESOURCES`, keeping
+  the 12 probe-verified-alive ones. Updated the `resource_table_is_well_formed`
+  minimum (30 → 12) and replaced `money_lenders_resource_preserved` with
+  `d026_dead_resources_removed` (a guard that the dead slugs stay out).
+- **Verification:** live — `/v1/sources?source=datagovhk` now lists 12
+  datasets, all with records >0; no dead slug present.
+
+## D-027 — Dashboard `DEFAULT_API_BASE` hardcoded to a specific Railway URL
+
+- **Stories:** F-112 (Base URL + API key config)
+- **Severity:** high — a self-served `/dashboard` deploy silently points the
+  browser at a *different* host's API.
+- **Observed:** `dashboard/api.js` had
+  `const DEFAULT_API_BASE = 'https://hkgov-rethink-production.up.railway.app';`
+  and `boot.js` only auto-filled the base when `location.port` was truthy.
+  Production deploys on standard ports (80/443) have an empty `location.port`,
+  so the auto-fill was skipped and the hardcoded Railway URL was used —
+  meaning a local/Docker/Railway-direct dashboard fetched data from the remote
+  production API.
+- **Expected:** a dashboard served by hkgov-api uses same-origin by default.
+- **Fix:** `DEFAULT_API_BASE = ''` (same-origin fallback); `boot.js` now
+  auto-fills the page's own origin for any http(s) page (no port requirement).
+  A split deploy still overrides via the header input / localStorage.
+- **Verification:** served `/api.js` shows empty default; `/boot.js` fills
+  origin unconditionally.
+
+## D-028 — Dashboard per-user tabs show misleading "empty" on a 401
+
+- **Stories:** F-141 (signals list), F-143 (cases list)
+- **Severity:** low (UX) — the tabs read "no signals yet" / "no cases yet"
+  even when the real reason is an unauthenticated session.
+- **Observed:** `loadSignals`/`loadCases` treated any `getJSON` error
+  (including a 401) as "no data" and rendered the empty-state. A user with no
+  session saw "no signals yet — create one above" even though the create
+  action would also 401.
+- **Expected:** a 401 surfaces a "sign in to view…" message distinct from a
+  genuinely empty list.
+- **Fix:** both functions now check `list.__error === 401` first and render
+  `auth_needed_signals` / `auth_needed_cases` (added to i18n, EN + zh-HK).
+- **Verification:** served `/features.js` shows the 401 branch; i18n keys
+  present (4).
+
+## D-029 — `record_count` derived from the TTL-bound cache → catalog goes to 0 after TTL
+
+- **Stories:** F-005 (`/v1/sources`), F-024 (silence index), F-004 (`/ready`)
+- **Severity:** critical — the entire catalog, the flagship silence index, and
+  the readiness probe all depend on `record_count`, which silently became 0
+  for every dataset 600s after boot (and stayed 0 until the next 24h refresh
+  for datagovhk).
+- **Observed (live):** `/v1/sources` showed 13 datagovhk datasets with records
+  immediately after warm; ~10 min later (TTL expiry) the same query showed 0
+  records for all of them. `is_degraded` (which gates `/ready`) would flip to
+  degraded even though the data had been fetched successfully.
+- **Root cause:** `MemoryStore::meta`/`list` (`memory.rs`) derived
+  `record_count` live from `self.records.get(&id)` — the moka cache, which
+  evicts entries after `ttl_secs` (default 600s). The registry (which holds
+  titles/categories/tags and is NOT TTL-bound) did not store the count, so
+  eviction reset the count to 0.
+- **Fix:** added `last_record_count` + `last_refreshed_at` to `RegisteredMeta`
+  (persisted in the registry, survives TTL eviction); `put_dataset` updates
+  them atomically; `meta`/`list` prefer the live cache count but fall back to
+  the persisted count when the entry has been evicted. `register` preserves
+  them across a re-register (ingest re-registers on each boot).
+- **Verification:** unit test `record_count_survives_cache_ttl_eviction`
+  (1s TTL + invalidate → count still 3). Live: catalog stable across a TTL
+  cycle.
+
+## D-030 — Flaky `persist::tests::debounced_snapshot_coalesces`
+
+- **Stories:** F-155 (store persistence)
+- **Severity:** medium (test reliability) — the test failed intermittently
+  under concurrent test load on Windows, breaking CI confidence.
+- **Observed:** `panicked at crates\agent\src\persist.rs:250:14: snapshot was
+  written` — the debounced write did not land within the 300ms wait.
+- **Root cause:** the test armed 10 schedules over ~20ms, then waited 300ms
+  for a 100ms-debounce write to complete. Under concurrent test load the tokio
+  scheduler could delay the debounce task past the 300ms window.
+- **Fix:** widened the post-arm wait from 300ms to 1000ms — a wide margin
+  that keeps the test fast (~1s) while tolerating scheduler latency.
+- **Verification:** the test passes consistently in isolation and under full
+  workspace concurrency.
 
 
 

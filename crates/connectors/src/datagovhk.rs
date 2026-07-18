@@ -72,109 +72,16 @@ fn normalize_resource_url(url: &str) -> String {
 
 /// The verified data.gov.hk resource table. Every `resource_url` here was
 /// confirmed to return data via `api.data.gov.hk/v2/filter` (see module docs).
+///
+/// D-026 fix: 20 previously-listed resources now return
+/// `{"code":"422","message":"Not a valid resource"}` — the platform
+/// de-registered their PSI URLs. They are removed so the catalog no longer
+/// carries 0-record ghost entries. The 13 resources below were probe-verified
+/// ALIVE on 2026-07-17 (each returns a non-empty row array). If the platform
+/// re-registers a removed resource, re-add its row — the connector code is
+/// unchanged.
 const RESOURCES: &[DataGovResource] = &[
-    // --- hk-cr (Companies Registry; 11 resources) ---
-    DataGovResource {
-        slug: "money-lenders-licensees",
-        title: "Money Lenders Licensees (Companies Registry)",
-        resource_url: "http://www.cr.gov.hk/datagovhk/psi/ml_licensees.csv",
-        category: Category::Fiscal,
-        tags: &["money-lenders", "licensing", "companies-registry"],
-        cadence: Cadence::Daily,
-        id_field: Some("MLR_No"),
-    },
-    DataGovResource {
-        slug: "cr-prosecution-records",
-        title: "Statistics Data on Prosecution (Companies Registry)",
-        resource_url: "http://www.cr.gov.hk/datagovhk/psi/conviction_record.csv",
-        category: Category::Fiscal,
-        tags: &["companies-registry", "prosecution", "business-statistics"],
-        cadence: Cadence::Monthly,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "cr-non-compliance-change-name",
-        title: "Non-Compliance with Directions to Change/Replace Company Names (Companies Registry)",
-        resource_url: "http://www.cr.gov.hk/datagovhk/psi/replace_name.csv",
-        category: Category::Fiscal,
-        tags: &["companies-registry", "business-statistics"],
-        cadence: Cadence::Daily,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "cr-stat-companies-on-register",
-        title: "Statistical Data on Local Companies Registered on the Companies Register",
-        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_01.csv",
-        category: Category::Fiscal,
-        tags: &["companies-registry", "business-statistics"],
-        cadence: Cadence::Monthly,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "cr-stat-companies-incorporated",
-        title: "Statistical Data on Local Companies Incorporated",
-        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_02.csv",
-        category: Category::Fiscal,
-        tags: &["companies-registry", "business-statistics"],
-        cadence: Cadence::Monthly,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "cr-stat-non-hk-companies",
-        title: "Statistical Data on Registered Non-Hong Kong Companies",
-        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_03.csv",
-        category: Category::Fiscal,
-        tags: &["companies-registry", "business-statistics"],
-        cadence: Cadence::Monthly,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "cr-stat-dissolutions",
-        title: "Statistical Data on Dissolution (Companies Registry)",
-        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_04.csv",
-        category: Category::Fiscal,
-        tags: &["companies-registry", "business-statistics"],
-        cadence: Cadence::Monthly,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "cr-stat-liquidations",
-        title: "Statistical Data on Liquidations (Companies Registry)",
-        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_05.csv",
-        category: Category::Fiscal,
-        tags: &["companies-registry", "business-statistics"],
-        cadence: Cadence::Monthly,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "cr-stat-documents-delivered",
-        title: "Statistical Data on Documents Delivered for Registration (Companies Registry)",
-        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_06.csv",
-        category: Category::Fiscal,
-        tags: &["companies-registry", "business-statistics"],
-        cadence: Cadence::Monthly,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "cr-stat-charges-discharge",
-        title: "Statistical Data on Charges/Memorandum of Discharge Delivered for Registration",
-        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_07.csv",
-        category: Category::Fiscal,
-        tags: &["companies-registry", "business-statistics"],
-        cadence: Cadence::Monthly,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "cr-stat-company-searches",
-        title: "Statistics Data on Searches on Image Records of Documents (Companies Registry)",
-        resource_url: "http://www.cr.gov.hk/datagovhk/psi/statistics_08.csv",
-        category: Category::Fiscal,
-        tags: &["companies-registry", "business-statistics"],
-        cadence: Cadence::Monthly,
-        id_field: None,
-    },
-
-    // --- hk-dh (Department of Health / Centre for Health Protection; 5 resources) ---
+    // --- hk-dh (Department of Health / Centre for Health Protection) ---
     DataGovResource {
         slug: "dh-covid-active-quarantine-orders",
         title: "Active Quarantine Orders (COVID-19, Cap. 599C) — Centre for Health Protection",
@@ -182,33 +89,6 @@ const RESOURCES: &[DataGovResource] = &[
         category: Category::Livability,
         tags: &["health", "public-health", "covid-19"],
         cadence: Cadence::Daily,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "dh-gastroenteritis-viruses-2013",
-        title: "Detection of Gastroenteritis Viruses from Faecal Specimens (2013)",
-        resource_url: "http://www.chp.gov.hk/files/misc/detection_of_gastroenteritis_viruses_from_faecal_specimens_in_2013_en.csv",
-        category: Category::Livability,
-        tags: &["health", "public-health", "laboratory-surveillance"],
-        cadence: Cadence::Unknown,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "dh-respiratory-pathogens-2014",
-        title: "Detection of Pathogens from Respiratory Specimens (2014)",
-        resource_url: "http://www.chp.gov.hk/files/misc/detection_of_influenza_viruses_in_respiratory_specimens_in_2014_en.csv",
-        category: Category::Livability,
-        tags: &["health", "public-health", "laboratory-surveillance"],
-        cadence: Cadence::Unknown,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "dh-influenza-subtyping-2014",
-        title: "Influenza Virus Subtyping (2014)",
-        resource_url: "http://www.chp.gov.hk/files/misc/influenza_virus_subtyping_in_2014_en.csv",
-        category: Category::Livability,
-        tags: &["health", "public-health", "laboratory-surveillance"],
-        cadence: Cadence::Unknown,
         id_field: None,
     },
     DataGovResource {
@@ -221,29 +101,11 @@ const RESOURCES: &[DataGovResource] = &[
         id_field: None,
     },
 
-    // --- hk-csd (Correctional Services Department; 6 resources) ---
+    // --- hk-csd (Correctional Services Department) ---
     DataGovResource {
         slug: "csd-chronology-history",
         title: "Chronology of CSD's Development and Penal Measures of Hong Kong",
         resource_url: "https://www.csd.gov.hk/datagovhk/About_Us_History_EN.csv",
-        category: Category::Government,
-        tags: &["correctional-services", "statistics"],
-        cadence: Cadence::Unknown,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "csd-approved-hand-in-articles",
-        title: "Approved Hand-in Articles (Correctional Services)",
-        resource_url: "http://www.csd.gov.hk/datagovhk/Approved_Hand_in_articles_EN.csv",
-        category: Category::Government,
-        tags: &["correctional-services", "statistics"],
-        cadence: Cadence::Daily,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "csd-institution-information",
-        title: "Correctional Institutions Information",
-        resource_url: "http://www.csd.gov.hk/datagovhk/PSI_Institution_information_EN.csv",
         category: Category::Government,
         tags: &["correctional-services", "statistics"],
         cadence: Cadence::Unknown,
@@ -277,7 +139,7 @@ const RESOURCES: &[DataGovResource] = &[
         id_field: None,
     },
 
-    // --- hk-ofca (Office of the Communications Authority; 4 resources) ---
+    // --- hk-ofca (Office of the Communications Authority) ---
     DataGovResource {
         slug: "ofca-carrier-licensees",
         title: "List of Carrier Licensees (OFCA)",
@@ -305,17 +167,8 @@ const RESOURCES: &[DataGovResource] = &[
         cadence: Cadence::Daily,
         id_field: None,
     },
-    DataGovResource {
-        slug: "ofca-radio-dealer-unrestricted-licensees",
-        title: "List of Radio Dealer (Unrestricted) Licensees (OFCA)",
-        resource_url: "https://www.ofca.gov.hk/filemanager/ofca/common/datagovhk/xru_en.csv",
-        category: Category::Government,
-        tags: &["telecommunications", "licensing", "ofca"],
-        cadence: Cadence::Daily,
-        id_field: None,
-    },
 
-    // --- hk-edb (Education Bureau; 3 resources) ---
+    // --- hk-edb (Education Bureau) ---
     DataGovResource {
         slug: "edb-curriculum-development-council-members",
         title: "Membership of Curriculum Development Council (Education Bureau)",
@@ -344,27 +197,7 @@ const RESOURCES: &[DataGovResource] = &[
         id_field: None,
     },
 
-    // --- hktramways (2 resources) ---
-    DataGovResource {
-        slug: "tramways-main-routes",
-        title: "Hong Kong Tramways Main Routes",
-        resource_url: "http://static.data.gov.hk/tramways/datasets/main_routes/tramways_main_routes_en.csv",
-        category: Category::Livability,
-        tags: &["transport", "tram", "routes"],
-        cadence: Cadence::Unknown,
-        id_field: None,
-    },
-    DataGovResource {
-        slug: "tramways-tram-stops",
-        title: "Hong Kong Tramways Tram Stops",
-        resource_url: "http://static.data.gov.hk/tramways/datasets/tram_stops/summary_tram_stops_en.csv",
-        category: Category::Livability,
-        tags: &["transport", "tram", "stops"],
-        cadence: Cadence::Unknown,
-        id_field: None,
-    },
-
-    // --- hk-wsd (Water Supplies Department; 1 resource) ---
+    // --- hk-wsd (Water Supplies Department) ---
     DataGovResource {
         slug: "wsd-annual-fresh-water-supply",
         title: "Annual Quantity of Fresh Water Supply (Water Supplies Department)",
@@ -372,17 +205,6 @@ const RESOURCES: &[DataGovResource] = &[
         category: Category::Livability,
         tags: &["water-supply", "wsd"],
         cadence: Cadence::Annual,
-        id_field: None,
-    },
-
-    // --- centaline (1 resource) ---
-    DataGovResource {
-        slug: "centaline-cci-estates",
-        title: "Property Information of the CCI Constituent Estates (Centaline)",
-        resource_url: "http://hk.centanet.com/opendata/CCI%20Estate%20for%20Opendata.csv",
-        category: Category::Property,
-        tags: &["property", "price-index", "centaline"],
-        cadence: Cadence::Daily,
         id_field: None,
     },
 ];
@@ -672,10 +494,12 @@ mod tests {
 
     #[test]
     fn resource_table_is_well_formed() {
-        // Regression guard: every row is unique + URL is a verified PSI path.
+        // D-026: 20 dead resources removed; 12 verified-alive remain (probed
+        // 2026-07-17). Guard against accidental further drift.
         assert!(
-            RESOURCES.len() >= 30,
-            "datagovhk resource count drifted below the verified set"
+            RESOURCES.len() >= 12,
+            "datagovhk resource count drifted below the verified-alive set: {}",
+            RESOURCES.len()
         );
         let mut seen = std::collections::HashSet::new();
         for r in RESOURCES {
@@ -687,8 +511,6 @@ mod tests {
             assert!(
                 r.resource_url.contains("/datagovhk/")
                     || r.resource_url.contains("/files/misc/")
-                    || r.resource_url.contains("static.data.gov.hk/tramways")
-                    || r.resource_url.contains("centanet.com/opendata")
                     || r.resource_url.contains("/filemanager/ofca/"),
                 "resource URL for {} is not on a verified PSI path: {}",
                 r.slug,
@@ -698,13 +520,40 @@ mod tests {
     }
 
     #[test]
-    fn money_lenders_resource_preserved() {
-        // The original v1 resource must still be present with its id field.
-        let r = RESOURCES
-            .iter()
-            .find(|r| r.slug == "money-lenders-licensees")
-            .expect("money-lenders-licensees must remain registered");
-        assert_eq!(r.id_field, Some("MLR_No"));
+    fn d026_dead_resources_removed() {
+        // D-026 regression guard: these resources return 422 "Not a valid
+        // resource" upstream and must NOT be registered (they create 0-record
+        // ghost entries in the catalog). If the platform re-registers one,
+        // re-add it to RESOURCES and remove its slug from this list.
+        const DEAD: &[&str] = &[
+            "money-lenders-licensees",
+            "cr-prosecution-records",
+            "cr-non-compliance-change-name",
+            "cr-stat-companies-on-register",
+            "cr-stat-companies-incorporated",
+            "cr-stat-non-hk-companies",
+            "cr-stat-dissolutions",
+            "cr-stat-liquidations",
+            "cr-stat-documents-delivered",
+            "cr-stat-charges-discharge",
+            "cr-stat-company-searches",
+            "dh-gastroenteritis-viruses-2013",
+            "dh-respiratory-pathogens-2014",
+            "dh-influenza-subtyping-2014",
+            "csd-approved-hand-in-articles",
+            "csd-institution-information",
+            "ofca-radio-dealer-unrestricted-licensees",
+            "tramways-main-routes",
+            "tramways-tram-stops",
+            "centaline-cci-estates",
+        ];
+        for slug in DEAD {
+            assert!(
+                !RESOURCES.iter().any(|r| r.slug == *slug),
+                "D-026: dead resource {} must not be registered (returns 422 upstream)",
+                slug
+            );
+        }
     }
 
     #[test]
