@@ -314,4 +314,55 @@ mod tests {
         let page = store.get_page(&id, 0, 10).await.unwrap();
         assert_eq!(page.records.len(), 1);
     }
+
+    // ---- D-029: record_count must survive a record-cache TTL eviction ----
+    //
+    // Before the fix, `record_count` was derived live from the moka cache, so
+    // once the TTL elapsed the entry was evicted and `/v1/sources` showed 0
+    // records for every dataset until the next refresh — breaking the catalog,
+    // the silence index, and `is_degraded`/`/ready`. The persisted count in the
+    // registry (not subject to TTL) is now the fallback.
+    #[tokio::test]
+    async fn record_count_survives_cache_ttl_eviction() {
+        // A 1-second TTL so the eviction happens within the test.
+        let store = MemoryStore::new(100, 1);
+        let id = DatasetId::new(DataSource::Hkma, "d029");
+        register_test(&store, &id).await;
+        store
+            .put_dataset(
+                &id,
+                vec![
+                    make_record("2026-01", 1.0),
+                    make_record("2026-02", 2.0),
+                    make_record("2026-03", 3.0),
+                ],
+            )
+            .await
+            .unwrap();
+
+        // Immediately: live count is 3.
+        let meta = store.meta(&id).await.unwrap().unwrap();
+        assert_eq!(meta.record_count, 3);
+
+        // Wait past the TTL so moka evicts the entry.
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        // moka evicts lazily: a `get` past the TTL returns None and removes the
+        // entry. `meta()` performs that get internally, so the persisted count
+        // fallback is what the catalog now reports.
+        let _ = store.meta(&id).await; // touch → trigger lazy eviction
+
+        // D-029: the catalog must still report 3 (persisted), not 0 (evicted).
+        let meta_after = store.meta(&id).await.unwrap().unwrap();
+        assert_eq!(
+            meta_after.record_count, 3,
+            "record_count must survive cache TTL eviction (D-029); got {}",
+            meta_after.record_count
+        );
+        assert!(meta_after.last_refreshed_at.is_some());
+
+        // And /v1/sources (list) agrees.
+        let listed = store.list(None).await.unwrap();
+        let entry = listed.iter().find(|m| m.dataset == "d029").unwrap();
+        assert_eq!(entry.record_count, 3);
+    }
 }

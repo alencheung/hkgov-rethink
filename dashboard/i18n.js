@@ -66,6 +66,8 @@
         // cases page
         cases_h2:'Drill-in investigations', cases_p:'Saved, resumable, shareable case files. Launch one from any insight\'s Investigate button, or open one below to continue the step-through workspace.',
         cases_none:'no cases yet — open an insight on Overview and click "Investigate"',
+        auth_needed_signals:'sign in to view your signals (POST /v1/auth/request-token, then /v1/auth/redeem, then send the session as a Bearer header)',
+        auth_needed_cases:'sign in to view your cases (POST /v1/auth/request-token, then /v1/auth/redeem, then send the session as a Bearer header)',
         // investigation workspace (inv-* keys; were raw English literals in the innerHTML template).
         inv_seed_insight:'Seed insight:', inv_guided_steps:'guided next steps:',
         inv_chip_related:'related series', inv_chip_parallels:'historical parallels', inv_chip_cross:'cross-source check',
@@ -231,6 +233,8 @@
         // cases page
         cases_h2:'深入調查', cases_p:'已儲存、可恢復、可分享的個案檔案。從任何洞察的「調查」按鈕啟動，或於下方開啟以繼續逐步工作區。',
         cases_none:'尚無個案 — 在概覽頁打開洞察並按「調查」',
+        auth_needed_signals:'請登入以查看您的訊號（POST /v1/auth/request-token，再 /v1/auth/redeem，然後以 Bearer 標頭傳送工作階段）',
+        auth_needed_cases:'請登入以查看您的個案（POST /v1/auth/request-token，再 /v1/auth/redeem，然後以 Bearer 標頭傳送工作階段）',
         // 調查工作區（inv-* 索引鍵；原先為 innerHTML 範本中的原始英文字串）。
         inv_seed_insight:'種子洞察：', inv_guided_steps:'引導式下一步：',
         inv_chip_related:'相關數列', inv_chip_parallels:'歷史對照', inv_chip_cross:'跨源核對',

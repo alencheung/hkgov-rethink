@@ -1,6 +1,15 @@
     // ============ boot ============
     async function loadAll(){ persistConfig(); await loadHealthQuiet(); await Promise.all([loadSilence(), loadTimeline(), loadBrief(), loadInsights()]); renderDegradedBanner(); renderReturnBanner(); loadSignals(); loadCases(); updateAgentStrip(allInsights.length, cachedHealth); }
-    if(location.protocol.startsWith('http')&&location.port){ document.getElementById('baseUrl').value=`${location.protocol}//${location.host}`; }
+    // D-027 fix: default the base URL to the SAME ORIGIN that served this page
+    // whenever it was served over http(s). The prior condition required a
+    // truthy `location.port`, which is empty on standard ports (80/443) — so a
+    // production API-served `/dashboard` deploy silently fell back to the
+    // hardcoded `DEFAULT_API_BASE` (a specific Railway URL) and pointed the
+    // browser at a *different* host. Same-origin (empty base) is correct for
+    // any deploy where hkgov-api serves the dashboard itself (local dev, the
+    // Docker image, or a Railway/cloud deploy visited directly). A separately-
+    // hosted dashboard still overrides via the header input or localStorage.
+    if(location.protocol.startsWith('http')){ document.getElementById('baseUrl').value=`${location.protocol}//${location.host}`; }
     restoreConfig();
     applyI18n(); // translate chrome to the restored/browser language on first paint
     const initTab=(location.hash||'').replace('#','').split('/')[0];

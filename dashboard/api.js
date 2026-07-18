@@ -1,14 +1,17 @@
     // ============ connection + persistence ============
     const LS_BASE='hkgov.base', LS_KEY='hkgov.key', LS_READ='hkgov.read', LS_LAST='hkgov.lastvisit', LS_SEEN='hkgov.seenids', LS_LANG='hkgov.lang', LS_ONBOARD='hkgov.onboard.dismissed';
-    // Default upstream API origin for the SPLIT deploy (dashboard on Netlify,
-    // API on Railway/elsewhere). Empty = same-origin, which is correct when the
-    // API serves the dashboard itself (local dev, the Docker image, or a
-    // Railway deploy visited directly). Set this to the API's public origin
-    // (no trailing slash) ONLY when the dashboard is hosted separately, e.g.
+    // Default upstream API origin. D-027 fix: empty = same-origin, which is
+    // correct whenever hkgov-api serves the dashboard itself (local dev, the
+    // Docker image, or a Railway/cloud deploy visited directly at its own
+    // host). The boot script pre-fills the base input with the page's own
+    // origin, so this constant is only a last-resort fallback for an empty
+    // input. For the SPLIT deploy (dashboard on Netlify, API elsewhere) set
+    // this to the API's public origin (no trailing slash), e.g.
     //   const DEFAULT_API_BASE = 'https://hkgov-rethink.up.railway.app';
-    // A user's saved base (localStorage) or the header input always wins over
-    // this, so it never traps anyone.
-    const DEFAULT_API_BASE = 'https://hkgov-rethink-production.up.railway.app';
+    // A user's saved base (localStorage) or the header input always wins.
+    // Leaving it empty avoids silently pointing a self-served dashboard at a
+    // hard-coded third-party host.
+    const DEFAULT_API_BASE = '';
     function api() {
       // Empty base = same-origin (the deployed dashboard's own host). Override
       // via the header input to point at a separately-hosted hkgov-api instance.
