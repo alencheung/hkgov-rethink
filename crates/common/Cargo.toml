@@ -25,6 +25,6 @@ url.workspace = true
 
 # OTel (optional), pinned to the 0.27 line.
 opentelemetry = { version = "0.27", optional = true }
-opentelemetry-stdout = { version = "0.27", optional = true }
+opentelemetry-stdout = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.27", optional = true }
 tracing-opentelemetry = { version = "0.28", optional = true }
