@@ -218,13 +218,19 @@ mod tests {
 
     #[tokio::test]
     async fn memory_store_empty_dataset() {
+        // D-031: an uncached (or evicted) dataset must return an honest empty
+        // page, not a Store error. The prior 502-on-cold-cache broke /records,
+        // /cite, /unprecedentedness, and the dashboard whenever the moka TTL
+        // lapsed between refreshes. The records endpoint is browse-oriented;
+        // "we have 0 rows right now" is recoverable and non-fatal.
         let store = MemoryStore::new(1000, 300);
         let id = DatasetId::new(DataSource::Hkma, "uncached");
-        let err = store.get_page(&id, 0, 10).await.unwrap_err();
-        assert!(
-            matches!(err, hkgov_common::Error::Store(_)),
-            "expected Store error for uncached dataset"
-        );
+        let page = store
+            .get_page(&id, 0, 10)
+            .await
+            .expect("cold cache returns an empty page, not an error (D-031)");
+        assert_eq!(page.total, 0);
+        assert!(page.records.is_empty());
     }
 
     #[tokio::test]
@@ -364,5 +370,105 @@ mod tests {
         let listed = store.list(None).await.unwrap();
         let entry = listed.iter().find(|m| m.dataset == "d029").unwrap();
         assert_eq!(entry.record_count, 3);
+    }
+
+    // ---- D-031: records must survive between refreshes; cold cache must ----
+    // ---- degrade gracefully, not 502                                  ----
+    //
+    // Before the fix, the records cache had a fixed 600s TTL that was shorter
+    // than every dataset's refresh interval (1800s–604800s). So records
+    // evaporated ~10 min after each refresh and stayed gone until the next one
+    // — up to an hour for the flagship interbank dataset, a week for some HKMA
+    // feeds. `get_page` returned `Error::Store` (→ 502) for that whole window,
+    // breaking /records, /cite, /unprecedentedness, and the dashboard's record
+    // drill-down. Two-part fix:
+    //   1. ttl_secs=0 disables time-based eviction (staleness is already
+    //      bounded by the per-dataset refresh interval).
+    //   2. `get_page` degrades to an honest empty page on a cold cache instead
+    //      of 502; `get_by_ids` (cite manifest) returns `StoreUnavailable`
+    //      (→ 503, retryable) because an empty set there would produce a wrong
+    //      manifest hash.
+    #[tokio::test]
+    async fn ttl_zero_disables_time_based_eviction() {
+        // ttl_secs=0 must NOT evict by time: the entry stays resident past any
+        // wall-clock wait (bounded only by max_capacity LRU). This is the
+        // invariant that keeps records available between refreshes.
+        let store = MemoryStore::new(100, 0);
+        let id = DatasetId::new(DataSource::Hkma, "d031-ttl");
+        register_test(&store, &id).await;
+        store
+            .put_dataset(&id, vec![make_record("r1", 1.0), make_record("r2", 2.0)])
+            .await
+            .unwrap();
+
+        // Wait long enough that a 1s TTL would have evicted.
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let _ = store.meta(&id).await; // touch → would trigger lazy eviction if TTL were set
+
+        let page = store.get_page(&id, 0, 10).await.unwrap();
+        assert_eq!(
+            page.records.len(),
+            2,
+            "ttl_secs=0 must keep records resident (D-031); got {}",
+            page.records.len()
+        );
+        assert_eq!(page.total, 2);
+    }
+
+    #[tokio::test]
+    async fn get_page_returns_empty_page_on_cold_cache() {
+        // A dataset registered but never populated (or evicted under LRU/TTL
+        // pressure): get_page must return an honest empty page (total: 0),
+        // NOT a 502. The records endpoint is browse-oriented and "we have 0
+        // rows right now" is a recoverable, non-fatal state.
+        let store = MemoryStore::new(100, 0);
+        let id = DatasetId::new(DataSource::Hkma, "d031-cold");
+        register_test(&store, &id).await;
+        // No put_dataset — cache is cold for this id.
+
+        let page = store
+            .get_page(&id, 0, 10)
+            .await
+            .expect("get_page on a cold cache must return an empty page, not an error (D-031)");
+        assert_eq!(page.total, 0);
+        assert!(page.records.is_empty());
+        assert_eq!(page.source, DataSource::Hkma);
+        assert_eq!(page.dataset, "d031-cold");
+    }
+
+    #[tokio::test]
+    async fn get_by_ids_errors_on_cold_cache() {
+        // The cite manifest hashes the returned records, so an empty set on a
+        // cold cache would produce a wrong hash (falsely claiming "reproduces
+        // as of {ts}"). get_by_ids must therefore surface a retryable
+        // StoreUnavailable error (→ 503) rather than silently returning [].
+        let store = MemoryStore::new(100, 0);
+        let id = DatasetId::new(DataSource::Hkma, "d031-byid");
+        register_test(&store, &id).await;
+        // Register a non-zero count so this dataset is known to have data.
+        store
+            .put_dataset(&id, vec![make_record("r1", 1.0)])
+            .await
+            .unwrap();
+        // Now evict via a short TTL + wait + touch.
+        drop(store);
+        let store = MemoryStore::new(100, 1);
+        register_test(&store, &id).await;
+        store
+            .put_dataset(&id, vec![make_record("r1", 1.0)])
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let _ = store.meta(&id).await; // trigger lazy eviction
+
+        let res = store.get_by_ids(&id, &["r1".to_string()]).await;
+        assert!(
+            matches!(res, Err(hkgov_common::Error::StoreUnavailable(_))),
+            "get_by_ids on a cold cache must return StoreUnavailable (D-031); got {:?}",
+            res
+        );
+        // And it maps to 503, not 502.
+        let code = res.unwrap_err().status_code();
+        assert_eq!(code, 503, "StoreUnavailable must map to 503 (D-031)");
     }
 }

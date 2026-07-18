@@ -38,6 +38,10 @@
 | D-028 | 🟡 low | Dashboard per-user tabs (signals/cases) show "no signals"/"no cases" on a 401 instead of prompting sign-in (misleading empty state) | F-141,F-143 | ✅ fixed + verified |
 | D-029 | 🔴 critical | `record_count` derived live from the TTL-bound moka cache → after 600s TTL all datasets show 0 records until next refresh (24h for datagovhk); breaks catalog + silence index + `/ready` | F-005,F-024,F-004 | ✅ fixed + verified (+ 1 regression test) |
 | D-030 | 🟠 medium | Flaky `persist::tests::debounced_snapshot_coalesces` — 100ms debounce + 300ms wait too tight under concurrent test load on Windows | F-155 | ✅ fixed (widened wait window) |
+| D-031 | 🔴 critical | Records cache TTL (600s) shorter than every refresh interval (1800s–604800s) → `/records`, `/cite`, `/unprecedentedness` return 502 for ~97% of each cycle; flagship cite-manifest reproducibility broken | F-015,F-029,F-033,F-073,F-124,F-125,F-130,F-132,F-137,F-139,F-144 | ✅ fixed + verified (+ 4 regression tests) |
+| D-032 | 🟠 medium | Signal preview silently returns `count:0` (no findings) when records cache is cold — misleading "never fires" instead of "couldn't evaluate right now" | F-043 | ✅ fixed + verified (`data_available` field) |
+| D-033 | 🔴 high | Dashboard has no auth UI — per-user features (signals, cases, silence-watch) all 401 from the browser; prior copy told users to hand-craft curl to `/v1/auth/request-token` + `/v1/auth/redeem` | F-123,F-139–F-144 | ✅ fixed + verified (in-page magic-link sign-in) |
+| D-034 | 🟡 low | FEATURES_TRACKER F-111 spec claimed hash format `#page-<tab>`; actual (and boot.js-verified) format is `#<tab>` — doc/external-link guidance wrong | F-111 | ✅ fixed (tracker corrected) |
 
 > **Third independent re-audit (D-006 → D-011).** A fresh, from-scratch QA cycle
 > was run with **no assumption** the prior audit (D-001 → D-005) was complete. It
@@ -958,6 +962,173 @@ the `trend_break` work and the Python v7/v8 expansion — could not have seen.
   that keeps the test fast (~1s) while tolerating scheduler latency.
 - **Verification:** the test passes consistently in isolation and under full
   workspace concurrency.
+
+---
+
+> **Fourth independent QA cycle (D-031 → D-034).** A fresh end-to-end pass was
+> run with the live server (172 sources, 500 insights, all 7 connectors warm)
+> and a Playwright headless dashboard harness. It re-verified every prior fix
+> still held, then enumerated every user-facing story against the running
+> binary + the rendered dashboard. Four new defects surfaced — one critical
+> availability regression in the records path (D-031), one silent-failure in
+> signal preview (D-032), the long-standing missing dashboard auth UI (D-033,
+> formerly waived as D-018), and a tracker-doc mismatch (D-034). All four are
+> fixed below; full per-story trace in `phase2_results.json` (regenerated each
+> cycle, gitignored).
+
+## D-031 — Records cache TTL (600s) shorter than every refresh interval → `/records`, `/cite`, `/unprecedentedness` 502 for ~97% of each cycle
+
+- **Stories:** F-015 (records), F-029 (unprecedentedness), F-033 (cite bundle),
+  F-073 (evidence pointers), F-124 (timeline), F-125 (comparator), F-130
+  (evidence rendered), F-132 (cite drawer), F-137 (divergence explorer),
+  F-139 (signal preview), F-144 (investigation Q&A) — every read path that
+  touches the record cache.
+- **Severity:** critical — the flagship Cite-It reproducibility manifest
+  (`/cite`) and the unprecedentedness comparator were unreachable for most of
+  each refresh cycle, and the dashboard's record drill-down/cite drawer
+  showed a blank or 502 toast. This is the highest-impact defect found this
+  cycle: it silently invalidated the project's "evidence you can verify"
+  promise whenever a reader happened to land in the eviction window.
+- **Observed (live):** immediately after warm, `/v1/datasets/hkma/daily-
+  figures-interbank-liquidity/records?limit=5` → 200 (total 1000). ~10 minutes
+  later (moka TTL 600s elapsed, dataset refresh 3600s) the same call →
+  `502 {"error":{"kind":"store","message":"internal server error"}}`. A
+  15-dataset random sample returned 502 for **all 15**. `/cite` and
+  `/unprecedentedness` were 502 too. The headless dashboard captured 224
+  console 502s during a single load (the comparator fires one per clicked
+  value). The dataset's *metadata* still reported `record_count: 1000`
+  (D-029 fix held for the catalog) — only the records themselves were gone.
+- **Root cause:** the record vectors live in a `moka::Cache` with
+  `time_to_live(600s)` (`memory.rs:65`), but each dataset's ingest refresh
+  interval is far longer — 1800s (1), 3600s (11), 21600s/6h (125, the HKMA
+  majority), 86400s (32), 604800s/7d (3). So records evaporated ~10 min
+  after each refresh and stayed gone until the next one: up to 50 min for the
+  flagship interbank dataset, ~5h50m for most HKMA feeds, ~7d for a few. The
+  D-029 fix made the catalog's `record_count` survive this gap (by persisting
+  the count in the non-TTL'd registry) but left the records path returning
+  `Error::Store` → 502 for the same gap. Staleness was already bounded by the
+  refresh interval; the TTL added nothing but an availability hole.
+- **Fix (two-part):**
+  1. **Config root cause.** `ttl_secs` default changed 600 → 0
+     (`config.rs::CacheSettings`, `config.toml`, `MemoryStore::new`). 0 now
+     means "no time-based eviction" — the `time_to_live` builder call is
+     skipped entirely when `ttl_secs == 0` (moka treats `Some(Duration::ZERO)`
+     ambiguously, so the build-time skip is the safe formulation). Records
+     stay resident until the ingest supervisor refreshes them on schedule, or
+     `max_entries` (200k) evicts by LRU under pressure. This is the invariant
+     the system always wanted: staleness bounded by refresh cadence, memory
+     bounded by capacity.
+  2. **Defense-in-depth.** `get_page` now returns an honest empty page
+     (`total:0, records:[]`) on a cold cache instead of `Error::Store` → 502,
+     so fresh-boot, LRU pressure, or an operator-set non-zero TTL can't crash
+     browse-oriented callers. `get_by_ids` (the cite manifest path) keeps an
+     error because an empty evidence set would produce a *wrong* manifest hash
+     — but it now returns the new `Error::StoreUnavailable` (mapped to a
+     retryable **503**, not 502) with a clear client message, so the cite
+     drawer can say "data temporarily unavailable, retry" instead of showing
+     an internal-error toast. `/unprecedentedness` likewise surfaces 503 when
+     the cache is cold for a dataset the registry reports as having data
+     (rather than silently scoring against empty history and producing a
+     misleading "no historical data" band). The dashboard's cite drawer,
+     comparator, and signal preview all render a "data temporarily
+     unavailable — retry shortly" notice on 503.
+- **Verification (Phase 4):**
+  - Unit: `ttl_zero_disables_time_based_eviction`,
+    `get_page_returns_empty_page_on_cold_cache`,
+    `get_by_ids_errors_on_cold_cache` (store), and
+    `unprecedentedness_cold_cache_returns_store_unavailable` (api) — 4 new
+    regression tests.
+  - Live: records endpoint stayed 200/total=1000 across +60s/+90s/+120s
+    probes (the prior build 502'd at +600s); `/cite` and `/unprecedentedness`
+    200 immediately after warm and remain 200; a fresh cold-cache dataset
+    returns a 200 empty page (not 502).
+  - Dashboard: the 224 console 502s observed in Phase 2 dropped to 0 in
+    Phase 4 (`F-NO-CONSOLE-ERRORS` passes).
+
+## D-032 — Signal preview silently returns `count:0` when the records cache is cold
+
+- **Stories:** F-043 (signal preview)
+- **Severity:** medium — a user previewing a signal during the eviction window
+  saw "0 findings over 90 days" and reasonably concluded the signal would
+  never fire, when in fact the detector had no data to evaluate.
+- **Observed (live):** during the D-031 eviction window,
+  `POST /v1/signals/preview` returned `200 {count:0, findings:[]}` for a
+  `series_jump` watch that demonstrably fires (it returned 22 findings once
+  records were resident). The `collect_all_records_for_preview` loop `break`ed
+  on the first `get_page` error and the detector ran over an empty vector.
+- **Root cause:** graceful degradation hiding a real problem — the preview
+  loader treated any `get_page` error as "end of pagination" and returned
+  whatever it had (nothing), so the detector scored zero records and reported
+  zero findings with no flag that data was missing.
+- **Fix:** `SignalPreview` carries a new `data_available: bool` field
+  (defaults `true` for back-compat). `collect_all_records_for_preview` now
+  returns `(records, data_available)`; when the collected set is empty it
+  checks the registry's persisted `record_count` — if the dataset *should*
+  have records, `data_available=false`. The dashboard's `previewSignal` shows
+  "data temporarily unavailable — retry shortly to see real findings" when
+  `count===0 && data_available===false`, instead of the misleading "0
+  findings". (With D-031 fixed, the cold-cache case is now rare — this is the
+  honest signal for when it does occur, e.g. fresh boot before first fetch.)
+- **Verification (Phase 4):** live `POST /v1/signals/preview` response now
+  includes `data_available:true` when records are resident; the dashboard
+  harness confirms the preview renders findings. The cold-cache branch is
+  unit-covered by the `data_available` logic + the D-031 store regressions.
+
+## D-033 — Dashboard has no authentication UI (formerly D-018, waived)
+
+- **Stories:** F-123 (watch silence index), F-139–F-144 (signals builder,
+  list, toggle, delete, dispatch log; cases list, investigation workspace).
+  Every per-user dashboard behaviour was unreachable from the browser.
+- **Severity:** high (UX) — the per-user tier is a documented v1 feature with
+  full API + Python-client support, but the dashboard — the primary human
+  surface — had no way to obtain a session. The prior copy literally
+  instructed users to "POST /v1/auth/request-token, then /v1/auth/redeem,
+  then send the session as a Bearer header" by hand. D-018 documented this
+  and waived it as "missing feature, not a smallest-fix defect"; this cycle's
+  mandate ("fix every logistical error or ux error") puts it in scope.
+- **Observed (live):** every per-user tab showed the auth-needed empty state;
+  the signal builder's Save button alerted a generic error on the 401; the
+  silence-index Watch button 401'd silently. A user could not, from the
+  browser, save a single signal or open a single case.
+- **Fix:** an in-page magic-link sign-in flow.
+  - `dashboard/api.js`: `getJSON`/`postJSON`/`fetchText` now attach
+    `Authorization: Bearer {session}` from `sessionStorage` (or `localStorage`
+    for the pasted-link path) when a session is present.
+  - `dashboard/index.html`: a `Sign in` badge in the header opens a modal
+    with an email field + "Send sign-in link" button. When the server returns
+    the token inline (`dev_return_auth_token`, dev/CI), it auto-redeems; in
+    production (token delivered out-of-band) a manual paste field accepts
+    either a bare token or the full magic-link URL. A signed-in state shows
+    the user's email + a Sign-out button.
+  - `dashboard/features.js`: `openAuth`/`sendAuthLink`/`redeemAuthToken`/
+    `signOut`/`refreshAuthModal`; `saveSignal` now opens the auth modal on
+    401 instead of a generic alert; the per-user empty states gained a "Sign
+    in" button next to the message.
+  - `dashboard/i18n.js`: full EN + zh-HK strings for the auth flow.
+- **Verification (Phase 4):** the headless dashboard harness drives the full
+  flow end-to-end — open modal → enter email → send link → auto-redeem →
+  header flips to the user's email → signals tab loads without the auth wall.
+  A separate browser test created a real signal via the builder post-auth
+  (`POST /v1/signals` → 200; re-GET shows the created signal), proving the
+  entire per-user write path is now reachable from the dashboard. Four new
+  harness checks (`F-033-auth-button`, `-modal-opens`, `-signin-flow`,
+  `-signals-load`) all pass.
+
+## D-034 — FEATURES_TRACKER F-111 spec claimed hash format `#page-<tab>`; actual is `#<tab>`
+
+- **Stories:** F-111 (hash routing + tabs) — documentation/external-link
+  guidance only; no code behaviour change.
+- **Severity:** low — anyone copying the documented hash format into a
+  bookmark, external link, or the `boot.js` init-tab whitelist would get a
+  no-op (the dashboard would load overview instead of the intended tab).
+- **Observed (live):** clicking the Divergences tab sets `location.hash` to
+  `#divergence`, not `#page-divergence`. The tracker row F-111 asserted the
+  latter. `boot.js:15-16` reads `location.hash.replace('#','')` and matches
+  against bare tab names, confirming `#<tab>` is the intended and implemented
+  format. The tracker was simply wrong.
+- **Fix:** tracker row F-111 corrected to `#<tab>` (see FEATURES_TRACKER.md).
+  No code change — the code was already self-consistent. The Phase 4 harness
+  was written to assert the *actual* format and passes.
 
 
 

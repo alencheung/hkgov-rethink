@@ -881,7 +881,44 @@ async fn cite_insight(
     let records = if evidence_ids.is_empty() {
         state.store.get_page(&dataset_id, 0, 500).await?.records
     } else {
-        state.store.get_by_ids(&dataset_id, &evidence_ids).await?
+        let recs = state.store.get_by_ids(&dataset_id, &evidence_ids).await?;
+        // A-003: the manifest's data_sha256 is the drift-detection anchor. If
+        // `get_by_ids` returned a *partial* set (some real evidence record_ids
+        // missing because the cache is cold, an upstream deletion, or an
+        // LRU/TTL eviction), hashing the subset would produce a stable-but-wrong
+        // hash — two reviewers would agree on a hash that doesn't reflect the
+        // real data, so a genuine revision would never be flagged. Refuse to
+        // produce a manifest unless every NON-synthetic evidence id resolved.
+        // Synthetic ids (`"series"`, `"threshold"`, `"joined_history"`) carry a
+        // detector-derived value in `evidence.value` and are intentionally not
+        // rows — they're allowed to be absent from the record set.
+        let found: std::collections::HashSet<&str> =
+            recs.iter().map(|r| r.record_id.as_str()).collect();
+        let real_ids: Vec<&str> = evidence_ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| !hkgov_agent::cite::is_synthetic_evidence_id(id))
+            .collect();
+        let missing: Vec<&str> = real_ids
+            .iter()
+            .filter(|id| !found.contains(*id))
+            .copied()
+            .collect();
+        if !missing.is_empty() {
+            tracing::warn!(
+                source = %dataset_id.source,
+                dataset = %dataset_id.dataset,
+                missing = ?missing,
+                "cite: partial evidence set returned from store; refusing to hash (A-003)"
+            );
+            return Err(ApiError(hkgov_common::Error::StoreUnavailable(format!(
+                "evidence records for {}/{} are not fully cached ({} of {} non-synthetic ids present); retry shortly",
+                dataset_id.source, dataset_id.dataset,
+                real_ids.len() - missing.len(),
+                real_ids.len()
+            ))));
+        }
+        recs
     };
     let base_url = q
         .base_url
@@ -965,6 +1002,17 @@ async fn silence_index(
     Query(q): Query<SilenceIndexQuery>,
 ) -> Result<Json<hkgov_agent::SilenceIndex>, ApiError> {
     let period = q.period.unwrap_or_default();
+    // A-010: validate the period shape. Without this, a non-quarter key like
+    // "2026" or "2026-Q9" silently fell through to `starts_with` in the silence
+    // indexer and matched nothing (or, for "2026", matched any record_id
+    // starting "2026" including synthetic ones). Accept: "" (all-time),
+    // "YYYY", "YYYY-MM", "YYYY-Qn". Reject anything else with a 400 so a typo
+    // surfaces instead of returning a misleading 0.0 score.
+    if !period.is_empty() && !is_valid_silence_period(&period) {
+        return Err(ApiError(hkgov_common::Error::BadRequest(format!(
+            "invalid `period` ({period:?}): expected one of '', 'YYYY', 'YYYY-MM', or 'YYYY-Qn'"
+        ))));
+    }
     // Default to HKMA for backward compat with v1 callers that omit `source`.
     let source = match &q.source {
         Some(s) if !s.is_empty() => parse_source(s)?,
@@ -974,6 +1022,35 @@ async fn silence_index(
         hkgov_agent::build_silence_index(&state.insights, source, &period, chrono::Utc::now())
             .await;
     Ok(Json(idx))
+}
+
+/// A-010: shape-check a silence-index `period` query value. Accepts `YYYY`,
+/// `YYYY-MM`, `YYYY-Qn` (n ∈ 1..=4). Empty is the all-time view (handled by
+/// the caller). Rejects typos like `2026-Q9`, `2026-13`, `2026Q2`, `banana`.
+fn is_valid_silence_period(period: &str) -> bool {
+    // YYYY (4 digits, plausible year 1900..=9999).
+    if period.len() == 4 {
+        return period.chars().all(|c| c.is_ascii_digit());
+    }
+    // YYYY-MM (month 01..=12).
+    if let Some((y, m)) = period.split_once('-') {
+        if y.len() == 4 && y.chars().all(|c| c.is_ascii_digit()) {
+            // YYYY-Qn
+            if let Some(qstr) = m.strip_prefix('Q') {
+                if let Ok(q) = qstr.parse::<u8>() {
+                    return (1..=4).contains(&q);
+                }
+                return false;
+            }
+            // YYYY-MM
+            if m.len() == 2 && m.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(month) = m.parse::<u8>() {
+                    return (1..=12).contains(&month);
+                }
+            }
+        }
+    }
+    false
 }
 
 // ---- GET /unprecedentedness — how rare is this value? (P-103) --------------
@@ -1006,6 +1083,22 @@ async fn unprecedentedness(
     // Pull the full history (cap at the page size the store supports; the
     // 90-day default window is well inside it).
     let page = state.store.get_page(&id, 0, 500).await?;
+    // D-031: if the records cache is cold (refresh in flight / LRU eviction),
+    // `get_page` now returns an empty page rather than 502. But scoring a value
+    // against zero history would silently produce a misleading "no historical
+    // data" result. Detect that case via the registry's persisted count and
+    // surface a retryable 503 instead, so the comparator UI can tell the user
+    // "data temporarily unavailable, retry" rather than showing a false band.
+    if page.records.is_empty() {
+        if let Some(meta) = state.store.meta(&id).await? {
+            if meta.record_count > 0 {
+                return Err(ApiError(hkgov_common::Error::StoreUnavailable(format!(
+                    "records for {}/{} are not cached (refresh in progress or cache cold); retry shortly",
+                    id.source, id.dataset
+                ))));
+            }
+        }
+    }
     let k = q.k.unwrap_or(hkgov_agent::DEFAULT_BAND_K);
     // History = all field values in chronological order.
     let history: Vec<f64> = page
@@ -1675,6 +1768,51 @@ mod tests {
         assert!(res.is_err(), "unknown source must error");
     }
 
+    // ---- A-010: malformed `period` must 400, not silently match nothing ----
+    #[test]
+    fn is_valid_silence_period_accepts_documented_shapes() {
+        // All-time (handled by caller as empty, but the helper should still
+        // gracefully reject it — the caller special-cases "" before calling).
+        assert!(!is_valid_silence_period("")); // empty is NOT a valid period shape
+                                               // Documented shapes.
+        assert!(is_valid_silence_period("2026"));
+        assert!(is_valid_silence_period("2026-05"));
+        assert!(is_valid_silence_period("2026-Q2"));
+        // Boundary quarters + months.
+        assert!(is_valid_silence_period("2026-Q1"));
+        assert!(is_valid_silence_period("2026-Q4"));
+        assert!(is_valid_silence_period("2026-01"));
+        assert!(is_valid_silence_period("2026-12"));
+    }
+
+    #[test]
+    fn is_valid_silence_period_rejects_typos_and_garbage() {
+        // The A-010 repros: these previously fell through to `starts_with` and
+        // matched nothing (or matched synthetic record_ids for the bare-year
+        // case), producing a misleading 0.0 score.
+        assert!(!is_valid_silence_period("2026-Q9"), "Q9 out of range");
+        assert!(!is_valid_silence_period("2026-Q0"), "Q0 out of range");
+        assert!(!is_valid_silence_period("2026-13"), "month 13 out of range");
+        assert!(!is_valid_silence_period("2026-00"), "month 0 out of range");
+        assert!(!is_valid_silence_period("2026Q2"), "missing dash");
+        assert!(!is_valid_silence_period("2026-5"), "single-digit month");
+        assert!(!is_valid_silence_period("banana"), "garbage");
+        assert!(!is_valid_silence_period("20260"), "5-digit year");
+    }
+
+    #[tokio::test]
+    async fn silence_index_bad_period_returns_400() {
+        let state = silence_state().await;
+        let q = SilenceIndexQuery {
+            period: Some("2026-Q9".into()),
+            ..Default::default()
+        };
+        let err = silence_index(State(state), Query(q))
+            .await
+            .expect_err("malformed period must 400 (A-010)");
+        assert_eq!(err.0.status_code(), 400);
+    }
+
     // ---- /unprecedentedness (P-103) ---------------------------------------
 
     /// Build a state seeded with a numeric series long enough to define a band
@@ -1799,6 +1937,89 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&a).unwrap(),
             serde_json::to_string(&b).unwrap(),
+        );
+    }
+
+    // D-031: when the records cache is cold (refresh in flight / LRU/TTL
+    // eviction) for a dataset that the registry reports as having records,
+    // /unprecedentedness must return a retryable StoreUnavailable error (→503),
+    // NOT silently score the value against empty history (which would produce a
+    // misleading "no historical data" band). Before the fix, get_page returned
+    // a 502 here; the D-031 fix makes get_page return an empty page and pushes
+    // the retryable signal up at the handler boundary.
+    #[tokio::test]
+    async fn unprecedentedness_cold_cache_returns_store_unavailable() {
+        // Same dataset as unprecedentedness_state, but the records cache is
+        // evicted (1s TTL + wait + touch) while the registry still reports
+        // record_count > 0.
+        let settings = Settings::default();
+        let registry = Arc::new(
+            hkgov_connectors::registry::Registry::build(&settings).expect("registry builds"),
+        );
+        let store = Arc::new(hkgov_store::MemoryStore::new(20, 1));
+        let id = DatasetId::new(DataSource::Hkma, "daily-interbank-liquidity");
+        store
+            .register(
+                id.clone(),
+                "Daily Interbank Liquidity".into(),
+                None,
+                3600,
+                hkgov_common::Category::Monetary,
+                vec!["hibor".into()],
+                hkgov_common::Cadence::Daily,
+            )
+            .await;
+        // Seed + persist the count, then let the TTL lapse.
+        store
+            .put_dataset(
+                &id,
+                vec![hkgov_common::NormalizedRecord {
+                    source: DataSource::Hkma,
+                    dataset: "daily-interbank-liquidity".into(),
+                    record_id: "2026-01".into(),
+                    fields: {
+                        let mut m = std::collections::BTreeMap::new();
+                        m.insert(
+                            "hibor_overnight".into(),
+                            hkgov_common::RecordValue::Float(1.0),
+                        );
+                        m
+                    },
+                    fetched_at: chrono::Utc::now(),
+                }],
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let _ = store.meta(&id).await; // touch → trigger lazy eviction
+
+        let state = AppState {
+            registry,
+            store,
+            insights: Arc::new(hkgov_agent::InsightStore::new()),
+            feedback: Arc::new(hkgov_agent::FeedbackStore::new()),
+            signals: Arc::new(hkgov_agent::SignalStore::new()),
+            investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
+            users: Arc::new(hkgov_agent::UserStore::new()),
+            llm: Arc::new(HeuristicClient::new()),
+            alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
+            magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
+            settings: Arc::new(settings),
+        };
+        let q = Query(UnprecedentednessQuery {
+            source: "hkma".into(),
+            dataset: "daily-interbank-liquidity".into(),
+            field: "hibor_overnight".into(),
+            value: 2.0,
+            k: None,
+        });
+        let err = unprecedentedness(State(state), q).await.expect_err(
+            "cold cache must surface StoreUnavailable (D-031), not score against empty history",
+        );
+        assert!(
+            matches!(err.0, hkgov_common::Error::StoreUnavailable(_)),
+            "expected StoreUnavailable, got {:?}",
+            err.0
         );
     }
 
@@ -2018,6 +2239,105 @@ mod tests {
         assert_eq!(a, b, "same insight + records → byte-identical citation");
     }
 
+    // ---- A-003: the manifest must refuse to hash a PARTIAL evidence set ----
+    //
+    // `get_by_ids` returns whatever subset of the requested ids it found in the
+    // cache. If a real (non-synthetic) evidence record_id is missing — cold
+    // cache, LRU/TTL eviction, upstream deletion — hashing the subset would
+    // produce a stable-but-wrong data_sha256. Two reviewers would then agree
+    // on a hash that doesn't reflect the real data, so a genuine upstream
+    // revision would never trip the drift detector. The route must surface a
+    // retryable StoreUnavailable (503) instead. Synthetic ids ("series",
+    // "threshold", "joined_history") carry derived values in evidence.value
+    // and are allowed to be absent.
+    #[tokio::test]
+    async fn cite_partial_evidence_set_returns_store_unavailable() {
+        let state = cite_state().await;
+        // Replace the stored insight's evidence with one real id that is NOT
+        // in the seeded dataset + one synthetic id. The real id ("9999-12-31")
+        // is absent → the manifest must refuse rather than hash the partial set.
+        let mut insight = state
+            .insights
+            .get("series_jump:hkma:daily-interbank-liquidity:test1")
+            .await
+            .expect("seeded insight present");
+        insight.evidence = vec![
+            hkgov_agent::insight::EvidenceRef {
+                record_id: "9999-12-31".into(), // real-shaped id, absent from cache
+                field: "hibor_overnight".into(),
+                value: json!(9.0),
+                context: Some("missing row".into()),
+            },
+            hkgov_agent::insight::EvidenceRef {
+                record_id: "series".into(), // synthetic — allowed to be absent
+                field: "median".into(),
+                value: json!(1.5),
+                context: Some("series median (MAD baseline)".into()),
+            },
+        ];
+        // NB: `upsert`'s evolution diff does not currently include `evidence`
+        // (a separate, out-of-scope gap), so bump the title too to force the
+        // evolved version (with the new evidence) to actually persist.
+        insight.title = "A-003 partial-set probe".into();
+        state.insights.upsert(insight).await;
+
+        let q = CiteQuery {
+            format: None,
+            base_url: Some("https://x".into()),
+        };
+        let err = cite_insight(
+            State(state),
+            Path("series_jump:hkma:daily-interbank-liquidity:test1".into()),
+            Query(q),
+        )
+        .await
+        .expect_err("partial evidence set must error, not hash (A-003)");
+        assert!(
+            matches!(err.0, hkgov_common::Error::StoreUnavailable(_)),
+            "expected StoreUnavailable for partial set, got {:?}",
+            err.0
+        );
+        assert_eq!(err.0.status_code(), 503);
+    }
+
+    #[tokio::test]
+    async fn cite_synthetic_only_evidence_set_succeeds() {
+        // A-003 complement: an insight whose evidence is entirely synthetic
+        // (e.g. a derived-only finding) must still produce a manifest — the
+        // synthetic ids are expected-absent by design.
+        let state = cite_state().await;
+        let mut insight = state
+            .insights
+            .get("series_jump:hkma:daily-interbank-liquidity:test1")
+            .await
+            .expect("seeded insight present");
+        insight.evidence = vec![hkgov_agent::insight::EvidenceRef {
+            record_id: "threshold".into(), // synthetic — allowed absent
+            field: "line".into(),
+            value: json!(2.5),
+            context: Some("watch line".into()),
+        }];
+        // Force the evolved version to persist (see note in the partial-set
+        // test above: upsert's diff doesn't include evidence).
+        insight.title = "A-003 synthetic-only probe".into();
+        state.insights.upsert(insight).await;
+
+        let q = CiteQuery {
+            format: None,
+            base_url: Some("https://x".into()),
+        };
+        let resp = cite_insight(
+            State(state),
+            Path("series_jump:hkma:daily-interbank-liquidity:test1".into()),
+            Query(q),
+        )
+        .await
+        .expect("synthetic-only evidence must produce a manifest");
+        let body = body_string(resp).await;
+        let v: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
+        assert_eq!(v["manifest"]["data_sha256"].as_str().unwrap().len(), 64);
+    }
+
     // =========================================================================
     // Phase 5 — security regression + bypass tests for the V-004 / V-005 / V-010
     // fixes. These re-simulate the Phase 3 payloads against the hardened code
@@ -2069,7 +2389,7 @@ mod tests {
         let req = RequestTokenRequest {
             email: "eve@example.com".into(),
         };
-        let resp = request_auth_token(State(state), Json(req)).await.0;
+        let resp = request_auth_token(State(state), Json(req)).await.unwrap().0;
         // Default config ⇒ no token in the body (skip_serializing_if = None).
         assert!(
             resp.token.is_none(),
@@ -2087,7 +2407,7 @@ mod tests {
         let req = RequestTokenRequest {
             email: "eve@example.com".into(),
         };
-        let resp = request_auth_token(State(state), Json(req)).await.0;
+        let resp = request_auth_token(State(state), Json(req)).await.unwrap().0;
         assert!(resp.token.is_some(), "dev mode returns the token for CI");
     }
 

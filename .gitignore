@@ -43,5 +43,21 @@ press.html
 # Scratch / probe working dir (live endpoint verification artifacts, not source)
 .probe/
 
+# Local QA/test harness artifacts (Phase 2/4 live probes + headless dashboard
+# harness). These are verification scaffolding, not source — regenerated each
+# QA cycle. Keep them out of the tree.
+/phase2_*.py
+/phase2_*.js
+/phase2_results.json
+/auth_debug.js
+/auth_full_test.js
+/auth_create_signal.js
+/datasets_dom.js
+/*_probe.json
+/logs/
+/package.json
+/package-lock.json
+/node_modules/
+
 # Local Netlify folder
 .netlify

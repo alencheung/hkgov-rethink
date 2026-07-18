@@ -299,8 +299,14 @@ impl AlertSink for WebhookSink {
                     let detail = resp.text().await.unwrap_or_default();
                     if attempt == 0 {
                         tokio::time::sleep(Duration::from_secs(1)).await;
+                        // A-005: log a redacted URL, not the full one. Slack,
+                        // Discord, MS Teams, and Mattermost all embed the live
+                        // webhook credential in the URL *path* — logging the
+                        // full URL on a transport failure leaks that credential
+                        // to any log shipper. Keep scheme+host (so an operator
+                        // can tell which sink failed) and drop path+query.
                         tracing::warn!(
-                            url = %self.url,
+                            url = %redact_webhook_url(&self.url),
                             status = status.as_u16(),
                             "webhook attempt 1 failed, retrying"
                         );
@@ -315,7 +321,9 @@ impl AlertSink for WebhookSink {
                 Err(e) => {
                     if attempt == 0 {
                         tokio::time::sleep(Duration::from_secs(1)).await;
-                        tracing::warn!(url = %self.url, error = %e, "webhook transport error, retrying");
+                        // A-005: redacted URL — see note above (Slack/Discord/
+                        // Teams embed the credential in the path).
+                        tracing::warn!(url = %redact_webhook_url(&self.url), error = %e, "webhook transport error, retrying");
                         continue;
                     }
                     return Err(hkgov_common::Error::Upstream {
@@ -334,6 +342,39 @@ impl AlertSink for WebhookSink {
             "webhook dispatch exited its retry loop without a result".into(),
         ))
     }
+}
+
+/// Reduce a webhook URL to its origin (scheme + host [+ port]) for logging.
+///
+/// Incoming-webhook providers — Slack (`https://hooks.slack.com/services/T…/B…/<SECRET>`),
+/// Discord (`https://discord.com/api/webhooks/<id>/<TOKEN>`), MS Teams, and
+/// Mattermost — embed the live webhook credential in the URL **path**, not in
+/// an `Authorization` header. Logging the full URL on a transport failure or
+/// non-2xx response therefore leaks the credential to any log shipper /
+/// aggregator. This keeps the origin (so an operator can still tell *which*
+/// sink failed and file a ticket with the vendor) and drops path + query.
+/// (A-005.)
+#[cfg(feature = "alerts")]
+fn redact_webhook_url(url: &str) -> String {
+    // Best-effort parse; on any failure, fall back to a generic placeholder
+    // rather than risk leaking the raw URL.
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return "<unparseable webhook url>".into();
+    };
+    let mut out = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or("?"));
+    if let Some(port) = parsed.port_or_known_default() {
+        // Include the port only if it's not the scheme's default, to keep the
+        // log line short and avoid implying a non-default port that isn't there.
+        let default = match parsed.scheme() {
+            "https" => 443,
+            "http" => 80,
+            _ => port,
+        };
+        if port != default {
+            out.push_str(&format!(":{port}"));
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -595,5 +636,30 @@ mod tests {
         assert!(ids.contains(&"i3".to_string()));
         assert!(ids.contains(&"i4".to_string()));
         assert!(!ids.contains(&"i0".to_string()));
+    }
+
+    // ---- A-005: webhook URLs logged on failure must be redacted to origin ----
+    #[cfg(feature = "alerts")]
+    #[test]
+    fn redact_webhook_url_drops_secret_path() {
+        // Slack embeds the secret in the path; the redacted form must keep only
+        // the origin so the credential never reaches a log shipper.
+        let slack = "https://hooks.slack.com/services/T000AAA/B000BBB/SECRET_TOKEN_HERE";
+        assert_eq!(redact_webhook_url(slack), "https://hooks.slack.com");
+        // Discord likewise.
+        let discord = "https://discord.com/api/webhooks/1234567890/webhook_token_xyz";
+        assert_eq!(redact_webhook_url(discord), "https://discord.com");
+        // A non-default port is preserved (operator needs it to identify the sink).
+        assert_eq!(
+            redact_webhook_url("http://localhost:9000/hook/secret"),
+            "http://localhost:9000"
+        );
+        // Default ports are dropped (https → no :443).
+        assert_eq!(
+            redact_webhook_url("https://example.com:443/hook/secret?q=1"),
+            "https://example.com"
+        );
+        // Unparseable input → safe placeholder, never the raw string.
+        assert_eq!(redact_webhook_url("not a url"), "<unparseable webhook url>");
     }
 }

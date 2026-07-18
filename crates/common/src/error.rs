@@ -47,6 +47,16 @@ pub enum Error {
     #[error("store error: {0}")]
     Store(String),
 
+    /// The store is reachable but the requested data is not currently resident
+    /// (cache cold, refresh in flight, or LRU/TTL eviction). Distinct from
+    /// [`Error::Store`]: this is a *transient, retryable* condition (mapped to
+    /// 503), not a backing-store fault (502). Used by paths where returning
+    /// empty data would be silently wrong — e.g. the cite manifest, whose hash
+    /// is over the returned records, so an empty set would falsely report
+    /// "reproduces as of {ts}". (D-031.)
+    #[error("store temporarily unavailable: {0}")]
+    StoreUnavailable(String),
+
     /// The AI-agent layer failed (loop exhaustion, framing failure, etc.).
     /// Mapped to 502 because the agent depends on upstream (LLM) availability.
     #[error("agent error: {0}")]
@@ -70,6 +80,7 @@ impl Error {
             Error::BadRequest(_) => 400,
             Error::Unauthorized(_) => 401,
             Error::Upstream { .. } | Error::Store(_) => 502,
+            Error::StoreUnavailable(_) => 503,
             Error::Agent(_) => 502,
             Error::Decode { .. } => 502,
             Error::Config(_) => 500,

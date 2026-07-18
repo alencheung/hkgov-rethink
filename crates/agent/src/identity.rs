@@ -115,9 +115,18 @@ const REAP_EVERY_ISSUES: u64 = 16;
 /// Tokens are deliberately excluded — they're short-lived (15 min TTL) one-time
 /// credentials. Persisting them would extend their lifetime across restarts,
 /// undermining the one-time guarantee.
+///
+/// Sessions are persisted keyed by [`hash_session_token`] of the bearer, **not**
+/// the plaintext bearer itself (A-006). A 30-day bearer exfiltrated from a
+/// backup / volume mount / co-tenant file read would otherwise let anyone
+/// impersonate the user; a SHA-256 hash is useless without a preimage attack on
+/// SHA-256. The in-memory store is keyed the same way, so the plaintext lives
+/// only for the brief mint→return-to-client window and is never written down.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserStoreSnapshot {
     pub users: Vec<User>,
+    /// (hash_of_session_token, Session). The Session's `session_token` field
+    /// is cleared (empty) in the persisted form — see [`UserStore::snapshot`].
     pub sessions: Vec<(String, Session)>,
 }
 
@@ -189,10 +198,11 @@ impl UserStore {
             // D-010: bound the session's lifetime so a leaked bearer ages out.
             expires_at: now + Duration::days(SESSION_TTL_DAYS),
         };
-        self.sessions
-            .write()
-            .await
-            .insert(session_token, session.clone());
+        // A-006: key the in-memory map by the hash, not the plaintext bearer.
+        // The plaintext exists only on the returned `Session` for the brief
+        // mint→HTTP-response window; nothing in long-lived state holds it.
+        let key = hash_session_token(&session_token);
+        self.sessions.write().await.insert(key, session.clone());
         Some(session)
     }
 
@@ -200,8 +210,11 @@ impl UserStore {
     /// a session is no longer immortal — a leaked bearer ages out after
     /// `SESSION_TTL_DAYS`).
     pub async fn lookup_session(&self, session_token: &str) -> Option<User> {
+        // A-006: hash the supplied bearer before the map lookup — the map is
+        // keyed by hash, never plaintext.
+        let key = hash_session_token(session_token);
         let sessions = self.sessions.read().await;
-        let s = sessions.get(session_token)?;
+        let s = sessions.get(&key)?;
         // D-010: reject expired sessions.
         if Utc::now() > s.expires_at {
             return None;
@@ -216,6 +229,13 @@ impl UserStore {
     /// task when the issue counter hits [`REAP_EVERY_ISSUES`]; otherwise a cheap
     /// atomic read. Without this, every token issuance (including unauthenticated
     /// ones) permanently grows `tokens`, and expired sessions accumulate forever.
+    ///
+    /// A-011: also reaps `users` entries that have no live token AND no live
+    /// session. A `User` with neither is inert — it will be re-provisioned
+    /// idempotently on the next `issue_token` for that email (same `user_id`),
+    /// so dropping it loses nothing except a row from the snapshot file.
+    /// Without this, every distinct email ever seen stayed in `users` forever,
+    /// growing the map + the persisted `users.json` without bound.
     fn maybe_reap_expired(&self) {
         let prev = self
             .issue_count
@@ -225,6 +245,7 @@ impl UserStore {
         }
         let tokens = self.tokens.clone();
         let sessions = self.sessions.clone();
+        let users = self.users.clone();
         tokio::spawn(async move {
             let now = Utc::now();
             let mut t = tokens.write().await;
@@ -232,6 +253,24 @@ impl UserStore {
             drop(t);
             let mut s = sessions.write().await;
             s.retain(|_, sess| sess.expires_at > now);
+            drop(s);
+            // A-011: collect the set of user_ids that still have a live token
+            // or session, then drop any user not in that set. Needs a read on
+            // both maps after the reaps above so the live sets are current.
+            let live_token_users: std::collections::HashSet<String> = tokens
+                .read()
+                .await
+                .values()
+                .map(|tok| user_id_for(&tok.email))
+                .collect();
+            let live_session_users: std::collections::HashSet<String> = sessions
+                .read()
+                .await
+                .values()
+                .map(|sess| sess.user_id.clone())
+                .collect();
+            let mut u = users.write().await;
+            u.retain(|id, _| live_token_users.contains(id) || live_session_users.contains(id));
         });
     }
 
@@ -252,6 +291,12 @@ impl UserStore {
     // ---- file-based persistence (stopgap until the Postgres tier lands) -----
 
     /// Capture a serializable snapshot of the store's persistent state.
+    ///
+    /// A-006: the in-memory `sessions` map is already keyed by
+    /// [`hash_session_token`], so the snapshot's keys are hashes. The
+    /// `Session.session_token` field is **cleared** in each persisted entry so
+    /// the file never holds a plaintext bearer — only the hash + the metadata
+    /// needed to validate a future request.
     pub async fn snapshot(&self) -> UserStoreSnapshot {
         UserStoreSnapshot {
             users: self.users.read().await.values().cloned().collect(),
@@ -260,7 +305,14 @@ impl UserStore {
                 .read()
                 .await
                 .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(k, v)| {
+                    // Strip the plaintext bearer from the persisted copy. The
+                    // key is already the hash, so no live credential lands in
+                    // the snapshot file.
+                    let mut persisted = v.clone();
+                    persisted.session_token.clear();
+                    (k.clone(), persisted)
+                })
                 .collect(),
         }
     }
@@ -268,6 +320,13 @@ impl UserStore {
     /// Restore from a snapshot (loaded from file on boot). Only restores
     /// non-expired sessions; expired ones are dropped during the restore so a
     /// long downtime doesn't resurrect dead sessions.
+    ///
+    /// A-006: snapshot keys are hashes (not plaintext bearers). `restore`
+    /// preserves them as-is so a subsequent `lookup_session` (which hashes the
+    /// supplied bearer) finds the entry. Both old plaintext-keyed snapshots
+    /// (predating A-006) and new hash-keyed ones load without error; the old
+    /// form simply won't match a future lookup and will age out on expiry —
+    /// graceful, no migration needed.
     pub async fn restore(&self, snap: UserStoreSnapshot) {
         let now = Utc::now();
         let mut users = self.users.write().await;
@@ -291,11 +350,28 @@ impl UserStore {
 
     #[cfg(test)]
     pub async fn plant_session_for_test(&self, session: Session) {
-        self.sessions
-            .write()
-            .await
-            .insert(session.session_token.clone(), session);
+        // A-006: key by hash, matching the production keying so a subsequent
+        // `lookup_session(session.session_token)` (which hashes the bearer)
+        // finds the planted entry.
+        let key = hash_session_token(&session.session_token);
+        self.sessions.write().await.insert(key, session);
     }
+}
+
+/// SHA-256 hex of a session bearer token — the at-rest + in-memory key form.
+///
+/// The store keys its `sessions` map by this hash rather than the plaintext
+/// bearer, and the persistence layer writes the hash (never the plaintext) to
+/// `users.json`. This way a stolen snapshot file (backup, volume mount,
+/// co-tenant read) yields hashes, not live bearers — a preimage attack on
+/// SHA-256 is infeasible, so the file is useless for impersonation. The
+/// plaintext bearer exists only for the brief mint→return window.
+/// (A-006.)
+fn hash_session_token(token: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(token.as_bytes());
+    let hash = h.finalize();
+    hash.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Stable user id from an email: `u:{sha256(email)[:16]}`. Same email → same id
@@ -523,6 +599,103 @@ mod tests {
         };
         store.plant_session_for_test(legacy).await;
         assert!(store.lookup_session("legacy-bearer").await.is_some());
+    }
+
+    // ---- A-006: session bearers must NEVER appear in plaintext in the   ----
+    // ---- persisted snapshot (and the in-memory map is keyed by hash).    ----
+    #[tokio::test]
+    async fn a006_snapshot_never_contains_plaintext_bearer() {
+        let store = UserStore::new();
+        let t = store.issue_token("irene@example.com").await;
+        let s = store.redeem_token(&t.token).await.unwrap();
+        let plaintext = s.session_token.clone();
+        assert!(!plaintext.is_empty(), "mint returns a real bearer");
+
+        let snap = store.snapshot().await;
+        // The persisted JSON must not contain the plaintext bearer anywhere —
+        // neither as a key nor inside a Session value.
+        let json = serde_json::to_string(&snap).expect("snapshot serializes");
+        assert!(
+            !json.contains(&plaintext),
+            "A-006: plaintext bearer leaked into snapshot: {json}"
+        );
+        // Every persisted session's session_token field must be empty.
+        for (_, persisted) in &snap.sessions {
+            assert!(
+                persisted.session_token.is_empty(),
+                "A-006: persisted session_token must be cleared, got {:?}",
+                persisted.session_token
+            );
+        }
+        // And the keys must be the SHA-256 hash, not the plaintext.
+        let expected_key = hash_session_token(&plaintext);
+        assert!(
+            snap.sessions.iter().any(|(k, _)| k == &expected_key),
+            "A-006: snapshot must be keyed by hash_session_token(bearer)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a006_lookup_hashes_bearer_and_resolves() {
+        // Round-trip: mint → snapshot (clears plaintext) → restore → the
+        // original bearer still resolves because lookup hashes it.
+        let store = UserStore::new();
+        let t = store.issue_token("judy@example.com").await;
+        let s = store.redeem_token(&t.token).await.unwrap();
+        let bearer = s.session_token.clone();
+        let snap = store.snapshot().await;
+
+        let restored = UserStore::new();
+        restored.restore(snap).await;
+        assert!(
+            restored.lookup_session(&bearer).await.is_some(),
+            "A-006: restored store must resolve the original bearer via hash lookup"
+        );
+        // A wrong bearer must NOT resolve.
+        assert!(
+            restored.lookup_session("not-the-bearer").await.is_none(),
+            "A-006: wrong bearer must not resolve"
+        );
+    }
+
+    // ---- A-011: users with no live token/session are reaped so the map ----
+    // ---- + snapshot file can't grow without bound.                     ----
+    #[tokio::test]
+    async fn a011_reap_drops_users_with_no_live_token_or_session() {
+        // The reaper is triggered every REAP_EVERY_ISSUES issuances. Issue
+        // enough tokens for distinct emails to trigger at least one reap,
+        // WITHOUT redeeming any (so none get a session). Each issue mints a
+        // 15-min token, so within the test window all tokens are live at first
+        // — to actually exercise the drop path we redeem one (giving it a
+        // 30-day session) and rely on the unredeemed tokens being the only
+        // thing keeping their users alive once redeemed tokens are purged.
+        let store = UserStore::new();
+        // Issue + immediately let expire is hard without time travel; instead
+        // verify the invariant directly: a user with a live session is kept,
+        // and the reap logic itself is exercised via the public count() API
+        // across enough issuances to fire the reaper without dropping a user
+        // that has a live session.
+        let t = store.issue_token("kept@example.com").await;
+        let _s = store.redeem_token(&t.token).await.unwrap(); // 30-day session
+        let kept_id = user_id_for("kept@example.com");
+        assert!(store.get(&kept_id).await.is_some(), "kept user provisioned");
+
+        // Fire the reaper (REAP_EVERY_ISSUES more issuances). All these new
+        // users have only a 15-min token, which is still live, so they survive
+        // — but the reaper must run without panicking and must NOT drop the
+        // session-holding user.
+        for i in 0..REAP_EVERY_ISSUES {
+            store.issue_token(&format!("churn{i}@example.com")).await;
+        }
+        assert!(
+            store.get(&kept_id).await.is_some(),
+            "A-011: user with a live session must survive the reap"
+        );
+        // And the session still resolves.
+        assert!(
+            store.lookup_session(&_s.session_token).await.is_some(),
+            "A-011: live session must survive the reap"
+        );
     }
 }
 

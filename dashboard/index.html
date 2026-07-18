@@ -389,6 +389,10 @@
         <input id="apiKey" type="password" data-i18n-ph="ph_api_key" placeholder="key" size="10" data-i18n-aria="aria_api_key" aria-label="API key" />
         <button class="icon-btn" data-action="load-all" data-i18n-aria="aria_refresh_all" aria-label="Refresh all"><i class="ri-refresh-line"></i></button>
         <span class="kbd-hint" data-action="open-palette"><i class="ri-command-line"></i> K</span>
+        <!-- D-018/D-033: per-user features (signals, cases, silence-watch) need a
+             session. The dashboard previously told users to hand-craft curl to
+             /v1/auth/request-token + /v1/auth/redeem; now there's a sign-in widget. -->
+        <button id="authBtn" class="mode-badge" style="cursor:pointer;" data-action="open-auth" data-i18n="auth_sign_in" title="Sign in">Sign in</button>
       </div>
     </div>
     <nav class="tabs" role="tablist" data-i18n-aria="aria_primary_nav" aria-label="Primary">
@@ -696,6 +700,35 @@
       <input id="paletteInput" class="palette-input" data-i18n-ph="pal_ph" placeholder="Jump to a page, search insights or datasets…" data-action="render-palette" />
       <div id="paletteList" class="palette-list"></div>
       <div class="palette-foot"><span><i class="ri-arrow-up-line"></i><i class="ri-arrow-down-line"></i> <span data-i18n="pal_nav">navigate</span></span><span><i class="ri-corner-down-left-line"></i> <span data-i18n="pal_open">open</span></span><span data-i18n="pal_esc">esc to close</span></div>
+    </div>
+  </div>
+
+  <!-- D-018/D-033: sign-in modal. Per-user features (signals, cases,
+       silence-watch) need a session; this widget replaces the prior "hand-craft
+       curl to /v1/auth/request-token + /v1/auth/redeem" non-flow. -->
+  <div class="modal-bg" id="authModal" data-action="close-auth-on-backdrop" role="dialog" aria-modal="true">
+    <div class="modal" style="max-width:440px;">
+      <div class="modal-head"><span class="t" data-i18n="auth_modal_title">Sign in</span><button data-action="close-auth" aria-label="Close"><i class="ri-close-line"></i></button></div>
+      <div class="modal-body">
+        <div id="authStep1">
+          <p style="margin:0 0 10px;color:var(--muted);" data-i18n="auth_step1_blurb">Sign in to save signals, open case files, and watch the Silence Index. A one-time sign-in link will be sent to your email.</p>
+          <label for="authEmail" data-i18n="auth_email">Email</label>
+          <input id="authEmail" type="email" autocomplete="email" placeholder="you@example.com" data-i18n-ph="auth_email_ph" style="width:100%;padding:8px;margin:6px 0 12px;box-sizing:border-box;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:6px;" />
+          <div style="display:flex;gap:8px;align-items:center;">
+            <button class="icon-btn" data-action="send-auth-link" data-i18n="auth_send_link"><i class="ri-mail-send-line"></i> Send sign-in link</button>
+            <span id="authSendStatus" style="color:var(--muted);font-size:13px;"></span>
+          </div>
+          <div id="authManualWrap" style="margin-top:14px;display:none;">
+            <p style="margin:0 0 6px;color:var(--muted);font-size:13px;" data-i18n="auth_manual_blurb">If your server didn't return the link inline (production), paste the token from your email or the magic-link URL:</p>
+            <input id="authManualToken" type="text" placeholder="token or https://…/auth/redeem?token=…" data-i18n-ph="auth_manual_ph" style="width:100%;padding:8px;margin:0 0 8px;box-sizing:border-box;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:6px;" />
+            <button class="icon-btn" data-action="redeem-auth-token" data-i18n="auth_redeem"><i class="ri-login-circle-line"></i> Sign in</button>
+          </div>
+        </div>
+        <div id="authStep2" style="display:none;">
+          <p style="margin:0 0 12px;"><span data-i18n="auth_signed_in_as">Signed in as</span> <strong id="authUserEmail"></strong></p>
+          <button class="icon-btn" data-action="sign-out" data-i18n="auth_sign_out"><i class="ri-logout-box-line"></i> Sign out</button>
+        </div>
+      </div>
     </div>
   </div>
 

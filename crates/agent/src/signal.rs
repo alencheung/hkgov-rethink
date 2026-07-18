@@ -123,6 +123,18 @@ pub struct SignalPreview {
     pub fired_on: Vec<String>,
     pub window_days: i64,
     pub previewed_at: DateTime<Utc>,
+    /// D-032: whether the underlying records were resident in the cache when
+    /// the preview ran. `false` means the detector saw zero records (cache
+    /// cold / refresh in flight / LRU eviction), so `count == 0` here does NOT
+    /// mean the signal would never fire — it means "we couldn't evaluate it
+    /// right now; retry shortly". The dashboard shows a "data temporarily
+    /// unavailable" notice instead of a misleading "0 findings".
+    #[serde(default = "default_data_available")]
+    pub data_available: bool,
+}
+
+fn default_data_available() -> bool {
+    true
 }
 
 /// A slim, serializable finding view (the `Finding` itself isn't `Serialize`
@@ -414,7 +426,7 @@ pub async fn preview_signal(
     // `get_page(id, 0, 500)` silently truncated any dataset larger than 500 rows,
     // so a jump on row 600 was invisible to preview but visible in production.
     // This mirrors the scheduler's loader so preview sees the whole feed.
-    let all_records = collect_all_records_for_preview(store, &id).await;
+    let (all_records, data_available) = collect_all_records_for_preview(store, &id).await;
 
     // Window-filter the records to the last `window_days` by record_id date.
     // HKGOV record_ids are ISO-date-ish (e.g. "2026-05-18", "2026-05").
@@ -444,6 +456,7 @@ pub async fn preview_signal(
         fired_on,
         window_days,
         previewed_at: Utc::now(),
+        data_available,
     }
 }
 
@@ -451,28 +464,63 @@ pub async fn preview_signal(
 /// scheduler's `collect_all_records`. The store's `get_page` caps at 500 rows,
 /// so a single page silently truncated any larger dataset (D-020). This pages
 /// until a short/empty batch so the detector sees the whole feed.
+///
+/// D-032: returns `(records, data_available)`. `data_available` is false when
+/// the dataset's registry entry reports records but the cache returned none
+/// (cold cache / refresh in flight / LRU eviction) — so the caller can
+/// distinguish "0 findings because nothing fired" from "0 findings because we
+/// had no data to evaluate."
 async fn collect_all_records_for_preview(
     store: &Arc<hkgov_store::MemoryStore>,
     id: &hkgov_store::DatasetId,
-) -> Vec<hkgov_common::NormalizedRecord> {
+) -> (Vec<hkgov_common::NormalizedRecord>, bool) {
     use hkgov_store::RecordStore;
     let mut all = Vec::new();
     let mut offset = 0usize;
     loop {
-        let Ok(page) = store.get_page(id, offset, 500).await else {
-            break;
-        };
-        if page.records.is_empty() {
-            break;
+        match store.get_page(id, offset, 500).await {
+            Ok(page) => {
+                if page.records.is_empty() {
+                    break;
+                }
+                let len = page.records.len();
+                all.extend(page.records);
+                if len < 500 {
+                    break;
+                }
+                offset += len;
+            }
+            // A-009: a mid-pagination error must be observable, not silently
+            // indistinguishable from "no more pages". The preview path already
+            // has a `data_available` flag below; a partial result from an error
+            // is a transient condition, so log it and let the existing
+            // cold-cache check (via meta()) report data_available=false when
+            // the count is suspiciously low.
+            Err(e) => {
+                tracing::warn!(
+                    source = %id.source,
+                    dataset = %id.dataset,
+                    offset = offset,
+                    error = %e,
+                    "preview: get_page errored mid-pagination; collected {} records so far (A-009)",
+                    all.len()
+                );
+                break;
+            }
         }
-        let len = page.records.len();
-        all.extend(page.records);
-        if len < 500 {
-            break;
-        }
-        offset += len;
     }
-    all
+    // D-032: if we collected nothing, check whether the dataset *should* have
+    // records (registry persisted count > 0). If so, the cache is cold and the
+    // empty result is not meaningful — flag it so preview can tell the user.
+    let data_available = if all.is_empty() {
+        match store.meta(id).await {
+            Ok(Some(m)) => m.record_count == 0, // genuinely empty dataset is "available"
+            _ => true, // unknown dataset: assume available to avoid false alarms
+        }
+    } else {
+        true
+    };
+    (all, data_available)
 }
 
 /// Is the record's date (parsed from its record_id) after `cutoff`? Lenient:

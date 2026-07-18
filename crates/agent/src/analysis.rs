@@ -109,6 +109,41 @@ fn fingerprint(ev: &[EvidenceRef]) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// Clamp a detector-confidence ratio into the [0.5, 1.0] band, NaN/Inf-safe.
+///
+/// Every detector scores confidence as `((signal / threshold).min(cap) / cap)
+/// .clamp(0.5, 1.0)`. When `signal` AND `threshold` are both 0.0 the ratio is
+/// `0.0/0.0 = NaN`, and `NaN.clamp(0.5, 1.0)` returns `NaN` (IEEE: `NaN < 0.5`
+/// is false, `NaN > 1.0` is false) — which then serializes as JSON `null` into
+/// `Finding.confidence`. The scheduler guards threshold>0 before dispatch so
+/// this is unreachable in production today, but the detector fns are `pub` and
+/// a direct call with threshold=0.0 currently produces a NaN finding silently.
+/// This helper routes the non-finite case to the clamp floor (0.5 — the
+/// "lowest-confidence finding we still emit") so no detector can ever emit a
+/// NaN/Inf confidence. (A-008.)
+fn safe_confidence(ratio: f64, cap: f64) -> f64 {
+    // Guard the divisor: cap is a positive constant at every call site, but
+    // defend against a future caller passing 0.0.
+    if cap <= 0.0 || !cap.is_finite() {
+        return 0.5;
+    }
+    // Guard the input ratio BEFORE the min/clamp. IEEE `min`/`max` propagate
+    // NaN counterintuitively: `NaN.min(5.0)` returns 5.0 (the non-NaN arg),
+    // which would then yield 1.0 and hide the bad input. Reject any non-finite
+    // ratio up front so the bad input never reaches the band.
+    if !ratio.is_finite() {
+        return 0.5;
+    }
+    let clamped = (ratio.min(cap) / cap).clamp(0.5, 1.0);
+    // Defensive: if the clamped result somehow ended up non-finite (it can't,
+    // given the guards above), fall back rather than emit it.
+    if clamped.is_finite() {
+        clamped
+    } else {
+        0.5
+    }
+}
+
 /// Detect large period-over-period moves in numeric series. Returns one finding
 /// per (field) that jumped by more than `pct_threshold` percent.
 ///
@@ -139,7 +174,7 @@ pub fn detect_series_jumps(
         }
         let pct = ((curr_v - prev_v) / prev_v.abs()) * 100.0;
         if pct.abs() >= pct_threshold {
-            let confidence = ((pct.abs() / pct_threshold).min(5.0) / 5.0).clamp(0.5, 1.0);
+            let confidence = safe_confidence(pct.abs() / pct_threshold, 5.0);
             let severity = if pct.abs() >= pct_threshold * 3.0 {
                 "critical"
             } else {
@@ -398,7 +433,7 @@ pub fn detect_outliers(
     for (id, v) in &series {
         let z = (v - median_v) / scale;
         if z.abs() >= z_threshold {
-            let confidence = ((z.abs() / z_threshold).min(4.0) / 4.0).clamp(0.5, 1.0);
+            let confidence = safe_confidence(z.abs() / z_threshold, 4.0);
             let severity = if z.abs() >= z_threshold * 2.0 {
                 "critical"
             } else {
@@ -671,7 +706,7 @@ pub fn detect_year_over_year(
         }
         let pct = ((curr_v - prev_v) / prev_v.abs()) * 100.0;
         if pct.abs() >= threshold {
-            let confidence = ((pct.abs() / threshold).min(5.0) / 5.0).clamp(0.5, 1.0);
+            let confidence = safe_confidence(pct.abs() / threshold, 5.0);
             let severity = if pct.abs() >= threshold * 3.0 {
                 "critical"
             } else {
@@ -782,7 +817,7 @@ pub fn detect_proxy_divergence(
     if base > f64::EPSILON {
         let delta_pct_observed = ((last_a - last_b).abs() / base) * 100.0;
         if delta_pct_observed >= delta_pct {
-            let confidence = ((delta_pct_observed / delta_pct).min(4.0) / 4.0).clamp(0.5, 1.0);
+            let confidence = safe_confidence(delta_pct_observed / delta_pct, 4.0);
             findings.push(Finding {
                 kind: "proxy_divergence".into(),
                 source,
@@ -920,7 +955,7 @@ pub fn detect_benchmark_deviation(
         }
         let pct = ((actual_v - bench_v) / bench_v.abs()) * 100.0;
         if pct.abs() >= threshold {
-            let confidence = ((pct.abs() / threshold).min(4.0) / 4.0).clamp(0.5, 1.0);
+            let confidence = safe_confidence(pct.abs() / threshold, 4.0);
             let severity = if pct.abs() >= threshold * 2.0 {
                 "critical"
             } else {
@@ -1992,5 +2027,57 @@ mod tests {
         ];
         let f = detect_trend_break(DataSource::Hkma, "x", &recs, "v", 1);
         assert_eq!(f.len(), 1, "clamped min_run=2 flags a 2-period run");
+    }
+
+    // ---- A-008: detector confidence must never be NaN/Inf ----------------
+    #[test]
+    fn safe_confidence_never_returns_nan_or_inf() {
+        // safe_confidence(ratio, cap) = (ratio.min(cap)/cap).clamp(0.5, 1.0).
+        // ratio=0 → 0/5 = 0 → clamp floor 0.5.
+        assert!((safe_confidence(0.0, 5.0) - 0.5).abs() < f64::EPSILON);
+        // ratio >= cap → 5.0/5.0 = 1.0 → clamp ceiling 1.0 (the "capped" case).
+        assert!((safe_confidence(5.0, 5.0) - 1.0).abs() < f64::EPSILON);
+        assert!((safe_confidence(99.0, 5.0) - 1.0).abs() < f64::EPSILON); // over cap
+        // A mid-band ratio lands inside [0.5, 1.0].
+        let mid = safe_confidence(2.5, 5.0);
+        assert!((0.5..=1.0).contains(&mid), "mid-band in range, got {mid}");
+        // The A-008 repro: a NaN ratio (e.g. 0/0 from signal=0, threshold=0).
+        // Must fall back to 0.5, not propagate the NaN.
+        let nan_ratio = safe_confidence(f64::NAN, 5.0);
+        assert!(
+            nan_ratio.is_finite() && (nan_ratio - 0.5).abs() < f64::EPSILON,
+            "NaN ratio must yield 0.5, got {nan_ratio}"
+        );
+        // Inf ratio (signal/threshold with threshold→0+) must also fall back.
+        let inf_ratio = safe_confidence(f64::INFINITY, 5.0);
+        assert!(
+            inf_ratio.is_finite() && inf_ratio <= 1.0,
+            "Inf ratio must clamp, got {inf_ratio}"
+        );
+        // Defensive: a zero/garbage cap must not panic or produce NaN.
+        assert!((safe_confidence(1.0, 0.0) - 0.5).abs() < f64::EPSILON);
+        assert!((safe_confidence(1.0, f64::NAN) - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn series_jump_with_zero_threshold_yields_finite_confidence() {
+        // A-008 end-to-end: calling detect_series_jumps directly with
+        // pct_threshold=0.0 previously produced a finding with confidence=NaN
+        // (serialized as JSON null). It must now emit a finite confidence.
+        // pct=0.0 >= pct_threshold=0.0 enters the branch; the safe_confidence
+        // helper routes the 0/0 to 0.5.
+        let recs = vec![
+            rec("2026-01", "v", 1.0),
+            rec("2026-02", "v", 1.0), // pct = (1-1)/1*100 = 0.0
+        ];
+        let findings = detect_series_jumps(DataSource::Hkma, "x", &recs, "v", 0.0);
+        // pct=0.0 >= 0.0 so a finding is emitted; confidence must be finite.
+        if let Some(f) = findings.first() {
+            assert!(
+                f.confidence.is_finite(),
+                "A-008: confidence must be finite even at threshold=0, got {}",
+                f.confidence
+            );
+        }
     }
 }
