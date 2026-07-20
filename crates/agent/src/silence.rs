@@ -65,6 +65,14 @@ pub fn source_label(source: DataSource) -> &'static str {
         DataSource::DataGovHk => "data.gov.hk",
         DataSource::Press => "Press",
         DataSource::LandsD => "LandsD",
+        // Commercial property portals — labelled with their common-name brand
+        // so the Silence Index title reads naturally (e.g. "Midland Silence
+        // Index"). These sources don't yet feed the Silence Index by default
+        // (no [[agent.scan]] entries), but the label is here for completeness.
+        DataSource::ChungSen => "Chung Sen",
+        DataSource::AaProperty => "AA Property",
+        DataSource::Hkp => "HKP",
+        DataSource::Midland => "Midland",
     }
 }
 

@@ -58,6 +58,9 @@ press.html
 /package.json
 /package-lock.json
 /node_modules/
+# Nested node_modules (e.g. workers/hkgov-proxy/node_modules/) — make sure
+# the Worker's npm install doesn't get committed.
+**/node_modules/
 
 # Local Netlify folder
 .netlify

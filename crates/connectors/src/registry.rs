@@ -6,9 +6,10 @@
 
 use crate::resilience::{CircuitBreaker, RateLimiter};
 use crate::{
-    datagovhk::DataGovHkConnector, hkma::HkmaConnector, immigration::ImmigrationConnector,
-    landregistry::LandRegistryConnector, landsd::LandsDConnector, press::PressConnector,
-    rvd::RvdConnector, Connector, DatasetSpec,
+    aaproperty::AaPropertyConnector, chungsen::ChungSenConnector, datagovhk::DataGovHkConnector,
+    hkma::HkmaConnector, hkp::HkpConnector, immigration::ImmigrationConnector,
+    landregistry::LandRegistryConnector, landsd::LandsDConnector, midland::MidlandConnector,
+    press::PressConnector, rvd::RvdConnector, Connector, DatasetSpec,
 };
 use async_trait::async_trait;
 use hkgov_common::{DataSource, NormalizedRecord, Result, Settings};
@@ -129,6 +130,49 @@ impl Registry {
             5,
             std::time::Duration::from_secs(60),
         ));
+
+        // ---- Commercial property portals (v3) ----
+        //
+        // Chung Sen + AA Property are direct fetch (no proxy). HKP + Midland
+        // go through the `hkgov-proxy` Cloudflare Worker — see
+        // docs/DATA_SOURCES.md §"Commercial property portals". When the proxy
+        // is unconfigured (default), Hkp + Midland self-disable (their
+        // `datasets()` returns empty), so they appear in the registry but
+        // contribute nothing to `/sources` or the ingest schedule.
+
+        // Chung Sen (中誠地產) — 筍盤推介 / 銀主獨家 auction listings.
+        let chungsen: Arc<dyn Connector> =
+            Arc::new(ChungSenConnector::new(&settings.upstream)?);
+        // Small site, polite. Two page fetches per refresh (wid=88 + wid=91).
+        by_source.push(wrap(
+            chungsen,
+            1.0,
+            3,
+            std::time::Duration::from_secs(120),
+        ));
+
+        // AA Property (環亞物業拍賣) — open auction lot list.
+        let aaproperty: Arc<dyn Connector> =
+            Arc::new(AaPropertyConnector::new(&settings.upstream)?);
+        by_source.push(wrap(
+            aaproperty,
+            1.0,
+            3,
+            std::time::Duration::from_secs(120),
+        ));
+
+        // HKP (香港置業) — price index + economic indicators + Land Registry
+        // summary, via the Worker. The connector self-disables when no proxy
+        // is set; the wrap still registers it so `/health/sources` can report
+        // its breaker state.
+        let hkp: Arc<dyn Connector> = Arc::new(HkpConnector::new(&settings.upstream)?);
+        by_source.push(wrap(hkp, 1.0, 3, std::time::Duration::from_secs(120)));
+
+        // Midland (美聯物業) — 銀主盤 listings via the Worker + BUILD_TOKEN.
+        // Slower refresh — each page in the pagination needs its own Worker
+        // round-trip, and the foreclosure pool is small.
+        let midland: Arc<dyn Connector> = Arc::new(MidlandConnector::new(&settings.upstream)?);
+        by_source.push(wrap(midland, 0.5, 3, std::time::Duration::from_secs(300)));
 
         Ok(Self { by_source })
     }

@@ -41,6 +41,28 @@ hkma_rate_per_sec = 5
 data_gov_hk_filter_url = "https://api.data.gov.hk/v2/filter"
 data_gov_hk_archive_url = "https://app.data.gov.hk/v1/historical-archive/list-files"
 
+# ---- Cloudflare Worker proxy for commercial property portals ----
+#
+# HKP (hkp.com.hk) and Midland (midland.com.hk) sit behind CloudFront WAFs
+# that geo-block non-HK IPs — our backend's default US egress gets HTTP 403
+# on even their homepages. A Cloudflare Worker (`workers/hkgov-proxy/`)
+# fronts them from Cloudflare's edge, which the WAF accepts.
+#
+# All three fields must be set TOGETHER or all left empty. A
+# half-configured proxy fails loudly at boot (see Settings::validate).
+# When all three are empty (default), the Hkp + Midland connectors
+# self-disable: their datasets stay out of /sources and the ingest
+# scheduler skips them. Chung Sen + AA Property are direct fetch and
+# always active.
+#
+# Deploy the Worker (see workers/hkgov-proxy/README.md), then:
+#   HKGOV_UPSTREAM__PROXY_URL=https://hkgov-proxy.<your-sub>.workers.dev
+#   HKGOV_UPSTREAM__PROXY_CF_ACCESS_CLIENT_ID=<service-token-id>
+#   HKGOV_UPSTREAM__PROXY_CF_ACCESS_CLIENT_SECRET=<service-token-secret>
+proxy_url = ""
+proxy_cf_access_client_id = ""
+proxy_cf_access_client_secret = ""
+
 [cache]
 max_entries = 200000
 # D-031: 0 = no time-based eviction. Records stay cached until the ingest

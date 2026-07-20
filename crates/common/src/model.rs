@@ -29,6 +29,25 @@ pub enum DataSource {
     LandRegistry,
     /// Rating & Valuation Department (差餉物業估價處) — price/rental indices, vacancy.
     Rvd,
+    // ---- Commercial property portals (v3) ----
+    // These are private HK property-portal scrapers, not government open data.
+    // See docs/DATA_SOURCES.md §"Commercial property portals" for the full
+    // caveats ( brittleness, ToS exposure, no SLA ) and the Cloudflare Worker
+    // proxy that fronts the geo-blocked ones.
+    /// Chung Sen Property Group (中誠地產) — 筍盤推介 / 銀主獨家 auction listings.
+    /// Direct fetch (no proxy); the site is reachable from any egress.
+    ChungSen,
+    /// AA Property Auctioneers (環亞物業拍賣) — public auction lot list.
+    /// Direct fetch.
+    AaProperty,
+    /// Hong Kong Property / 香港置業 (hkp.com.hk) — market-insight price index,
+    /// economic indicators, 12-month Land Registry stats. Via the
+    /// `hkgov-proxy` Cloudflare Worker (CloudFront WAF geo-blocks non-HK IPs).
+    Hkp,
+    /// Midland Realty (美聯物業) — 銀主盤 (foreclosure) listings. Via the
+    /// `hkgov-proxy` Worker + the build-embedded `BUILD_TOKEN` JWT that the
+    /// SPA uses to authorize its `data.midland.com.hk` API calls.
+    Midland,
 }
 
 impl DataSource {
@@ -41,6 +60,10 @@ impl DataSource {
             DataSource::Immigration => "immigration",
             DataSource::LandRegistry => "landregistry",
             DataSource::Rvd => "rvd",
+            DataSource::ChungSen => "chungsen",
+            DataSource::AaProperty => "aaproperty",
+            DataSource::Hkp => "hkp",
+            DataSource::Midland => "midland",
         }
     }
 
@@ -53,6 +76,10 @@ impl DataSource {
             "immigration" | "immd" => Some(Self::Immigration),
             "landregistry" | "lr" | "landreg" => Some(Self::LandRegistry),
             "rvd" | "rating" | "valuation" => Some(Self::Rvd),
+            "chungsen" | "cs-property" | "csgroup" => Some(Self::ChungSen),
+            "aaproperty" | "aa-property" | "環亞" => Some(Self::AaProperty),
+            "hkp" | "hkproperty" | "香港置業" => Some(Self::Hkp),
+            "midland" | "midland-realty" | "美聯" => Some(Self::Midland),
             _ => None,
         }
     }

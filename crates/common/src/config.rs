@@ -94,6 +94,30 @@ pub struct UpstreamSettings {
 
     pub data_gov_hk_filter_url: String,
     pub data_gov_hk_archive_url: String,
+
+    // ---- Cloudflare Worker proxy for commercial property portals ----
+    //
+    // HKP (`hkp.com.hk`) and Midland (`midland.com.hk`) sit behind CloudFront
+    // WAFs that geo-block non-HK IPs — our backend's US egress gets HTTP 403
+    // on even their homepages. A Cloudflare Worker (`workers/hkgov-proxy/`)
+    // fronts them from Cloudflare's edge, which the WAF accepts.
+    //
+    // All three fields must be set TOGETHER or all left empty. The
+    // [`Settings::validate`] call at boot enforces this — a half-configured
+    // proxy (e.g. URL set but no service-token secret) fails loudly rather
+    // than silently 401-ing every refresh.
+    //
+    // When all three are empty, the Hkp + Midland connectors self-disable:
+    // their `datasets()` returns an empty slice and `fetch()` returns a
+    // clear "proxy not configured" error. The Chung Sen and AA Property
+    // connectors don't use the proxy and are always active.
+    //
+    // HKGOV_UPSTREAM__PROXY_URL
+    pub proxy_url: Option<String>,
+    // HKGOV_UPSTREAM__PROXY_CF_ACCESS_CLIENT_ID
+    pub proxy_cf_access_client_id: Option<String>,
+    // HKGOV_UPSTREAM__PROXY_CF_ACCESS_CLIENT_SECRET
+    pub proxy_cf_access_client_secret: Option<String>,
 }
 
 impl Default for UpstreamSettings {
@@ -108,6 +132,50 @@ impl Default for UpstreamSettings {
             data_gov_hk_filter_url: "https://api.data.gov.hk/v2/filter".to_string(),
             data_gov_hk_archive_url: "https://app.data.gov.hk/v1/historical-archive/list-files"
                 .to_string(),
+            // No proxy by default — Hkp + Midland self-disable until an
+            // operator configures all three fields. See field docs above.
+            proxy_url: None,
+            proxy_cf_access_client_id: None,
+            proxy_cf_access_client_secret: None,
+        }
+    }
+}
+
+impl UpstreamSettings {
+    /// True iff the proxy is fully configured (all three fields set). When
+    /// false, the Hkp + Midland connectors must self-disable.
+    pub fn proxy_configured(&self) -> bool {
+        let any_set = self.proxy_url.is_some()
+            || self.proxy_cf_access_client_id.is_some()
+            || self.proxy_cf_access_client_secret.is_some();
+        let all_set = self.proxy_url.is_some()
+            && self.proxy_cf_access_client_id.is_some()
+            && self.proxy_cf_access_client_secret.is_some();
+        // Half-configured is a boot-time error (caught by validate), but be
+        // defensive here too: half-configured counts as NOT configured so
+        // the connectors self-disable rather than 401 every refresh.
+        any_set && all_set
+    }
+
+    /// Returns a human-readable diagnostic when the proxy is misconfigured
+    /// (any field set without the others). `None` when config is consistent
+    /// (either all-empty or all-set).
+    pub fn proxy_misconfiguration(&self) -> Option<&'static str> {
+        let any_set = self.proxy_url.is_some()
+            || self.proxy_cf_access_client_id.is_some()
+            || self.proxy_cf_access_client_secret.is_some();
+        let all_set = self.proxy_url.is_some()
+            && self.proxy_cf_access_client_id.is_some()
+            && self.proxy_cf_access_client_secret.is_some();
+        if any_set && !all_set {
+            Some(
+                "upstream.proxy_* must all be set together or all left empty — \
+                 found a half-configured Worker proxy. Set HKGOV_UPSTREAM__PROXY_URL, \
+                 HKGOV_UPSTREAM__PROXY_CF_ACCESS_CLIENT_ID, and \
+                 HKGOV_UPSTREAM__PROXY_CF_ACCESS_CLIENT_SECRET together.",
+            )
+        } else {
+            None
         }
     }
 }
@@ -853,6 +921,15 @@ impl Settings {
                 "api.rate_per_sec=0 disables flood protection \
                  — set a non-zero value for production"
             );
+        }
+
+        // Worker proxy for commercial property portals — all three fields
+        // (URL + CF Access client id + secret) must be set together or all
+        // left empty. A half-configured proxy would 401 every refresh from
+        // the Hkp + Midland connectors; catching it at boot turns a silent
+        // "no data" into a loud, actionable error.
+        if let Some(msg) = self.upstream.proxy_misconfiguration() {
+            return Err(msg.into());
         }
 
         Ok(())
