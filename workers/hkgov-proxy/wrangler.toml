@@ -1,0 +1,48 @@
+# Cloudflare Worker: hkgov-proxy
+#
+# Fronts Hong Kong property portals that are otherwise unreachable from the
+# hkgov-rethink backend's egress:
+#   - www.hkp.com.hk + app2.hkp.com.hk          (CloudFront geo-block)
+#   - www.midland.com.hk + data.midland.com.hk  (CloudFront geo-block)
+#   - www.chungsen.com.hk, www.aaproperty.com.hk  (proxied for uniformity)
+#
+# See workers/hkgov-proxy/README.md for the deploy story (Cloudflare Access
+# policy setup, service token env vars).
+
+name = "hkgov-proxy"
+main = "src/index.js"
+compatibility_date = "2026-07-20"
+
+# Account ID — lets wrangler skip the whoami lookup, so a scoped API token
+# (CLOUDFLARE_API_TOKEN env var) is enough to deploy. No OAuth flow needed.
+account_id = "541cff22f61511c8964c3113539b3216"
+
+# Production route — turn OFF the auto-assigned *.workers.dev subdomain. We
+# don't want this Worker discoverable by guessing subdomain names; production
+# traffic goes through the custom route below, fronted by Cloudflare Access.
+#
+# To enable the custom route, uncomment and set to a hostname on a zone in
+# this Cloudflare account (e.g. proxy.example.com). Leave disabled during
+# initial bring-up — the *.workers.dev URL is fine for verification.
+# workers_dev = false
+# routes = [
+#   { pattern = "proxy.example.com/*", zone_name = "example.com" },
+# ]
+workers_dev = true
+
+# ---- Auth model (configured in the dashboard, NOT here) ----
+#
+# Access control is layered:
+#
+# 1. Cloudflare Access service token. Create in dash → Zero Trust → Access →
+#    Service Tokens. Then create an Application for this Worker's hostname
+#    (or the workers.dev URL) with a policy that requires the service token.
+#    The backend sends the token via:
+#        CF-Access-Client-Id:     <client id>
+#        CF-Access-Client-Secret: <client secret>
+#    set from HKGOV_UPSTREAM__PROXY_CF_ACCESS_CLIENT_ID / _SECRET.
+#
+# 2. Host allowlist — enforced in src/index.js (ALLOWED_HOSTNAMES). Defense
+#    in depth: even if a service token leaks, the Worker will not fetch any
+#    host outside the six hardcoded property-portal hosts.
+

@@ -2,7 +2,7 @@
 
 All endpoints below were **verified live** during development (June–July 2026).
 This file is the source of truth for what the connectors target; update it when
-a connector adds or changes an endpoint. Seven connectors are registered in
+a connector adds or changes an endpoint. Eleven connectors are registered in
 `crates/connectors/src/registry.rs`, each documented below:
 
 | # | Source | Connector file | Datasets | Cadence | Rate limit |
@@ -14,6 +14,10 @@ a connector adds or changes an endpoint. Seven connectors are registered in
 | 5 | Immigration Dept. | `immigration.rs` | 2 | daily | 2 req/s |
 | 6 | Rating & Valuation Dept. | `rvd.rs` | 2 | monthly | 2 req/s |
 | 7 | Land Registry | `landregistry.rs` | 2 | monthly | 2 req/s |
+| 8 | Chung Sen (中誠地產) | `chungsen.rs` | 1 | daily | 1 req/s |
+| 9 | AA Property (環亞拍賣) | `aaproperty.rs` | 2 | daily | 1 req/s |
+| 10 | HKP (香港置業) | `hkp.rs` | 3 | mixed | 1 req/s (via Worker) |
+| 11 | Midland (美聯物業) | `midland.rs` | 1 | daily | 0.5 req/s (via Worker) |
 
 ## 1. HKMA Open API (connector implemented — full catalog)
 
@@ -245,6 +249,143 @@ connector.
     (e.g. `"Number of Secondary Sales for ASP Residential Building Units"`);
     the connector filters for the Primary/Secondary Sales rows by substring.
 
+## 8–11. Commercial property portals (v3)
+
+Four new sources added in v3 — private HK property-portal scrapers, distinct
+from the seven government open-data connectors above. They cover the 銀主盤
+(bank-owned / foreclosure) and auction-listing pools that the gov sources
+don't surface.
+
+> ⚠️ **Brittleness disclaimer.** These are commercial sites with no public
+> SLA. Parsers may break when the sites change their HTML/JSON shape. Each
+> connector sits behind the same circuit breaker as the gov sources, so a
+> parser break → breaker trips → `/health/sources` flags the source red →
+> operator sees it. Fixing a broken selector is a 10-minute patch to one
+> file. This is the inherent cost of scraping commercial portals.
+
+### The Cloudflare Worker proxy
+
+Two of the four portals (`www.hkp.com.hk`, `www.midland.com.hk` + its API
+host `data.midland.com.hk`) sit behind CloudFront WAFs that **geo-block
+non-HK IPs** — the backend's default US egress gets HTTP 403 on even their
+homepages. A Cloudflare Worker (`workers/hkgov-proxy/`) fronts them from
+Cloudflare's edge, which the WAF accepts.
+
+The Worker is a hard runtime dependency for the HKP + Midland connectors.
+When it isn't configured (the default), those two connectors self-disable:
+their datasets stay out of `/sources` and the ingest scheduler skips them,
+so a default-config boot doesn't 502 every refresh. To enable them, deploy
+the Worker (see `workers/hkgov-proxy/README.md`) and set the three env vars:
+
+```
+HKGOV_UPSTREAM__PROXY_URL=https://hkgov-proxy.<your-sub>.workers.dev
+HKGOV_UPSTREAM__PROXY_CF_ACCESS_CLIENT_ID=<service-token-id>
+HKGOV_UPSTREAM__PROXY_CF_ACCESS_CLIENT_SECRET=<service-token-secret>
+```
+
+All three must be set together or all left empty (a half-configured proxy
+fails loudly at boot — see `Settings::validate`). Auth is layered: a
+Cloudflare Access service token gates the Worker route, plus a hardcoded
+host allowlist inside the Worker.
+
+### 8. Chung Sen Property Group (中誠地產)
+
+- **Source**: Chung Sen Property Group — 筍盤推介 (hot picks) + 銀主/獨家
+  (bank-owned/exclusive) auction listings.
+- **Base URL**: `https://www.chungsen.com.hk/tc/mortgage_property.php?wid=<id>`
+  (verified live; reachable from any egress — no proxy needed).
+- **Auth**: none. Plain HTML.
+- **Format**: server-rendered HTML `<table>`. The connector parses the rows
+  client-side.
+- **Datasets** (1):
+  - **`chungsen-listings`** — combined pool from both `wid=91` (筍盤推介) and
+    `wid=88` (銀主/獨家). **Quirk (verified July 2026):** both wid values
+    return the SAME 151-row table — the param changes only the page title.
+    The connector fetches both pages (so the operator-applied labels are
+    observed) and dedupes by 物業編號; a listing appearing under both is
+    emitted once with `page_label = "筍盤推介; 銀主/獨家"`. Fields: `address`
+    (Chinese), `build_area_sqft`, `saleable_area_sqft`, `price_10k` (售價萬,
+    may be multi-track for HOS units — kept as string when so),
+    `page_label`, `source_url`. `record_id` = 物業編號 (e.g. `260612-01`).
+
+### 9. AA Property Auctioneers (環亞物業拍賣)
+
+- **Source**: AA Property (環亞物業拍賣) — open public auction lot list.
+- **Base URL**: `https://www.aaproperty.com.hk/aa/bid_list.php` (verified
+  live; direct fetch).
+- **Auth**: none. Plain HTML.
+- **Format**: legacy HTML 4 — `<TR>` rows with `<TD>` cells. Each lot row
+  carries a link to `item.php?item_no=…` (the per-lot detail page).
+- **Datasets** (2):
+  - **`aaproperty-auction-list`** — one record per lot. Fields: `lot_no`,
+    `address`, `property_type` (空地/住宅/工商/…), `occupancy`
+    (交吉/連租約/…), `area_sqft`, `price_hint` (often 歡迎查詢 = on enquiry),
+    `agent_phone`, `source_url`. `record_id` = 物業編號, or `lot-<n>` when
+    no id is present (raw-land lots often don't carry one).
+  - **`aaproperty-auction-sessions`** — upcoming auction sessions parsed
+    from the page banner. One record per session. Fields: `date`, `time`,
+    `venue`. `record_id` = ISO date (`YYYY-MM-DD`). Lets the agent layer
+    join "next auction date" to lot counts and address clusters.
+
+### 10. Hong Kong Property / 香港置業 (HKP)
+
+- **Source**: HKP — 二手樓價指數 (secondary-market price index) + economic
+  indicators + 12-month Land Registry registration summary.
+- **Base URLs** (verified live via the Worker):
+  - `https://www.hkp.com.hk/zh-hk/market-insight` — Next.js SSR; full data
+    in `<script id="__NEXT_DATA__">` JSON island.
+  - `https://www.hkp.com.hk/land-registry-record/12months.html` — plain
+    HTML tables.
+- **Auth**: none on the HTML pages themselves (the Worker adds browser-like
+  headers).
+- **Format**: SSR JSON + HTML tables. The connector extracts the
+  `__NEXT_DATA__` JSON via regex and deserializes into typed structs. No
+  browser rendering needed.
+- **Datasets** (3):
+  - **`hkp-price-index-monthly`** — the 二手樓價指數. ~355 monthly points
+    from 1997. Fields: `mr_index` + per-region (`_hk`/`_kln`/`_nt`)
+    variants, `tx_count_*`, `net_ft_price_*`, `ft_price`, `ft_rent`,
+    `monthly_perc_*`. `record_id` = `YYYY-MM`.
+  - **`hkp-economic-indicators-monthly`** — ~354 monthly points from 1997.
+    Fields: `mortgage_interest_rate`, `rental_yield`,
+    `real_saving_interest_rate`, `hang_seng_index`, `us_dollar_index`,
+    `unemployment_rate`, `affordability_ratio`,
+    `rental_affordability_ratio`, `house_price_to_income_ratio`.
+  - **`hkp-land-registry-summary-monthly`** — latest-month breakdown by
+    property class (firsthand_private, secondhand_private, firsthand_hos,
+    industrial, commercial, shop) with `{number, amount, number_chg,
+    amount_chg}` per class. Augmented with rolling 12-month territory-wide
+    totals from the HTML page (overall_units, overall_amount_hkd_bn).
+
+### 11. Midland Realty (美聯物業) — 銀主盤
+
+- **Source**: Midland — 銀主盤 (bank-owned / foreclosure) listings.
+- **Base URLs** (verified live via the Worker):
+  - `https://www.midland.com.hk/zh-hk/list/buy/搜尋-H-3b9d6de8` — Next.js
+    SPA shell. We don't render the SPA; we extract the build-embedded
+    `BUILD_TOKEN` JWT from its `__NEXT_DATA__`.
+  - `https://data.midland.com.hk/search/v2/properties` — the JSON API the
+    SPA itself calls. Returns full structured listing data when called with
+    `Authorization: Bearer <BUILD_TOKEN>` +
+    `?q=3b9d6de8&tx_type=S&category=foreclosure`.
+- **Auth**: `BUILD_TOKEN` — a build-embedded JWT (issued 2020, no expiry)
+  carried in the SPA shell's `__NEXT_DATA__.runtimeConfig.BUILD_TOKEN`.
+  Same for every visitor. The connector fetches the shell once to extract
+  it, then uses it for the search API. (An earlier version of this
+  connector used Puppeteer + stealth to render the SPA — retired after a
+  diagnostic showed the listing grid XHR silently returns empty for
+  headless Chrome, but succeeds for direct API calls. Hitting the API
+  directly is faster, cheaper, and more robust.)
+- **Format**: JSON.
+- **Datasets** (1):
+  - **`midland-bank-listings`** — active 銀主盤 pool. The connector
+    paginates through all results (24 per page). Fields: `estate_name`,
+    `region`, `subregion`, `address`, `build_area_sqft`, `net_area_sqft`,
+    `sale_price_hkd`, `rent_hkd`, `price_per_net_sqft`, `bedroom`,
+    `tx_type`, `is_foreclosure` (bool), `tags`, `source_url`. `record_id`
+    = Midland listing id (e.g. `M350591670`). ~42 銀主盤 in the pool as of
+    July 2026.
+
 ## Politeness
 
 HKGOV endpoints are free public infrastructure. Defaults are conservative and
@@ -260,6 +401,10 @@ enforced by per-source token-bucket rate limiters + circuit breakers (see
 | Immigration | 2 req/s | 5 | 60s |
 | RVD | 2 req/s | 5 | 60s |
 | Land Registry | 2 req/s | 5 | 60s |
+| Chung Sen | 1 req/s | 3 | 120s |
+| AA Property | 1 req/s | 3 | 120s |
+| HKP | 1 req/s | 3 | 120s (via Worker) |
+| Midland | 0.5 req/s | 3 | 300s (via Worker; paginated, slow) |
 
 Do not raise these without coordination.
 

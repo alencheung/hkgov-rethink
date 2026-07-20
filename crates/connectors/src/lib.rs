@@ -9,27 +9,160 @@
 //! - **data.gov.hk** (`api.data.gov.hk/v2/filter`) — cross-departmental data.
 //! - **Press** (`api.hkma.gov.hk/public/press-releases`) — HKMA press releases.
 //! - **LandsD/CSDI** (data.gov.hk historical archive) — geospatial catalog.
+//! - **Immigration** (`immd.gov.hk`) — daily border-crossing traffic.
+//! - **RVD** (`rvd.gov.hk`) — monthly property price/rental indices.
+//! - **Land Registry** (`landreg.gov.hk`) — monthly property transactions.
+//!
+//! Commercial property portals (v3) — direct or via the `hkgov-proxy` Worker:
+//! - **Chung Sen** (`chungsen.com.hk`) — 筍盤推介 / 銀主獨家 auction listings.
+//! - **AA Property** (`aaproperty.com.hk`) — open auction lot list.
+//! - **HKP** (`hkp.com.hk`) — 二手樓價指數 + 12-month Land Registry stats.
+//! - **Midland** (`midland.com.hk`) — 銀主盤 (foreclosure) listings.
 
+pub mod aaproperty;
+pub mod chungsen;
 pub mod datagovhk;
 pub mod hkma;
 /// The verified HKMA dataset table (internal — used by `hkma`).
 mod hkma_datasets;
+pub mod hkp;
 pub mod immigration;
 pub mod landregistry;
 pub mod landsd;
+pub mod midland;
 pub mod press;
 pub mod registry;
 pub mod resilience;
 pub mod rvd;
 
 use async_trait::async_trait;
-use hkgov_common::{Cadence, Category, DataSource, NormalizedRecord, Result};
+use hkgov_common::{
+    Cadence, Category, DataSource, Error, NormalizedRecord, Result, UpstreamSettings,
+};
+use serde::Deserialize;
 
 /// Strip a leading UTF-8 BOM if present. HK gov feeds occasionally ship one
 /// (the Land Registry JSON feed did — see commit "strip UTF-8 BOM"). serde_json
 /// rejects a leading BOM, so callers must strip it before parsing text bodies.
 pub(crate) fn strip_bom(s: &str) -> &str {
     s.strip_prefix('\u{feff}').unwrap_or(s)
+}
+
+/// Fetch one URL through the `hkgov-proxy` Cloudflare Worker (fronting the
+/// geo-blocked commercial portals). Shared by the Hkp + Midland connectors.
+///
+/// The Worker wraps the upstream body in a JSON envelope:
+/// ```jsonc
+/// { "status": 200, "ct": "...", "size": 12345, "body": "<raw upstream bytes>" }
+/// ```
+/// This helper unwraps the `body` field. Non-2xx Worker envelopes (Worker
+/// problem) map to `Error::Upstream`. A 2xx envelope carrying a non-2xx
+/// upstream status (Worker OK, upstream 4xx) is returned as the body with the
+/// upstream status preserved in the `Error`'s `detail` field — callers
+/// typically handle this as a soft-fail (circuit-breaker counts it).
+///
+/// `extra_headers` carries optional per-host request headers forwarded through
+/// the Worker as `?header_<name>=<value>` query params. Midland's API needs
+/// `Authorization: Bearer <BUILD_TOKEN>`; HKP's data API needs the same shape.
+pub(crate) async fn worker_fetch(
+    client: &reqwest::Client,
+    settings: &UpstreamSettings,
+    upstream_url: &str,
+    extra_headers: &[(&str, &str)],
+) -> Result<String> {
+    let proxy_url = settings.proxy_url.as_deref().ok_or_else(|| {
+        Error::Internal(
+            "worker_fetch: upstream.proxy_url not configured — set \
+             HKGOV_UPSTREAM__PROXY_URL + the CF Access service-token fields"
+                .into(),
+        )
+    })?;
+    // Build the Worker URL: <proxy>/fetch?url=<encoded>&header_<name>=<val>&...
+    // Build the query string out-of-line so the `url::UrlQuery` borrow is
+    // dropped before the .await — holding it across the await makes the
+    // resulting future !Send, which breaks the Connector trait's `Send` bound.
+    let mut query: Vec<(String, String)> = Vec::with_capacity(1 + extra_headers.len());
+    query.push(("url".to_string(), upstream_url.to_string()));
+    for (name, value) in extra_headers {
+        query.push((format!("header_{name}"), (*value).to_string()));
+    }
+    let worker_url = format!(
+        "{}/fetch?{}",
+        proxy_url.trim_end_matches('/'),
+        url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(query.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .finish()
+    );
+    let resp = client
+        .get(&worker_url)
+        .header(
+            "CF-Access-Client-Id",
+            settings
+                .proxy_cf_access_client_id
+                .as_deref()
+                .unwrap_or(""),
+        )
+        .header(
+            "CF-Access-Client-Secret",
+            settings
+                .proxy_cf_access_client_secret
+                .as_deref()
+                .unwrap_or(""),
+        )
+        .send()
+        .await
+        .map_err(|e| Error::Upstream {
+            origin: "worker",
+            status: 0,
+            detail: format!("transport: {e}"),
+        })?;
+    let status = resp.status().as_u16();
+    if status >= 400 {
+        // Worker itself returned an error (e.g. 403 host-not-allowed, 502
+        // upstream network error). Map it cleanly.
+        let body = resp.text().await.unwrap_or_default();
+        return Err(Error::Upstream {
+            origin: "worker",
+            status,
+            detail: body,
+        });
+    }
+    let env_json = resp.text().await.map_err(|e| Error::Upstream {
+        origin: "worker",
+        status: 0,
+        detail: format!("body read: {e}"),
+    })?;
+    let env: WorkerEnvelope = serde_json::from_str(&env_json).map_err(|e| Error::Decode {
+        origin: "worker",
+        backtrace: serde::de::Error::custom(format!("envelope decode: {e}")),
+    })?;
+    // If the upstream URL itself returned non-2xx, surface that as an Upstream
+    // error — callers (circuit breaker) will count it.
+    if env.status >= 400 {
+        return Err(Error::Upstream {
+            origin: "worker",
+            status: env.status,
+            detail: format!(
+                "upstream {} returned {}",
+                upstream_url,
+                env.body.chars().take(200).collect::<String>()
+            ),
+        });
+    }
+    Ok(env.body)
+}
+
+/// The JSON envelope the `hkgov-proxy` Worker returns on success.
+#[derive(Debug, Deserialize)]
+struct WorkerEnvelope {
+    status: u16,
+    #[serde(default)]
+    #[allow(dead_code)]
+    ct: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    size: usize,
+    body: String,
 }
 
 /// What every connector must do. Implementations are constructed once at startup
