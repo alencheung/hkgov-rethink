@@ -84,6 +84,8 @@ pub fn router(state: AppState) -> Router {
         .route("/brief", get(get_brief))
         .route("/alerts", get(list_alerts))
         .route("/silence-index", get(silence_index))
+        .route("/transparency-index", get(transparency_index))
+        .route("/transparency-index/report", get(transparency_report_route))
         .route("/unprecedentedness", get(unprecedentedness))
         .route("/signals", post(create_signal).get(list_signals))
         .route("/signals/preview", post(preview_signal_route))
@@ -328,6 +330,8 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
             "GET /v1/brief",
             "GET /v1/alerts",
             "GET /v1/silence-index",
+            "GET /v1/transparency-index",
+            "GET /v1/transparency-index/report",
             "GET /v1/unprecedentedness",
             "POST /v1/signals",
             "GET /v1/signals",
@@ -1068,6 +1072,143 @@ fn is_valid_silence_period(period: &str) -> bool {
         }
     }
     false
+}
+
+// ---- M6: Transparency Foundation (composite index + report) -----------------
+
+/// `GET /v1/transparency-index?sources=&period=` — the multi-source composite.
+/// Each named source is scored independently (via the generalized signal
+/// registry), then the composite is the events-weighted average. `?sources=`
+/// is a comma-separated list (e.g. `hkma,rvd,landregistry`); omitting it
+/// scores all sources the system has insights for.
+#[derive(Deserialize, Default)]
+struct TransparencyIndexQuery {
+    #[serde(default)]
+    sources: Option<String>,
+    #[serde(default)]
+    period: Option<String>,
+}
+
+async fn transparency_index(
+    State(state): State<AppState>,
+    Query(q): Query<TransparencyIndexQuery>,
+) -> Result<Json<hkgov_agent::CompositeTransparencyIndex>, ApiError> {
+    let period = q.period.unwrap_or_default();
+    if !period.is_empty() && !is_valid_silence_period(&period) {
+        return Err(ApiError(hkgov_common::Error::BadRequest(format!(
+            "invalid `period` ({period:?}): expected one of '', 'YYYY', 'YYYY-MM', or 'YYYY-Qn'"
+        ))));
+    }
+    // Parse the comma-separated source list; fall back to all sources the
+    // registry knows if omitted.
+    let sources: Vec<DataSource> = match q.sources.as_deref() {
+        Some(s) if !s.trim().is_empty() => {
+            let mut out = Vec::new();
+            for part in s.split(',') {
+                let part = part.trim();
+                if !part.is_empty() {
+                    out.push(parse_source(part)?);
+                }
+            }
+            out
+        }
+        _ => state
+            .registry
+            .sources(),
+    };
+    let idx = hkgov_agent::build_composite_index(
+        &state.insights,
+        &sources,
+        &period,
+        chrono::Utc::now(),
+    )
+    .await;
+    Ok(Json(idx))
+}
+
+/// `GET /v1/transparency-index/report?source=&period=&format=` — the quarterly
+/// transparency report. `format=markdown` (default) returns text/markdown;
+/// `format=json` returns the structured report; `format=pdf-data` returns the
+/// JSON payload a PDF renderer consumes.
+#[derive(Deserialize, Default)]
+struct TransparencyReportQuery {
+    /// The source to report on (default hkma — backward compat).
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    period: Option<String>,
+    /// markdown | json | pdf-data. Defaults to markdown.
+    #[serde(default)]
+    format: Option<String>,
+    /// Public origin for cite permalinks (default http://localhost:8080).
+    #[serde(default)]
+    base_url: Option<String>,
+    /// Institution name for the report header.
+    #[serde(default)]
+    publisher: Option<String>,
+    /// Max contributing insights to list (default 10, clamped 1..=50).
+    #[serde(default = "default_report_top_n")]
+    top_n: usize,
+}
+
+fn default_report_top_n() -> usize {
+    10
+}
+
+async fn transparency_report_route(
+    State(state): State<AppState>,
+    Query(q): Query<TransparencyReportQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
+    let period = q.period.unwrap_or_default();
+    if !period.is_empty() && !is_valid_silence_period(&period) {
+        return Err(ApiError(hkgov_common::Error::BadRequest(format!(
+            "invalid `period` ({period:?}): expected one of '', 'YYYY', 'YYYY-MM', or 'YYYY-Qn'"
+        ))));
+    }
+    let source = match q.source.as_deref() {
+        Some(s) if !s.trim().is_empty() => parse_source(s)?,
+        _ => DataSource::Hkma,
+    };
+    let base_url = q
+        .base_url
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "http://localhost:8080".to_string());
+    let publisher = q
+        .publisher
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| hkgov_agent::DEFAULT_PUBLISHER.to_string());
+    let top_n = q.top_n.clamp(1, 50);
+    let report = hkgov_agent::build_report(
+        &state.insights,
+        &state.provenance,
+        source,
+        &period,
+        &base_url,
+        &publisher,
+        top_n,
+        chrono::Utc::now(),
+    )
+    .await;
+    let format = q.format.as_deref().unwrap_or("markdown");
+    match format {
+        "json" | "pdf-data" => Ok((
+            [(header::CONTENT_TYPE, "application/json")],
+            Json(report),
+        )
+            .into_response()),
+        "markdown" | "md" => {
+            let md = hkgov_agent::render_markdown(&report);
+            Ok((
+                [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+                md,
+            )
+                .into_response())
+        }
+        other => Err(ApiError(hkgov_common::Error::BadRequest(format!(
+            "unknown format {other:?}: expected markdown, json, or pdf-data"
+        )))),
+    }
 }
 
 // ---- GET /unprecedentedness — how rare is this value? (P-103) --------------

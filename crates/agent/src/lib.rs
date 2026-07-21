@@ -36,6 +36,8 @@ pub mod scheduler;
 pub mod signal;
 pub mod silence;
 pub mod tools;
+pub mod transparency;
+pub mod transparency_report;
 pub mod unprecedentedness;
 
 pub use alerts::{AlertDispatcher, AlertLog, AlertLogEntry, AlertSink};
@@ -68,6 +70,14 @@ pub use provenance::{
 };
 pub use qa::heuristic_answer;
 pub use scheduler::AgentSupervisor;
+pub use transparency::{
+    build_composite_index, build_index_from_registry, default_registry,
+    CompositeTransparencyIndex, SourceBreakdown, TransparencySignal, TransparencySignalRegistry,
+};
+pub use transparency_report::{
+    build_report, render_markdown, ReportInsight, ReportSignal, TransparencyReport,
+    DEFAULT_PUBLISHER, REPORT_VERSION,
+};
 pub use signal::{
     preview_signal, signal_id, FindingDto as SignalFindingDto, Signal, SignalChannel, SignalPatch,
     SignalPreview, SignalStore, SignalStoreSnapshot,
