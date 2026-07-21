@@ -1,10 +1,12 @@
 //! Hong Kong Property / 香港置業 (hkp.com.hk) connector — price index,
-//! economic indicators, and 12-month Land Registry summary.
+//! economic indicators, 12-month Land Registry summary, and recent
+//! transaction listings.
 //!
-//! Source: `www.hkp.com.hk` (verified live via the `hkgov-proxy` Worker —
-//! CloudFront WAF geo-blocks non-HK IPs, returning HTTP 403 from our US egress).
+//! Source: `www.hkp.com.hk` + `data.hkp.com.hk` (verified live via the
+//! `hkgov-proxy` Worker — CloudFront WAF geo-blocks non-HK IPs, returning
+//! HTTP 403 from our US egress).
 //!
-//! Three datasets, two upstream pages:
+//! Four datasets, three upstream sources:
 //!
 //! 1. `hkp-price-index-monthly` ← market-insight page `__NEXT_DATA__` → `mrIndex[]`
 //!    The 二手樓價指數 — HK/KLN/NT price indices, transaction counts, per-sqft
@@ -19,10 +21,21 @@
 //!    (firsthand_private, secondhand_private, firsthand_hos, industrial,
 //!    commercial, shop) with `{number, amount, number_chg, amount_chg}`.
 //!
-//! Both pages are Next.js SSR — the full data is embedded in an
+//! 4. `hkp-transactions-recent` ← `data.hkp.com.hk/search/v1/transactions` JSON API
+//!    (the same endpoint the SPA's listing grid calls). Recent property
+//!    transactions — each record is one sale/lease with estate, region,
+//!    address, price, area, bedroom count, tx_date. ~236k transactions in
+//!    the 3-year window; the connector pulls the most recent N pages.
+//!
+//! Both HTML pages are Next.js SSR — the full data is embedded in an
 //! `<script id="__NEXT_DATA__" type="application/json">{...}</script>` island
 //! in the HTML body. We extract that JSON with a regex and deserialize into
 //! typed structs. No browser rendering needed.
+//!
+//! The transactions API needs `Authorization: Bearer <JWT>` — the JWT is the
+//! `userToken` field embedded in any HKP page's `__NEXT_DATA__.pageProps`.
+//! Per-session, but lives ~1 year. The connector fetches the transaction
+//! listing page once to extract the token, then calls the JSON API directly.
 
 use crate::{worker_fetch, Connector, DatasetSpec};
 use async_trait::async_trait;
@@ -38,6 +51,7 @@ use std::time::Duration;
 const PRICE_INDEX_ID: &str = "hkp-price-index-monthly";
 const ECON_INDICATORS_ID: &str = "hkp-economic-indicators-monthly";
 const LAND_REGISTRY_SUMMARY_ID: &str = "hkp-land-registry-summary-monthly";
+const TRANSACTIONS_ID: &str = "hkp-transactions-recent";
 
 static DATASETS: OnceLock<Vec<DatasetSpec>> = OnceLock::new();
 
@@ -94,12 +108,45 @@ fn datasets() -> &'static [DatasetSpec] {
                 cadence: Cadence::Monthly,
                 refresh_interval_secs: 6 * 3600,
             },
+            DatasetSpec {
+                id: TRANSACTIONS_ID,
+                title: "HKP Recent Property Transactions".into(),
+                description: Some(
+                    "Hong Kong Property (香港置業) recent property \
+                     transactions, pulled from the data.hkp.com.hk \
+                     /search/v1/transactions API that backs the SPA's \
+                     transaction listing grid. Each record is one completed \
+                     sale or lease within the last 3 years (configurable), \
+                     with estate name, region, subregion, address, price, \
+                     area (build + net), bedroom count, tx_date, and \
+                     transaction type (S=sale, L=lease). record_id = HKP \
+                     transaction id (e.g. I20260700522). The connector \
+                     paginates through the most recent transactions on each \
+                     refresh — set HKGOV_HKP__TRANSACTIONS_MAX_PAGES to \
+                     control depth (default 4 pages × 24 = 96 records)."
+                        .into(),
+                ),
+                category: Category::Property,
+                tags: &["hkp", "transactions", "成交紀錄", "recent-sales"],
+                cadence: Cadence::Daily,
+                refresh_interval_secs: 6 * 3600,
+            },
         ]
     })
 }
 
 const MARKET_INSIGHT_URL: &str = "https://www.hkp.com.hk/zh-hk/market-insight";
 const TWELVE_MONTH_URL: &str = "https://www.hkp.com.hk/land-registry-record/12months.html";
+/// The transaction listing page — fetched for its `__NEXT_DATA__.pageProps.userToken`
+/// (the JWT the SPA uses to authorize its data.hkp.com.hk API calls).
+/// We don't render the SPA; we extract the token and hit the JSON API directly.
+const TXN_PAGE_URL: &str = "https://www.hkp.com.hk/zh-hk/list/transaction";
+/// The transactions API base. Paginated: ?page=N&limit=24. Default time window
+/// is 3 years (`tx_date=3year`), which gives ~236k records; the connector
+/// pulls the most recent pages (see TRANSACTIONS_DEFAULT_PAGES).
+const TXN_API_URL: &str = "https://data.hkp.com.hk/search/v1/transactions";
+const TXN_PAGE_SIZE: u32 = 24;
+const TXN_DEFAULT_PAGES: u32 = 4;
 
 pub struct HkpConnector {
     client: reqwest::Client,
@@ -139,6 +186,55 @@ impl HkpConnector {
 
     async fn fetch_12month_html(&self) -> Result<String> {
         worker_fetch(&self.client, &self.upstream, TWELVE_MONTH_URL, &[]).await
+    }
+
+    /// Fetch the transaction listing page's SSR HTML and extract the
+    /// `userToken` JWT from `__NEXT_DATA__.pageProps.userToken`. This token
+    /// authorizes calls to the data.hkp.com.hk API. Per-session but lives
+    /// ~1 year, so caching across a single refresh is fine.
+    async fn fetch_user_token(&self) -> Result<String> {
+        let html = worker_fetch(&self.client, &self.upstream, TXN_PAGE_URL, &[]).await?;
+        let json = extract_next_data(&html)?;
+        let parsed: NextData = serde_json::from_str(&json).map_err(|e| Error::Decode {
+            origin: "hkp",
+            backtrace: serde::de::Error::custom(format!(
+                "transaction page __NEXT_DATA__ decode: {e}"
+            )),
+        })?;
+        parsed
+            .props
+            .page_props
+            .user_token
+            .ok_or_else(|| Error::Decode {
+                origin: "hkp",
+                backtrace: serde::de::Error::custom(
+                    "no pageProps.userToken on transaction page — token mint changed?",
+                ),
+            })
+    }
+
+    /// Hit the transactions API for one page of recent results.
+    async fn fetch_transactions_page(
+        &self,
+        auth_token: &str,
+        page: u32,
+    ) -> Result<TxnResponse> {
+        let url = format!(
+            "{TXN_API_URL}?hash=true&lang=zh-hk&currency=HKD&unit=feet&search_behavior=normal&tx_date=3year&page={page}&limit={TXN_PAGE_SIZE}"
+        );
+        let auth_value = format!("Bearer {auth_token}");
+        let body = worker_fetch(
+            &self.client,
+            &self.upstream,
+            &url,
+            &[("authorization", auth_value.as_str())],
+        )
+        .await?;
+        let resp: TxnResponse = serde_json::from_str(&body).map_err(|e| Error::Decode {
+            origin: "hkp",
+            backtrace: serde::de::Error::custom(format!("transactions decode: {e}")),
+        })?;
+        Ok(resp)
     }
 }
 
@@ -202,11 +298,62 @@ impl Connector for HkpConnector {
                 tracing::info!(dataset, points = recs.len(), "hkp: parsed land registry summary");
                 Ok(recs)
             }
+            TRANSACTIONS_ID => {
+                let token = self.fetch_user_token().await?;
+                let mut all_records = Vec::new();
+                let mut total_reported: u64 = 0;
+                let max_pages = txn_max_pages();
+                for page in 1..=max_pages {
+                    let resp = match self.fetch_transactions_page(&token, page).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            // Log + stop on the first failing page rather than
+                            // aborting the whole fetch — earlier pages are
+                            // valid data.
+                            tracing::warn!(
+                                dataset,
+                                page,
+                                error = %e,
+                                "hkp transactions: page failed, stopping pagination"
+                            );
+                            break;
+                        }
+                    };
+                    total_reported = total_reported.max(resp.count.unwrap_or(0));
+                    let result_count = resp.result.len();
+                    for item in resp.result {
+                        if let Some(rec) = item.into_record(now) {
+                            all_records.push(rec);
+                        }
+                    }
+                    if result_count < TXN_PAGE_SIZE as usize {
+                        break; // short page = end of results
+                    }
+                }
+                tracing::info!(
+                    dataset,
+                    pages = max_pages,
+                    total_reported,
+                    collected = all_records.len(),
+                    "hkp: pulled recent transactions"
+                );
+                Ok(all_records)
+            }
             other => Err(Error::Internal(format!(
                 "hkp: unknown dataset {other}"
             ))),
         }
     }
+}
+
+/// Page-depth override. Read once from HKGOV_HKP__TRANSACTIONS_MAX_PAGES at
+/// startup; defaults to 4 (96 records). Cap at 25 to bound cost.
+fn txn_max_pages() -> u32 {
+    std::env::var("HKGOV_HKP__TRANSACTIONS_MAX_PAGES")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .map(|n| n.min(25).max(1))
+        .unwrap_or(TXN_DEFAULT_PAGES)
 }
 
 // ---- Next.js __NEXT_DATA__ extraction ----
@@ -258,6 +405,10 @@ struct MarketInsightData {
     economic_indicators: Vec<EconIndicatorPoint>,
     #[serde(default, rename = "langRegRecords")]
     lang_reg_records: Vec<LangRegRecord>,
+    /// JWT authorizing calls to data.hkp.com.hk. Present on every HKP page's
+    /// pageProps; used only by the transactions dataset.
+    #[serde(default, rename = "userToken")]
+    user_token: Option<String>,
 }
 
 /// One row of the 二手樓價指數 series. Most fields are optional because the
@@ -495,6 +646,182 @@ impl LangRegRecord {
             fetched_at: now,
         })
     }
+}
+
+// ---- transactions API types ----
+
+/// Nested `{id, name}` shape used by region/subregion/estate/district in the
+/// transactions payload.
+#[derive(Debug, Deserialize)]
+struct Nest {
+    #[serde(default)]
+    #[allow(dead_code)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TxnResponse {
+    /// Total transactions matching the query (across all pages). ~236k for
+    /// the default 3-year window.
+    #[serde(default)]
+    count: Option<u64>,
+    #[serde(default)]
+    result: Vec<TxnItem>,
+}
+
+/// One transaction row from the HKP data API. Field names mirror the upstream
+/// JSON exactly (camelCase); only the fields we read are declared, the rest
+/// are silently dropped by serde.
+#[derive(Debug, Deserialize)]
+struct TxnItem {
+    /// HKP transaction id, e.g. `"I20260700522"`. Stable.
+    #[serde(default)]
+    id: Option<String>,
+    /// ISO timestamp of the transaction, e.g. `"2026-07-20T16:00:00.000Z"`.
+    #[serde(default, rename = "tx_date")]
+    tx_date: Option<String>,
+    #[serde(default)]
+    estate: Option<Nest>,
+    #[serde(default)]
+    region: Option<Nest>,
+    #[serde(default)]
+    subregion: Option<Nest>,
+    #[serde(default)]
+    district: Option<Nest>,
+    /// Build area (sqft).
+    #[serde(default)]
+    area: Option<f64>,
+    /// Net (saleable) area (sqft).
+    #[serde(default, rename = "net_area")]
+    net_area: Option<f64>,
+    /// Transaction price in HKD (sale) or monthly rent (lease).
+    #[serde(default)]
+    price: Option<f64>,
+    /// Per-net-sqft unit price (derived; useful for cross-estate comparison).
+    #[serde(default, rename = "unit_price_net")]
+    unit_price_net: Option<f64>,
+    /// Bedroom count (number or label).
+    #[serde(default)]
+    bedroom: Option<serde_json::Value>,
+    /// Transaction type: `"S"` (sale), `"L"` (lease), or other codes.
+    #[serde(default, rename = "tx_type")]
+    tx_type: Option<String>,
+    /// Market type: `"1ST"` (firsthand), `"2ND"` (secondhand), etc.
+    #[serde(default, rename = "mkt_type")]
+    mkt_type: Option<String>,
+    /// Floor level (e.g. `"HIGH"`, `"MID"`, `"LOW"`, or a number).
+    #[serde(default, rename = "floor_level")]
+    floor_level: Option<String>,
+    /// Flat / unit identifier.
+    #[serde(default)]
+    flat: Option<String>,
+    /// Free-form source-of-data note (e.g. Land Registry reference).
+    #[serde(default)]
+    source: Option<String>,
+    /// Tags — includes `FIRSTHAND` for primary-market sales.
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+impl TxnItem {
+    fn into_record(self, now: chrono::DateTime<Utc>) -> Option<NormalizedRecord> {
+        let id = self.id.clone()?;
+        let mut f = BTreeMap::new();
+        if let Some(n) = self.estate.as_ref().and_then(|e| e.name.as_deref()) {
+            f.insert("estate_name".into(), RecordValue::Str(n.to_string()));
+        }
+        if let Some(n) = self.region.as_ref().and_then(|r| r.name.as_deref()) {
+            f.insert("region".into(), RecordValue::Str(n.to_string()));
+        }
+        if let Some(n) = self.subregion.as_ref().and_then(|s| s.name.as_deref()) {
+            f.insert("subregion".into(), RecordValue::Str(n.to_string()));
+        }
+        if let Some(n) = self.district.as_ref().and_then(|d| d.name.as_deref()) {
+            f.insert("district".into(), RecordValue::Str(n.to_string()));
+        }
+        if let Some(v) = self.area {
+            f.insert("build_area_sqft".into(), RecordValue::Float(v));
+        }
+        if let Some(v) = self.net_area {
+            f.insert("net_area_sqft".into(), RecordValue::Float(v));
+        }
+        if let Some(p) = self.price {
+            f.insert("price_hkd".into(), RecordValue::Float(p));
+        }
+        if let Some(u) = self.unit_price_net {
+            f.insert("unit_price_net".into(), RecordValue::Float(u));
+        }
+        if let Some(b) = self.bedroom {
+            let v = match b {
+                serde_json::Value::Number(n) => n
+                    .as_f64()
+                    .map(RecordValue::Float)
+                    .unwrap_or(RecordValue::Null),
+                serde_json::Value::String(s) => RecordValue::Str(s),
+                other => RecordValue::Str(other.to_string()),
+            };
+            if !matches!(v, RecordValue::Null) {
+                f.insert("bedroom".into(), v);
+            }
+        }
+        if let Some(t) = self.tx_type {
+            f.insert("tx_type".into(), RecordValue::Str(t));
+        }
+        if let Some(m) = self.mkt_type {
+            f.insert("mkt_type".into(), RecordValue::Str(m));
+        }
+        if let Some(fl) = self.floor_level {
+            f.insert("floor_level".into(), RecordValue::Str(fl));
+        }
+        if let Some(flat) = self.flat {
+            f.insert("flat".into(), RecordValue::Str(flat));
+        }
+        if let Some(s) = self.source {
+            f.insert("source".into(), RecordValue::Str(s));
+        }
+        let firsthand = self
+            .tags
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case("FIRSTHAND"));
+        if firsthand {
+            f.insert("is_firsthand".into(), RecordValue::Bool(true));
+        }
+        if !self.tags.is_empty() {
+            f.insert("tags".into(), RecordValue::Str(self.tags.join(",")));
+        }
+        // Normalize the tx_date into a YYYY-MM-DD or YYYY-MM string when it
+        // parses — gives the agent layer a stable join key.
+        if let Some(ts) = self.tx_date.as_deref() {
+            f.insert("tx_date".into(), RecordValue::Str(ts.to_string()));
+            if let Some(day) = iso_ts_to_day(ts) {
+                f.insert("tx_date_iso".into(), RecordValue::Str(day));
+            } else if let Some(month) = iso_ts_to_month(ts) {
+                f.insert("tx_date_iso".into(), RecordValue::Str(month));
+            }
+        }
+        f.insert("source_url".into(), RecordValue::Str(TXN_PAGE_URL.into()));
+        Some(NormalizedRecord {
+            source: DataSource::Hkp,
+            dataset: TRANSACTIONS_ID.into(),
+            record_id: id,
+            fields: f,
+            fetched_at: now,
+        })
+    }
+}
+
+/// `"2026-07-20T16:00:00.000Z"` → `"2026-07-20"`.
+fn iso_ts_to_day(ts: &str) -> Option<String> {
+    let bytes = ts.as_bytes();
+    if bytes.len() >= 10 && bytes[4] == b'-' && bytes[7] == b'-' {
+        let s = std::str::from_utf8(&bytes[..10]).ok()?;
+        if s.chars().filter(|c| *c == '-').count() == 2 {
+            return Some(s.to_string());
+        }
+    }
+    None
 }
 
 /// Parse the 12-month HTML table for territory-wide monthly registration
@@ -813,5 +1140,103 @@ mod tests {
             Some(&RecordValue::Float(477.8))
         );
         assert_eq!(recs[2].record_id, "2025-10");
+    }
+
+    #[test]
+    fn parses_transactions_response_sample() {
+        // Trimmed version of the live data.hkp.com.hk /search/v1/transactions
+        // response shape — verified July 2026.
+        let raw = r#"{
+            "count": 236446,
+            "result": [
+                {
+                    "id": "I20260700522",
+                    "region": {"id": "20", "name": "九龍"},
+                    "subregion": {"id": "2009", "name": "九龍城"},
+                    "district": {"id": "200901", "name": "黃埔"},
+                    "estate": {"id": "E00037", "name": "黃埔花園"},
+                    "phase": null,
+                    "building": null,
+                    "floor_level": "MID",
+                    "bedroom": 3,
+                    "flat": "C座",
+                    "area": 973,
+                    "net_area": 853,
+                    "price": 31000,
+                    "tags": [],
+                    "tx_type": "L",
+                    "tx_date": "2026-07-20T16:00:00.000Z",
+                    "mkt_type": "2ND",
+                    "source": "LAND_REGISTRY",
+                    "unit_price_net": 36
+                },
+                {
+                    "id": "I20260700518",
+                    "estate": {"name": "沙田第一城"},
+                    "region": {"name": "新界"},
+                    "area": 395,
+                    "net_area": 304,
+                    "price": 5200000,
+                    "tx_type": "S",
+                    "tx_date": "2026-07-19T16:00:00.000Z",
+                    "tags": ["FIRSTHAND"]
+                }
+            ]
+        }"#;
+        let resp: TxnResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(resp.count, Some(236446));
+        assert_eq!(resp.result.len(), 2);
+        let now = Utc::now();
+        let recs: Vec<NormalizedRecord> =
+            resp.result.into_iter().filter_map(|i| i.into_record(now)).collect();
+        assert_eq!(recs.len(), 2);
+
+        // First record: a lease, full fields populated.
+        let r0 = recs.iter().find(|r| r.record_id == "I20260700522").unwrap();
+        assert_eq!(
+            r0.fields.get("estate_name"),
+            Some(&RecordValue::Str("黃埔花園".into()))
+        );
+        assert_eq!(
+            r0.fields.get("tx_type"),
+            Some(&RecordValue::Str("L".into()))
+        );
+        assert_eq!(
+            r0.fields.get("price_hkd"),
+            Some(&RecordValue::Float(31000.0))
+        );
+        assert_eq!(
+            r0.fields.get("tx_date_iso"),
+            Some(&RecordValue::Str("2026-07-20".into()))
+        );
+        // Firsthand flag should NOT be set on this one (tags empty).
+        assert!(r0.fields.get("is_firsthand").is_none());
+
+        // Second record: a sale, tagged firsthand.
+        let r1 = recs.iter().find(|r| r.record_id == "I20260700518").unwrap();
+        assert_eq!(
+            r1.fields.get("tx_type"),
+            Some(&RecordValue::Str("S".into()))
+        );
+        assert_eq!(r1.fields.get("is_firsthand"), Some(&RecordValue::Bool(true)));
+    }
+
+    #[test]
+    fn drops_transaction_without_id() {
+        let raw = r#"{"result":[{"estate":{"name":"No-ID"},"price":1000000}]}"#;
+        let resp: TxnResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc::now();
+        let recs: Vec<_> = resp.result.into_iter().filter_map(|i| i.into_record(now)).collect();
+        assert!(recs.is_empty(), "transactions without an id are dropped");
+    }
+
+    #[test]
+    fn iso_ts_to_day_truncates() {
+        assert_eq!(
+            iso_ts_to_day("2026-07-20T16:00:00.000Z"),
+            Some("2026-07-20".into())
+        );
+        assert_eq!(iso_ts_to_day("2026-07-20"), Some("2026-07-20".into()));
+        assert!(iso_ts_to_day("not-a-date").is_none());
     }
 }

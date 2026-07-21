@@ -16,7 +16,7 @@ a connector adds or changes an endpoint. Eleven connectors are registered in
 | 7 | Land Registry | `landregistry.rs` | 2 | monthly | 2 req/s |
 | 8 | Chung Sen (中誠地產) | `chungsen.rs` | 1 | daily | 1 req/s |
 | 9 | AA Property (環亞拍賣) | `aaproperty.rs` | 2 | daily | 1 req/s |
-| 10 | HKP (香港置業) | `hkp.rs` | 3 | mixed | 1 req/s (via Worker) |
+| 10 | HKP (香港置業) | `hkp.rs` | 4 | mixed | 1 req/s (via Worker) |
 | 11 | Midland (美聯物業) | `midland.rs` | 1 | daily | 0.5 req/s (via Worker) |
 
 ## 1. HKMA Open API (connector implemented — full catalog)
@@ -330,18 +330,26 @@ host allowlist inside the Worker.
 ### 10. Hong Kong Property / 香港置業 (HKP)
 
 - **Source**: HKP — 二手樓價指數 (secondary-market price index) + economic
-  indicators + 12-month Land Registry registration summary.
+  indicators + 12-month Land Registry registration summary + recent
+  transaction listings.
 - **Base URLs** (verified live via the Worker):
   - `https://www.hkp.com.hk/zh-hk/market-insight` — Next.js SSR; full data
     in `<script id="__NEXT_DATA__">` JSON island.
   - `https://www.hkp.com.hk/land-registry-record/12months.html` — plain
     HTML tables.
-- **Auth**: none on the HTML pages themselves (the Worker adds browser-like
-  headers).
-- **Format**: SSR JSON + HTML tables. The connector extracts the
+  - `https://www.hkp.com.hk/zh-hk/list/transaction` — Next.js SPA shell
+    (we extract its `userToken` JWT but don't render it).
+  - `https://data.hkp.com.hk/search/v1/transactions` — the JSON API the
+    transaction SPA calls for its listing grid.
+- **Auth**: the HTML pages need no auth. The transactions API needs
+  `Authorization: Bearer <userToken>` — a per-session JWT (~1 year lifetime)
+  embedded in `__NEXT_DATA__.pageProps.userToken` on every HKP page. The
+  connector fetches the transaction listing page once to extract the token,
+  then calls the JSON API directly.
+- **Format**: SSR JSON + HTML tables + JSON API. The connector extracts the
   `__NEXT_DATA__` JSON via regex and deserializes into typed structs. No
   browser rendering needed.
-- **Datasets** (3):
+- **Datasets** (4):
   - **`hkp-price-index-monthly`** — the 二手樓價指數. ~355 monthly points
     from 1997. Fields: `mr_index` + per-region (`_hk`/`_kln`/`_nt`)
     variants, `tx_count_*`, `net_ft_price_*`, `ft_price`, `ft_rent`,
@@ -356,6 +364,16 @@ host allowlist inside the Worker.
     industrial, commercial, shop) with `{number, amount, number_chg,
     amount_chg}` per class. Augmented with rolling 12-month territory-wide
     totals from the HTML page (overall_units, overall_amount_hkd_bn).
+  - **`hkp-transactions-recent`** — recent property transactions (sale +
+    lease), pulled from the `data.hkp.com.hk/search/v1/transactions` API.
+    Each record is one completed transaction with estate, region,
+    subregion, district, address (flat/floor), build + net area, price,
+    per-sqft unit price, bedroom count, tx_type (`S`=sale / `L`=lease),
+    mkt_type (`1ST` / `2ND`), tx_date (ISO + truncated). `record_id` =
+    HKP transaction id (e.g. `I20260700522`). ~236k transactions in the
+    3-year window; the connector paginates through the most recent pages
+    (default 4 pages × 24 = 96 records; override with
+    `HKGOV_HKP__TRANSACTIONS_MAX_PAGES`, capped at 25).
 
 ### 11. Midland Realty (美聯物業) — 銀主盤
 

@@ -6,7 +6,7 @@
 const ALLOWED_HOSTNAMES = new Set([
   'www.hkp.com.hk', 'www.midland.com.hk',
   'www.chungsen.com.hk', 'www.aaproperty.com.hk',
-  'data.midland.com.hk', 'app2.hkp.com.hk',
+  'data.midland.com.hk', 'data.hkp.com.hk',
 ]);
 const BROWSER_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
