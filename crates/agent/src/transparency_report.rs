@@ -67,25 +67,60 @@ pub struct ReportSignal {
     pub contribution: f64,
 }
 
-/// Build a transparency report for one source + period.
-///
-/// `base_url` is the public origin for cite permalinks (e.g.
-/// "https://transparency.example.hk"). `top_n` caps the contributing-insights
-/// list (default 10).
+/// Shaping options for a transparency report, grouped so `build_report` stays
+/// under clippy's argument-count threshold. Construct via [`ReportOptions::new`]
+/// and chain builder methods, or build inline.
+#[derive(Debug, Clone)]
+pub struct ReportOptions {
+    pub source: DataSource,
+    pub period: String,
+    /// Public origin for cite permalinks.
+    pub base_url: String,
+    /// Institution name for the report header.
+    pub publisher: String,
+    /// Max contributing insights to list.
+    pub top_n: usize,
+}
+
+impl ReportOptions {
+    pub fn new(source: DataSource, period: impl Into<String>) -> Self {
+        Self {
+            source,
+            period: period.into(),
+            base_url: "http://localhost:8080".to_string(),
+            publisher: DEFAULT_PUBLISHER.to_string(),
+            top_n: 10,
+        }
+    }
+    pub fn base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = url.into();
+        self
+    }
+    pub fn publisher(mut self, name: impl Into<String>) -> Self {
+        self.publisher = name.into();
+        self
+    }
+    pub fn top_n(mut self, n: usize) -> Self {
+        self.top_n = n;
+        self
+    }
+}
+
+/// Build a transparency report from the held insights + provenance.
+/// `insights`/`provenance` are the live stores; `opts` shapes the report
+/// (source, period, base_url, publisher, top_n); `now` is injected for
+/// deterministic timestamps.
 pub async fn build_report(
     insights: &Arc<InsightStore>,
     provenance: &Arc<ProvenanceStore>,
-    source: DataSource,
-    period: &str,
-    base_url: &str,
-    publisher: &str,
-    top_n: usize,
+    opts: &ReportOptions,
     now: DateTime<Utc>,
 ) -> TransparencyReport {
     let registry = crate::transparency::default_registry();
     let snapshot = insights.snapshot().await;
     let all = &snapshot.insights;
-    let index: SilenceIndex = build_index_from_registry(all, source, period, now, &registry);
+    let index: SilenceIndex =
+        build_index_from_registry(all, opts.source, &opts.period, now, &registry);
 
     // Map signal kinds to human-readable labels.
     let signal_breakdown: Vec<ReportSignal> = index
@@ -104,7 +139,7 @@ pub async fn build_report(
     // ranked by severity (critical > warning > info) then confidence.
     let mut in_period: Vec<&Insight> = all
         .iter()
-        .filter(|i| i.source == source && crate::silence::insight_in_period(i, period))
+        .filter(|i| i.source == opts.source && crate::silence::insight_in_period(i, &opts.period))
         .collect();
     in_period.sort_by(|a, b| {
         severity_rank(&a.severity)
@@ -117,12 +152,12 @@ pub async fn build_report(
     });
 
     let mut top: Vec<ReportInsight> = Vec::new();
-    for i in in_period.iter().take(top_n) {
+    for i in in_period.iter().take(opts.top_n) {
         let provenance = provenance.get(&i.id).await;
         // Cite permalink (best-effort; base_url is the public origin).
         let permalink = format!(
             "{}/cite/{}",
-            base_url.trim_end_matches('/'),
+            opts.base_url.trim_end_matches('/'),
             url_encoded(&i.id)
         );
         top.push(ReportInsight {
@@ -141,7 +176,7 @@ pub async fn build_report(
 
     TransparencyReport {
         report_version: REPORT_VERSION,
-        publisher: publisher.to_string(),
+        publisher: opts.publisher.clone(),
         methodology_version: index.methodology_version,
         cite_version: CITE_VERSION,
         source: index.source,

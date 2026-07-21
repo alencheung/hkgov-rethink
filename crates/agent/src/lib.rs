@@ -85,7 +85,7 @@ pub use transparency::{
     SourceBreakdown, TransparencySignal, TransparencySignalRegistry,
 };
 pub use transparency_report::{
-    build_report, render_markdown, ReportInsight, ReportSignal, TransparencyReport,
+    build_report, render_markdown, ReportInsight, ReportOptions, ReportSignal, TransparencyReport,
     DEFAULT_PUBLISHER, REPORT_VERSION,
 };
 pub use unprecedentedness::{

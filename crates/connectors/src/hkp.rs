@@ -18,8 +18,8 @@
 //!
 //! 3. `hkp-land-registry-summary-monthly` ← market-insight `langRegRecords[]`
 //!    + 12-month page HTML tables. Latest-month breakdown by property class
-//!    (firsthand_private, secondhand_private, firsthand_hos, industrial,
-//!    commercial, shop) with `{number, amount, number_chg, amount_chg}`.
+//!      (firsthand_private, secondhand_private, firsthand_hos, industrial,
+//!      commercial, shop) with `{number, amount, number_chg, amount_chg}`.
 //!
 //! 4. `hkp-transactions-recent` ← `data.hkp.com.hk/search/v1/transactions` JSON API
 //!    (the same endpoint the SPA's listing grid calls). Recent property
@@ -60,15 +60,14 @@ fn datasets() -> &'static [DatasetSpec] {
         vec![
             DatasetSpec {
                 id: PRICE_INDEX_ID,
-                title: "HKP 二手樓價指數 — Monthly Price Index".into(),
+                title: "HKP 二手樓價指數 — Monthly Price Index",
                 description: Some(
                     "Hong Kong Property (香港置業) monthly secondary-market \
                      price index — the 二手樓價指數. Covers HK/KLN/NT regions, \
                      transaction counts (total / firsthand / secondhand), \
                      per-sqft price + rent (gross + net), and weekly + monthly \
                      % changes. ~355 monthly points from 1997. record_id = \
-                     YYYY-MM (ISO month)."
-                        .into(),
+                     YYYY-MM (ISO month).",
                 ),
                 category: Category::Property,
                 tags: &["hkp", "price-index", "二手樓價指數", "香港置業"],
@@ -77,14 +76,13 @@ fn datasets() -> &'static [DatasetSpec] {
             },
             DatasetSpec {
                 id: ECON_INDICATORS_ID,
-                title: "HKP Economic Indicators — Monthly".into(),
+                title: "HKP Economic Indicators — Monthly",
                 description: Some(
                     "Hong Kong Property (香港置業) monthly economic indicators \
                      that contextualize the property market: mortgage interest \
                      rate, rental yield, real savings rate, Hang Seng Index, \
                      USD index, unemployment rate, affordability ratio (price \
-                     + rental). ~354 monthly points from 1997."
-                        .into(),
+                     + rental). ~354 monthly points from 1997.",
                 ),
                 category: Category::Property,
                 tags: &[
@@ -98,15 +96,14 @@ fn datasets() -> &'static [DatasetSpec] {
             },
             DatasetSpec {
                 id: LAND_REGISTRY_SUMMARY_ID,
-                title: "HKP Land Registry Summary — Latest Month by Class".into(),
+                title: "HKP Land Registry Summary — Latest Month by Class",
                 description: Some(
                     "Hong Kong Property (香港置業) summary of Land Registry \
                      registrations, broken down by property class (firsthand \
                      private, secondhand private, firsthand HOS, industrial, \
                      commercial, shop). Each class carries number of \
                      registrations, total amount (HK$ 億), and % change vs \
-                     previous month. record_id = YYYY-MM."
-                        .into(),
+                     previous month. record_id = YYYY-MM.",
                 ),
                 category: Category::Property,
                 tags: &["hkp", "land-registry", "transaction-volume", "by-class"],
@@ -115,7 +112,7 @@ fn datasets() -> &'static [DatasetSpec] {
             },
             DatasetSpec {
                 id: TRANSACTIONS_ID,
-                title: "HKP Recent Property Transactions".into(),
+                title: "HKP Recent Property Transactions",
                 description: Some(
                     "Hong Kong Property (香港置業) recent property \
                      transactions, pulled from the data.hkp.com.hk \
@@ -128,8 +125,7 @@ fn datasets() -> &'static [DatasetSpec] {
                      transaction id (e.g. I20260700522). The connector \
                      paginates through the most recent transactions on each \
                      refresh — set HKGOV_HKP__TRANSACTIONS_MAX_PAGES to \
-                     control depth (default 4 pages × 24 = 96 records)."
-                        .into(),
+                     control depth (default 4 pages × 24 = 96 records).",
                 ),
                 category: Category::Property,
                 tags: &["hkp", "transactions", "成交紀錄", "recent-sales"],
@@ -359,7 +355,7 @@ fn txn_max_pages() -> u32 {
     std::env::var("HKGOV_HKP__TRANSACTIONS_MAX_PAGES")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
-        .map(|n| n.min(25).max(1))
+        .map(|n| n.clamp(1, 25))
         .unwrap_or(TXN_DEFAULT_PAGES)
 }
 
@@ -903,12 +899,11 @@ fn parse_12mo_totals(html: &str, now: chrono::DateTime<Utc>) -> Vec<NormalizedRe
                 continue;
             }
             if let Some(m) = months.get(i - 1) {
-                if let Some(n) = val
+                if let Ok(n) = val
                     .chars()
                     .filter(|c| c.is_ascii_digit() || *c == '.')
                     .collect::<String>()
                     .parse::<f64>()
-                    .ok()
                 {
                     amount_by_month.insert(*m, n);
                 }
@@ -1229,7 +1224,7 @@ mod tests {
             Some(&RecordValue::Str("2026-07-20".into()))
         );
         // Firsthand flag should NOT be set on this one (tags empty).
-        assert!(r0.fields.get("is_firsthand").is_none());
+        assert!(!r0.fields.contains_key("is_firsthand"));
 
         // Second record: a sale, tagged firsthand.
         let r1 = recs.iter().find(|r| r.record_id == "I20260700518").unwrap();

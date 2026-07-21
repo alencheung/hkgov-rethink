@@ -40,7 +40,7 @@ fn datasets() -> &'static [DatasetSpec] {
         vec![
             DatasetSpec {
                 id: DATASET_ID,
-                title: "AA Property Auction — Lot List (環亞物業拍賣)".into(),
+                title: "AA Property Auction — Lot List (環亞物業拍賣)",
                 description: Some(
                     "AA Property Auctioneers (環亞物業拍賣) public auction lot \
                      list. One record per lot on the next scheduled auction. \
@@ -49,8 +49,7 @@ fn datasets() -> &'static [DatasetSpec] {
                      (often 歡迎查詢 = on enquiry), agent_phone, source_url. \
                      record_id = 物業編號. These are open-auction listings — \
                      distinct from the bank-owned foreclosure pools at Midland \
-                     and Chung Sen."
-                        .into(),
+                     and Chung Sen.",
                 ),
                 category: Category::Property,
                 tags: &["aaproperty", "auction", "環亞", "公開拍賣"],
@@ -59,14 +58,13 @@ fn datasets() -> &'static [DatasetSpec] {
             },
             DatasetSpec {
                 id: AUCTION_SESSIONS_ID,
-                title: "AA Property Auction — Upcoming Sessions".into(),
+                title: "AA Property Auction — Upcoming Sessions",
                 description: Some(
                     "AA Property upcoming auction sessions parsed from the \
                      bid-list page banner. One record per session, keyed by \
                      date. Fields: date, time, venue. Lets the agent layer \
                      join 'next auction date' to lot counts and address \
-                     clusters."
-                        .into(),
+                     clusters.",
                 ),
                 category: Category::Property,
                 tags: &["aaproperty", "auction", "session", "schedule"],
@@ -545,7 +543,7 @@ fn split_address_and_id(plain: &str) -> (String, String) {
         // Slice by BYTE length (find returns byte offset) — char-count
         // arithmetic would land mid-codepoint on CJK text.
         let rest = &plain[idx + "物業編號".len()..];
-        let rest = rest.trim_start_matches(|c: char| matches!(c, ' ' | ':' | '：' | '\u{3000}'));
+        let rest = rest.trim_start_matches([' ', ':', '：', '\u{3000}']);
         let id_end = rest
             .char_indices()
             .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')

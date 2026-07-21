@@ -51,7 +51,7 @@ fn datasets() -> &'static [DatasetSpec] {
     DATASETS.get_or_init(|| {
         vec![DatasetSpec {
             id: DATASET_ID,
-            title: "Midland 銀主盤 — Foreclosure Listings".into(),
+            title: "Midland 銀主盤 — Foreclosure Listings",
             description: Some(
                 "Midland Realty (美聯物業) 銀主盤 (bank-owned / foreclosure) \
                  listings, pulled from the data.midland.com.hk search API \
@@ -59,8 +59,7 @@ fn datasets() -> &'static [DatasetSpec] {
                  (active 銀主盤 stock) with estate name, region, address, \
                  asking price, area, and bedroom count. record_id = Midland \
                  listing id (e.g. M350591670). Refreshed every 6h — the \
-                 foreclosure pool rotates slowly."
-                    .into(),
+                 foreclosure pool rotates slowly.",
             ),
             category: Category::Property,
             tags: &["midland", "銀主盤", "foreclosure", "bank-owned", "美聯"],

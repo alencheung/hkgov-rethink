@@ -298,7 +298,7 @@ pub fn filter_audit(records: Vec<ProvenanceRecord>, q: &AuditQuery) -> Vec<Prove
                 .is_none_or(|p| r.producer.as_name().contains(p))
         })
         .collect();
-    out.sort_by(|a, b| b.produced_at.cmp(&a.produced_at));
+    out.sort_by_key(|r| std::cmp::Reverse(r.produced_at));
     out
 }
 

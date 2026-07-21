@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 /// Request body for `POST /v1/datasets`. Registers a dataset's static metadata
 /// + seeds its lineage (upstream URL + format) so the gateway can serve it
-/// before the first ingest refresh lands records.
+///   before the first ingest refresh lands records.
 #[derive(Deserialize)]
 pub(super) struct RegisterDatasetRequest {
     pub source: String,

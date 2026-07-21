@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum UpstreamFormat {
     HkmaJson,
@@ -27,13 +27,8 @@ pub enum UpstreamFormat {
     HtmlNextData,
     HtmlTable,
     Feed,
+    #[default]
     Unknown,
-}
-
-impl Default for UpstreamFormat {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl UpstreamFormat {

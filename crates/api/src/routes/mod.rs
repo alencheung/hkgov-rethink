@@ -1181,14 +1181,14 @@ async fn transparency_report_route(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| hkgov_agent::DEFAULT_PUBLISHER.to_string());
     let top_n = q.top_n.clamp(1, 50);
+    let opts = hkgov_agent::ReportOptions::new(source, period)
+        .base_url(base_url)
+        .publisher(publisher)
+        .top_n(top_n);
     let report = hkgov_agent::build_report(
         &state.insights,
         &state.provenance,
-        source,
-        &period,
-        &base_url,
-        &publisher,
-        top_n,
+        &opts,
         chrono::Utc::now(),
     )
     .await;

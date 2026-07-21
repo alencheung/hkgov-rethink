@@ -88,7 +88,7 @@ pub async fn list_audit(
 
 /// `GET /v1/audit/attestation/{id}` — a signed attestation bundle: the insight
 /// + its provenance + (when available) the cite reproducibility manifest. The
-/// `claim` field is the plain-text attestation a human reviewer reads.
+///   `claim` field is the plain-text attestation a human reviewer reads.
 ///
 /// For deterministic findings the claim asserts byte-reproducibility (re-run
 /// the detector, same hash). For LLM-framed findings it honestly states the
