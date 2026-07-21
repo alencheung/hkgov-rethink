@@ -30,6 +30,7 @@ pub mod investigation;
 pub mod llm;
 pub mod loop_mod;
 pub mod persist;
+pub mod provenance;
 pub mod qa;
 pub mod scheduler;
 pub mod signal;
@@ -61,6 +62,10 @@ pub use investigation::{
 pub use llm::HttpLlmClient;
 pub use llm::{AgentStep, HeuristicClient, LlmClient, LlmFraming, Message, ToolCall};
 pub use loop_mod::{run_agent_loop, AgentOutcome, Answer, TraceStep};
+pub use provenance::{
+    build_attestation, filter_audit, Attestation, AuditQuery, Producer, ProvenanceRecord,
+    ProvenanceStore, ATTESTATION_VERSION, PROVENANCE_VERSION,
+};
 pub use qa::heuristic_answer;
 pub use scheduler::AgentSupervisor;
 pub use signal::{

@@ -42,12 +42,17 @@ impl AgentSupervisor {
     ///
     /// `alerts` is optional: when `Some`, each pass evaluates its new insights
     /// against the dispatcher for proactive push.
+    ///
+    /// `provenance` is optional (M3): when `Some`, each stored insight gets a
+    /// `ProvenanceRecord` written to the audit sidecar alongside the upsert.
+    /// `None` keeps the scheduler provenance-free (test paths).
     pub fn spawn(
         store: Arc<MemoryStore>,
         insights: Arc<InsightStore>,
         llm: Arc<dyn LlmClient>,
         settings: Arc<Settings>,
         alerts: Option<Arc<AlertDispatcher>>,
+        provenance: Option<Arc<crate::provenance::ProvenanceStore>>,
         interval: Duration,
     ) -> Self {
         let handle = tokio::spawn(async move {
@@ -57,6 +62,7 @@ impl AgentSupervisor {
                 llm.as_ref(),
                 &settings,
                 alerts.as_deref(),
+                provenance.as_deref(),
             )
             .await;
             let mut ticker = tokio::time::interval(interval.max(Duration::from_secs(60)));
@@ -70,6 +76,7 @@ impl AgentSupervisor {
                     llm.as_ref(),
                     &settings,
                     alerts.as_deref(),
+                    provenance.as_deref(),
                 )
                 .await;
             }
@@ -190,6 +197,7 @@ async fn run_pass(
     llm: &dyn LlmClient,
     settings: &Settings,
     alerts: Option<&AlertDispatcher>,
+    provenance: Option<&crate::provenance::ProvenanceStore>,
 ) {
     tracing::info!(producer = llm.name(), "agent: analysis pass starting");
 
@@ -224,6 +232,11 @@ async fn run_pass(
     // Frame each finding and store as an Insight.
     let mut stored_insights: Vec<Insight> = Vec::new();
     for (finding, experimental) in all_findings {
+        // M3: capture the determinism flag before the finding is consumed by
+        // into_insight_experimental. The flag is set only inside analysis.rs
+        // (the LLM framing path never touches it), so this is the typed,
+        // checkable form of the determinism guarantee.
+        let deterministic = finding.deterministic;
         match llm.frame(&finding).await {
             Ok(framing) => {
                 let insight = finding.into_insight_experimental(
@@ -232,6 +245,18 @@ async fn run_pass(
                     llm.name(),
                     experimental,
                 );
+                // M3: record provenance alongside the upsert so every insight
+                // carries an audit trail (detector, threshold, evidence hash,
+                // producer, deterministic flag).
+                if let Some(pstore) = provenance {
+                    let producer = crate::provenance::Producer::from_name(llm.name());
+                    let rec = crate::provenance::ProvenanceRecord::for_insight(
+                        &insight,
+                        producer,
+                        deterministic,
+                    );
+                    pstore.record(rec).await;
+                }
                 insights.upsert(insight.clone()).await;
                 stored_insights.push(insight);
             }
@@ -741,7 +766,7 @@ mod tests {
             frames: std::sync::atomic::AtomicUsize::new(0),
         });
 
-        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        run_pass(&store, &insights, llm.as_ref(), &settings, None, None).await;
         assert_eq!(insights.count().await, 1);
         let list = insights.list(10).await;
         assert_eq!(list[0].kind, "series_jump");
@@ -776,7 +801,7 @@ mod tests {
             frames: std::sync::atomic::AtomicUsize::new(0),
         });
 
-        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        run_pass(&store, &insights, llm.as_ref(), &settings, None, None).await;
         assert!(insights.count().await >= 1);
         assert_eq!(insights.list(10).await[0].kind, "outlier");
     }
@@ -797,7 +822,7 @@ mod tests {
         let insights = Arc::new(InsightStore::new());
         let llm = Arc::new(HeuristicClient::new());
 
-        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        run_pass(&store, &insights, llm.as_ref(), &settings, None, None).await;
         assert_eq!(insights.count().await, 0);
     }
 
@@ -817,7 +842,7 @@ mod tests {
         let insights = Arc::new(InsightStore::new());
         let llm = Arc::new(HeuristicClient::new());
 
-        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        run_pass(&store, &insights, llm.as_ref(), &settings, None, None).await;
         assert_eq!(insights.count().await, 0);
     }
 
@@ -942,7 +967,7 @@ mod tests {
 
         let insights = Arc::new(InsightStore::new());
         let llm = Arc::new(HeuristicClient::new());
-        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        run_pass(&store, &insights, llm.as_ref(), &settings, None, None).await;
         // Zero findings is correct (no data to evaluate); the point of A-004 is
         // the *log line*, not a behavior change. The pass must still complete.
         assert_eq!(insights.count().await, 0);
@@ -1009,7 +1034,7 @@ mod tests {
         let insights = Arc::new(InsightStore::new());
         let llm = Arc::new(HeuristicClient::new());
 
-        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        run_pass(&store, &insights, llm.as_ref(), &settings, None, None).await;
         assert_eq!(insights.count().await, 1);
         assert_eq!(insights.list(10).await[0].kind, "cross_source_gap");
     }
@@ -1075,7 +1100,7 @@ mod tests {
         let llm = Arc::new(HeuristicClient::new());
 
         // The agent pass — this is what `[agent] enabled = true` runs.
-        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        run_pass(&store, &insights, llm.as_ref(), &settings, None, None).await;
         assert!(
             insights.count().await >= 1,
             "agent pass must store the cross_source_gap insight"
@@ -1139,7 +1164,7 @@ mod tests {
         let insights = Arc::new(InsightStore::new());
         let llm = Arc::new(HeuristicClient::new());
 
-        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        run_pass(&store, &insights, llm.as_ref(), &settings, None, None).await;
         assert!(
             insights.count().await >= 1,
             "agent pass must store the border-crossing series_jump insight"
@@ -1206,7 +1231,7 @@ mod tests {
         let insights = Arc::new(InsightStore::new());
         let llm = Arc::new(HeuristicClient::new());
 
-        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        run_pass(&store, &insights, llm.as_ref(), &settings, None, None).await;
         assert_eq!(insights.count().await, 1);
         assert_eq!(insights.list(10).await[0].kind, "threshold_crossing");
     }
@@ -1238,7 +1263,7 @@ mod tests {
         let insights = Arc::new(InsightStore::new());
         let llm = Arc::new(HeuristicClient::new());
 
-        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        run_pass(&store, &insights, llm.as_ref(), &settings, None, None).await;
         assert_eq!(insights.count().await, 1);
         assert_eq!(insights.list(10).await[0].kind, "threshold_crossing");
     }
@@ -1263,7 +1288,7 @@ mod tests {
         let insights = Arc::new(InsightStore::new());
         let llm = Arc::new(HeuristicClient::new());
 
-        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        run_pass(&store, &insights, llm.as_ref(), &settings, None, None).await;
         assert_eq!(insights.count().await, 0);
     }
 
@@ -1291,7 +1316,7 @@ mod tests {
         let insights = Arc::new(InsightStore::new());
         let llm = Arc::new(HeuristicClient::new());
 
-        run_pass(&store, &insights, llm.as_ref(), &settings, None).await;
+        run_pass(&store, &insights, llm.as_ref(), &settings, None, None).await;
         assert_eq!(insights.count().await, 1);
     }
 }

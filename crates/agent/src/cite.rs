@@ -265,6 +265,42 @@ pub fn is_synthetic_evidence_id(record_id: &str) -> bool {
     matches!(record_id, "series" | "threshold" | "joined_history")
 }
 
+/// Compute the SHA-256 content hash over the evidence refs only (M3
+/// provenance). This is the always-available portion — the scheduler has the
+/// evidence refs at capture time but not the backing records. It uses the same
+/// canonical (sorted) + NaN/Inf-safe serialization as [`evidence_hash`], so for
+/// an insight where the records equal the evidence values, this hash is a
+/// prefix of the full evidence+records hash.
+///
+/// Use this when you need a stable, reproducible anchor for an insight's
+/// *claimed* evidence (provenance, audit). Use [`evidence_hash`] when you can
+/// also supply the backing records (cite manifest) — the latter additionally
+/// detects silent upstream data revisions.
+pub fn reproducibility_hash(evidence: &[EvidenceRef]) -> String {
+    let mut hasher = Sha256::new();
+    let mut canonical: Vec<(&str, &str, String)> = evidence
+        .iter()
+        .map(|e| {
+            (
+                e.record_id.as_str(),
+                e.field.as_str(),
+                canonical_json_string(&e.value),
+            )
+        })
+        .collect();
+    canonical.sort();
+    for (rid, field, val) in canonical {
+        hasher.update(rid.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(field.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(val.as_bytes());
+        hasher.update(b"\x00");
+    }
+    let hash = hasher.finalize();
+    hash.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 /// Compute the SHA-256 content hash over the evidence + the records it points
 /// into. This is the drift-detection anchor: recompute against current data and
 /// compare.

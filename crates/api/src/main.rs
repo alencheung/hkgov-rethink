@@ -156,6 +156,8 @@ async fn main() -> anyhow::Result<()> {
     let signals = Arc::new(hkgov_agent::SignalStore::new());
     let investigations = Arc::new(hkgov_agent::InvestigationStore::new());
     let users = Arc::new(hkgov_agent::UserStore::new());
+    // M3 Responsible AI Audit Layer: provenance sidecar for every insight.
+    let provenance = Arc::new(hkgov_agent::ProvenanceStore::new());
 
     // File-based persistence stopgap: restore all user-authored state from the
     // snapshot directory so signals, investigations, identity, insights, and
@@ -257,6 +259,7 @@ async fn main() -> anyhow::Result<()> {
         let llm_for_agent = llm.clone();
         let settings_for_agent = Arc::new(settings.clone());
         let alerts_for_agent = alert_dispatcher.clone();
+        let provenance_for_agent = provenance.clone();
         // D-012: previously the first agent pass fired after a fixed 20s delay.
         // With the catalog widened to 186 datasets warming concurrently under
         // per-source rate limits (HKMA 5/s ⇒ ~37s for HKMA alone), 20s was not
@@ -275,6 +278,7 @@ async fn main() -> anyhow::Result<()> {
                 llm_for_agent,
                 settings_for_agent,
                 alerts_for_agent,
+                Some(provenance_for_agent),
                 Duration::from_secs(settings.agent.run_interval_secs.max(300)),
             );
             // Keep the supervisor alive for the process lifetime.
@@ -346,6 +350,7 @@ async fn main() -> anyhow::Result<()> {
         signals,
         investigations,
         users,
+        provenance,
         llm,
         alert_log,
         magic_link_delivery,

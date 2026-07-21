@@ -12,12 +12,14 @@
 //!   GET  /alerts?limit=               — proactive alert dispatch log
 //!   POST /ask                         — natural-language Q&A over the data
 
+mod audit;
 mod auth_routes;
 mod gateway;
 mod investigations;
 mod signals;
 
 // Bring the extracted handlers into scope so `router()` can reference them.
+use audit::{attestation, insight_provenance, list_audit};
 use auth_routes::{auth_me, bearer_token, redeem_auth_token, request_auth_token};
 use gateway::{dataset_lineage, list_lineage, register_dataset};
 use investigations::{
@@ -76,6 +78,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/insights/{id}/cite", get(cite_insight))
         .route("/insights/{id}/history", get(insight_history))
+        .route("/insights/{id}/provenance", get(insight_provenance))
+        .route("/audit", get(list_audit))
+        .route("/audit/attestation/{id}", get(attestation))
         .route("/brief", get(get_brief))
         .route("/alerts", get(list_alerts))
         .route("/silence-index", get(silence_index))
@@ -317,6 +322,9 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
             "POST /v1/insights/{id}/feedback",
             "GET /v1/insights/{id}/cite",
             "GET /v1/insights/{id}/history",
+            "GET /v1/insights/{id}/provenance",
+            "GET /v1/audit",
+            "GET /v1/audit/attestation/{id}",
             "GET /v1/brief",
             "GET /v1/alerts",
             "GET /v1/silence-index",
@@ -1226,6 +1234,7 @@ mod tests {
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             users: Arc::new(hkgov_agent::UserStore::new()),
+            provenance: Arc::new(hkgov_agent::ProvenanceStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
@@ -1407,6 +1416,7 @@ mod tests {
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             users: Arc::new(hkgov_agent::UserStore::new()),
+            provenance: Arc::new(hkgov_agent::ProvenanceStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
@@ -1721,6 +1731,7 @@ mod tests {
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             users: Arc::new(hkgov_agent::UserStore::new()),
+            provenance: Arc::new(hkgov_agent::ProvenanceStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
@@ -1875,6 +1886,7 @@ mod tests {
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             users: Arc::new(hkgov_agent::UserStore::new()),
+            provenance: Arc::new(hkgov_agent::ProvenanceStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
@@ -2010,6 +2022,7 @@ mod tests {
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             users: Arc::new(hkgov_agent::UserStore::new()),
+            provenance: Arc::new(hkgov_agent::ProvenanceStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
@@ -2125,6 +2138,7 @@ mod tests {
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             users: Arc::new(hkgov_agent::UserStore::new()),
+            provenance: Arc::new(hkgov_agent::ProvenanceStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
