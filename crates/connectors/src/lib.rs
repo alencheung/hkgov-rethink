@@ -31,6 +31,7 @@ pub mod landregistry;
 pub mod landsd;
 pub mod midland;
 pub mod press;
+pub mod property_canon;
 pub mod registry;
 pub mod resilience;
 pub mod rvd;

@@ -16,12 +16,14 @@ mod audit;
 mod auth_routes;
 mod gateway;
 mod investigations;
+mod property;
 mod signals;
 
 // Bring the extracted handlers into scope so `router()` can reference them.
 use audit::{attestation, insight_provenance, list_audit};
 use auth_routes::{auth_me, bearer_token, redeem_auth_token, request_auth_token};
 use gateway::{dataset_lineage, list_lineage, register_dataset};
+use property::{property_composite, property_divergence, property_portals};
 use investigations::{
     add_investigation_note, append_investigation_step, create_investigation, delete_investigation,
     get_investigation, list_investigations,
@@ -66,6 +68,9 @@ pub fn router(state: AppState) -> Router {
         .route("/sources", get(list_sources))
         .route("/categories", get(list_categories))
         .route("/market-players", get(list_market_players))
+        .route("/property/composite", get(property_composite))
+        .route("/property/portals", get(property_portals))
+        .route("/property/divergence", get(property_divergence))
         .route("/datasets", post(register_dataset))
         .route("/datasets/{source}/{dataset}", get(dataset_meta))
         .route("/datasets/{source}/{dataset}/records", get(dataset_records))
@@ -315,6 +320,9 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
             "GET /v1/sources",
             "GET /v1/categories",
             "GET /v1/market-players",
+            "GET /v1/property/composite",
+            "GET /v1/property/portals",
+            "GET /v1/property/divergence",
             "POST /v1/datasets",
             "GET /v1/datasets/{source}/{dataset}",
             "GET /v1/datasets/{source}/{dataset}/records",
