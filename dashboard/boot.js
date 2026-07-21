@@ -19,8 +19,16 @@
     applyI18n(); // re-apply after dynamic content (empty states) may have rendered
     showOnboardIfFirstRun(); // PR-010: orient a first-run visitor (overview)
     checkShareLanding();
-    // Pulse: poll + announce new findings (replaces the silent interval)
-    setInterval(()=>{ if(lastTab==='overview'){ loadSilence(); loadInsights(); loadHealthQuiet().then(()=>{ renderDegradedBanner(); updateAgentStrip(allInsights.length, cachedHealth); }); } }, 30000);
+    // Pulse: poll + announce new findings (replaces the silent interval).
+    // Phase 4 perf: visibility-gated so a backgrounded tab doesn't burn a
+    // request every 30s. The hero routes are also covered by a 5-min
+    // browser-cache layer server-side, so even an active tab pays near-zero
+    // cost for repeated polls inside that window.
+    setInterval(()=>{ if(lastTab==='overview' && document.visibilityState==='visible'){ loadSilence(); loadInsights(); loadHealthQuiet().then(()=>{ renderDegradedBanner(); updateAgentStrip(allInsights.length, cachedHealth); }); } }, 30000);
+    // When the tab regains focus, refresh immediately so a user returning
+    // from a backgrounded session sees fresh numbers without waiting for the
+    // next 30s tick.
+    document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && lastTab==='overview'){ loadSilence(); loadInsights(); loadHealthQuiet().then(()=>{ renderDegradedBanner(); updateAgentStrip(allInsights.length, cachedHealth); }); } });
     // stamp visit on unload so the next session shows the right delta
     window.addEventListener('beforeunload', stampVisit);
     // ============ event delegation (replaces inline on* handlers for CSP) ============

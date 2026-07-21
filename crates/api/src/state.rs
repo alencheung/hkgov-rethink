@@ -1,5 +1,6 @@
 //! Shared application state handed to every handler via axum's `State` extractor.
 
+use crate::daily_view::DailyViewSlot;
 use hkgov_agent::{
     AlertLog, FeedbackStore, InsightStore, InvestigationStore, LlmClient, MagicLinkDelivery,
     ProvenanceStore, SignalStore, UserStore,
@@ -41,5 +42,13 @@ pub struct AppState {
     /// Magic-link email delivery sink. Log-based by default (dev/CI); HTTP
     /// email-gateway when the `alerts` feature + delivery config are present.
     pub magic_link_delivery: Arc<dyn MagicLinkDelivery>,
+    /// Precomputed daily-view snapshot (Silence Index, Transparency Index,
+    /// property composite/divergence/portals, the brief). Populated on boot
+    /// from `daily_view.json` and regenerated on the tail of each agent pass.
+    /// Hero read routes consult this first and fall back to live compute when
+    /// the slot is empty or stale — see `crate::daily_view`. Fixes the
+    /// \>1-min dashboard load by serving yesterday's hero numbers in <100ms
+    /// while the moka cache warms.
+    pub daily_view: DailyViewSlot,
     pub settings: Arc<Settings>,
 }

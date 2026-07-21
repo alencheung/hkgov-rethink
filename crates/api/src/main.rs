@@ -8,6 +8,7 @@
 //!   CORS, gzip) that will carry us toward the 100k-concurrency target.
 
 mod auth;
+mod daily_view;
 mod error;
 mod ratelimit;
 mod routes;
@@ -231,6 +232,30 @@ async fn main() -> anyhow::Result<()> {
         None => None,
     };
 
+    // Daily-view snapshot (performance optimization). Restored from
+    // `daily_view.json` so hero routes can serve yesterday's numbers in
+    // <100ms while the moka cache re-warms (the >1-min dashboard load fix).
+    // A missing/corrupt/old-version snapshot is a no-op — the routes fall
+    // back to live compute. Same semantics as the user-state restores above.
+    let daily_view_slot: std::sync::Arc<
+        tokio::sync::RwLock<Option<daily_view::DailyViewSnapshot>>,
+    > = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+    if let Some(dir) = &persist_dir_path {
+        if let Some(snap) = daily_view::load_from_file(dir).await {
+            tracing::info!(
+                generated_at = %snap.generated_at,
+                "restored daily-view snapshot from disk (hero routes will serve cached numbers \
+                 until the first agent pass regenerates)"
+            );
+            *daily_view_slot.write().await = Some(snap);
+        } else {
+            tracing::info!(
+                "no daily-view snapshot on disk — hero routes will live-compute until the first \
+                 agent pass materializes one (cold-start path)"
+            );
+        }
+    }
+
     // Build the LLM client up front so both the supervisor and the /v1/ask
     // endpoint share the same instance.
     let llm: Arc<dyn LlmClient> = build_llm_client(&settings);
@@ -354,8 +379,55 @@ async fn main() -> anyhow::Result<()> {
         llm,
         alert_log,
         magic_link_delivery,
+        daily_view: daily_view_slot,
         settings: Arc::new(settings.clone()),
     };
+
+    // Daily-view materializer. Regenerates the precomputed snapshot (Silence
+    // Index, Transparency Index, property composite/divergence/portals, the
+    // brief) on the same cadence as the agent pass — every 6h by default. The
+    // snapshot is what the hero read routes serve; without it they fall back
+    // to per-request live compute (the slow path this whole layer exists to
+    // avoid). A cold start serves the disk snapshot (restored above) until
+    // the first materialize lands.
+    //
+    // The first materialize fires after a short grace period so the cache
+    // warmer (spawned above) has had time to populate at least the flagship
+    // datasets — otherwise the first snapshot is built from an empty store
+    // and serves zeros. Subsequent materializes run on the agent cadence.
+    if settings.agent.enabled {
+        let mv_state = state.clone();
+        let mv_dir = persist_dir_path.clone();
+        let mv_interval = Duration::from_secs(settings.agent.run_interval_secs.max(300));
+        tokio::spawn(async move {
+            // Grace before the first materialize: 2x the readiness cap is too
+            // long; 60s is enough for the hero datasets to land on a warm
+            // restart, and on a cold restart the disk snapshot is already
+            // serving traffic so this just refreshes it in the background.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            loop {
+                let now = chrono::Utc::now();
+                let snap = daily_view::materialize(&mv_state, now).await;
+                *mv_state.daily_view.write().await = Some(snap.clone());
+                if let Some(ref dir) = mv_dir {
+                    if let Err(e) = daily_view::save_to_file(dir, &snap).await {
+                        tracing::warn!(error = %e, "daily-view snapshot save failed");
+                    } else {
+                        tracing::info!(
+                            generated_at = %snap.generated_at,
+                            "daily-view snapshot materialized + saved"
+                        );
+                    }
+                } else {
+                    tracing::info!(
+                        generated_at = %snap.generated_at,
+                        "daily-view snapshot materialized (persist disabled)"
+                    );
+                }
+                tokio::time::sleep(mv_interval).await;
+            }
+        });
+    }
 
     let app = routes::router(state);
 
