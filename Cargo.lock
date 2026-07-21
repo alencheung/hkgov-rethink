@@ -818,6 +818,7 @@ dependencies = [
  "chrono",
  "csv",
  "hkgov-common",
+ "hkgov-store",
  "reqwest",
  "serde",
  "serde_json",
@@ -832,6 +833,7 @@ name = "hkgov-ingest"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "hkgov-common",
  "hkgov-connectors",
  "hkgov-store",
@@ -850,6 +852,7 @@ dependencies = [
  "redis",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",

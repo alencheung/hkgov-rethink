@@ -18,8 +18,8 @@
 //!
 //! 3. `hkp-land-registry-summary-monthly` ← market-insight `langRegRecords[]`
 //!    + 12-month page HTML tables. Latest-month breakdown by property class
-//!    (firsthand_private, secondhand_private, firsthand_hos, industrial,
-//!    commercial, shop) with `{number, amount, number_chg, amount_chg}`.
+//!      (firsthand_private, secondhand_private, firsthand_hos, industrial,
+//!      commercial, shop) with `{number, amount, number_chg, amount_chg}`.
 //!
 //! 4. `hkp-transactions-recent` ← `data.hkp.com.hk/search/v1/transactions` JSON API
 //!    (the same endpoint the SPA's listing grid calls). Recent property
@@ -60,15 +60,14 @@ fn datasets() -> &'static [DatasetSpec] {
         vec![
             DatasetSpec {
                 id: PRICE_INDEX_ID,
-                title: "HKP 二手樓價指數 — Monthly Price Index".into(),
+                title: "HKP 二手樓價指數 — Monthly Price Index",
                 description: Some(
                     "Hong Kong Property (香港置業) monthly secondary-market \
                      price index — the 二手樓價指數. Covers HK/KLN/NT regions, \
                      transaction counts (total / firsthand / secondhand), \
                      per-sqft price + rent (gross + net), and weekly + monthly \
                      % changes. ~355 monthly points from 1997. record_id = \
-                     YYYY-MM (ISO month)."
-                        .into(),
+                     YYYY-MM (ISO month).",
                 ),
                 category: Category::Property,
                 tags: &["hkp", "price-index", "二手樓價指數", "香港置業"],
@@ -77,31 +76,34 @@ fn datasets() -> &'static [DatasetSpec] {
             },
             DatasetSpec {
                 id: ECON_INDICATORS_ID,
-                title: "HKP Economic Indicators — Monthly".into(),
+                title: "HKP Economic Indicators — Monthly",
                 description: Some(
                     "Hong Kong Property (香港置業) monthly economic indicators \
                      that contextualize the property market: mortgage interest \
                      rate, rental yield, real savings rate, Hang Seng Index, \
                      USD index, unemployment rate, affordability ratio (price \
-                     + rental). ~354 monthly points from 1997."
-                        .into(),
+                     + rental). ~354 monthly points from 1997.",
                 ),
                 category: Category::Property,
-                tags: &["hkp", "economic-indicators", "affordability", "mortgage-rate"],
+                tags: &[
+                    "hkp",
+                    "economic-indicators",
+                    "affordability",
+                    "mortgage-rate",
+                ],
                 cadence: Cadence::Monthly,
                 refresh_interval_secs: 6 * 3600,
             },
             DatasetSpec {
                 id: LAND_REGISTRY_SUMMARY_ID,
-                title: "HKP Land Registry Summary — Latest Month by Class".into(),
+                title: "HKP Land Registry Summary — Latest Month by Class",
                 description: Some(
                     "Hong Kong Property (香港置業) summary of Land Registry \
                      registrations, broken down by property class (firsthand \
                      private, secondhand private, firsthand HOS, industrial, \
                      commercial, shop). Each class carries number of \
                      registrations, total amount (HK$ 億), and % change vs \
-                     previous month. record_id = YYYY-MM."
-                        .into(),
+                     previous month. record_id = YYYY-MM.",
                 ),
                 category: Category::Property,
                 tags: &["hkp", "land-registry", "transaction-volume", "by-class"],
@@ -110,7 +112,7 @@ fn datasets() -> &'static [DatasetSpec] {
             },
             DatasetSpec {
                 id: TRANSACTIONS_ID,
-                title: "HKP Recent Property Transactions".into(),
+                title: "HKP Recent Property Transactions",
                 description: Some(
                     "Hong Kong Property (香港置業) recent property \
                      transactions, pulled from the data.hkp.com.hk \
@@ -123,8 +125,7 @@ fn datasets() -> &'static [DatasetSpec] {
                      transaction id (e.g. I20260700522). The connector \
                      paginates through the most recent transactions on each \
                      refresh — set HKGOV_HKP__TRANSACTIONS_MAX_PAGES to \
-                     control depth (default 4 pages × 24 = 96 records)."
-                        .into(),
+                     control depth (default 4 pages × 24 = 96 records).",
                 ),
                 category: Category::Property,
                 tags: &["hkp", "transactions", "成交紀錄", "recent-sales"],
@@ -214,11 +215,7 @@ impl HkpConnector {
     }
 
     /// Hit the transactions API for one page of recent results.
-    async fn fetch_transactions_page(
-        &self,
-        auth_token: &str,
-        page: u32,
-    ) -> Result<TxnResponse> {
+    async fn fetch_transactions_page(&self, auth_token: &str, page: u32) -> Result<TxnResponse> {
         let url = format!(
             "{TXN_API_URL}?hash=true&lang=zh-hk&currency=HKD&unit=feet&search_behavior=normal&tx_date=3year&page={page}&limit={TXN_PAGE_SIZE}"
         );
@@ -279,7 +276,11 @@ impl Connector for HkpConnector {
                     .into_iter()
                     .filter_map(|p| p.into_record(now))
                     .collect();
-                tracing::info!(dataset, points = recs.len(), "hkp: parsed economic indicators");
+                tracing::info!(
+                    dataset,
+                    points = recs.len(),
+                    "hkp: parsed economic indicators"
+                );
                 Ok(recs)
             }
             LAND_REGISTRY_SUMMARY_ID => {
@@ -295,7 +296,11 @@ impl Connector for HkpConnector {
                 if let Ok(html12) = self.fetch_12month_html().await {
                     recs.extend(parse_12mo_totals(&html12, now));
                 }
-                tracing::info!(dataset, points = recs.len(), "hkp: parsed land registry summary");
+                tracing::info!(
+                    dataset,
+                    points = recs.len(),
+                    "hkp: parsed land registry summary"
+                );
                 Ok(recs)
             }
             TRANSACTIONS_ID => {
@@ -339,9 +344,7 @@ impl Connector for HkpConnector {
                 );
                 Ok(all_records)
             }
-            other => Err(Error::Internal(format!(
-                "hkp: unknown dataset {other}"
-            ))),
+            other => Err(Error::Internal(format!("hkp: unknown dataset {other}"))),
         }
     }
 }
@@ -352,7 +355,7 @@ fn txn_max_pages() -> u32 {
     std::env::var("HKGOV_HKP__TRANSACTIONS_MAX_PAGES")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
-        .map(|n| n.min(25).max(1))
+        .map(|n| n.clamp(1, 25))
         .unwrap_or(TXN_DEFAULT_PAGES)
 }
 
@@ -362,13 +365,11 @@ fn txn_max_pages() -> u32 {
 /// Returns the raw JSON string (caller deserializes into typed structs).
 fn extract_next_data(html: &str) -> Result<String> {
     let marker = r#"id="__NEXT_DATA__""#;
-    let start_idx = html.find(marker).ok_or_else(|| {
-        Error::Decode {
-            origin: "hkp",
-            backtrace: serde::de::Error::custom(
-                "no __NEXT_DATA__ script tag in body — page shape changed?",
-            ),
-        }
+    let start_idx = html.find(marker).ok_or_else(|| Error::Decode {
+        origin: "hkp",
+        backtrace: serde::de::Error::custom(
+            "no __NEXT_DATA__ script tag in body — page shape changed?",
+        ),
     })?;
     let after_marker = &html[start_idx..];
     let json_start = after_marker.find('>').ok_or_else(|| Error::Decode {
@@ -552,8 +553,14 @@ impl EconIndicatorPoint {
             ("us_dollar_index", self.us_dollar_index),
             ("unemployment_rate", self.unemployment_rate),
             ("affordability_ratio", self.affordability_ratio),
-            ("rental_affordability_ratio", self.rental_affordability_ratio),
-            ("house_price_to_income_ratio", self.house_price_to_income_ratio),
+            (
+                "rental_affordability_ratio",
+                self.rental_affordability_ratio,
+            ),
+            (
+                "house_price_to_income_ratio",
+                self.house_price_to_income_ratio,
+            ),
         ] {
             if let Some(n) = v {
                 f.insert(k.into(), RecordValue::Float(n));
@@ -892,12 +899,11 @@ fn parse_12mo_totals(html: &str, now: chrono::DateTime<Utc>) -> Vec<NormalizedRe
                 continue;
             }
             if let Some(m) = months.get(i - 1) {
-                if let Some(n) = val
+                if let Ok(n) = val
                     .chars()
                     .filter(|c| c.is_ascii_digit() || *c == '.')
                     .collect::<String>()
                     .parse::<f64>()
-                    .ok()
                 {
                     amount_by_month.insert(*m, n);
                 }
@@ -970,12 +976,7 @@ fn parse_first_int(s: &str) -> Option<i64> {
     if cleaned.is_empty() {
         return None;
     }
-    cleaned
-        .split('.')
-        .next()
-        .unwrap_or(&cleaned)
-        .parse()
-        .ok()
+    cleaned.split('.').next().unwrap_or(&cleaned).parse().ok()
 }
 
 fn strip_tags(html: &str) -> String {
@@ -1029,9 +1030,7 @@ fn find_row_starting_with<'a>(html: &'a str, prefix: &str) -> Option<&'a str> {
     while let Some(rel) = lower[rest..].find("<tr") {
         let tr_start = rest + rel;
         let after_open = html[tr_start..].find('>').map(|p| tr_start + p + 1)?;
-        let close = lower[after_open..]
-            .find("</tr>")
-            .map(|c| after_open + c)?;
+        let close = lower[after_open..].find("</tr>").map(|c| after_open + c)?;
         let row = &html[after_open..close];
         let first_cell = collect_cells(row).into_iter().next().unwrap_or_default();
         if first_cell.starts_with(prefix) {
@@ -1048,8 +1047,14 @@ mod tests {
 
     #[test]
     fn iso_ts_to_month_truncates() {
-        assert_eq!(iso_ts_to_month("1997-01-01T00:00:00.000Z"), Some("1997-01".into()));
-        assert_eq!(iso_ts_to_month("2026-07-20T00:00:00.000Z"), Some("2026-07".into()));
+        assert_eq!(
+            iso_ts_to_month("1997-01-01T00:00:00.000Z"),
+            Some("1997-01".into())
+        );
+        assert_eq!(
+            iso_ts_to_month("2026-07-20T00:00:00.000Z"),
+            Some("2026-07".into())
+        );
         assert_eq!(iso_ts_to_month("nonsense"), None);
     }
 
@@ -1095,15 +1100,21 @@ mod tests {
         let rec = r.into_record(now).unwrap();
         // record_id is the prior month — just check it parses as YYYY-MM.
         assert!(rec.record_id.len() == 7);
-        let n = rec.fields.get("firsthand_private_number").and_then(|v| match v {
-            RecordValue::Float(f) => Some(*f as i64),
-            _ => None,
-        });
+        let n = rec
+            .fields
+            .get("firsthand_private_number")
+            .and_then(|v| match v {
+                RecordValue::Float(f) => Some(*f as i64),
+                _ => None,
+            });
         assert_eq!(n, Some(536));
-        let c = rec.fields.get("firsthand_private_number_chg").and_then(|v| match v {
-            RecordValue::Float(f) => Some(*f),
-            _ => None,
-        });
+        let c = rec
+            .fields
+            .get("firsthand_private_number_chg")
+            .and_then(|v| match v {
+                RecordValue::Float(f) => Some(*f),
+                _ => None,
+            });
         assert_eq!(c, Some(-63.8));
     }
 
@@ -1187,8 +1198,11 @@ mod tests {
         assert_eq!(resp.count, Some(236446));
         assert_eq!(resp.result.len(), 2);
         let now = Utc::now();
-        let recs: Vec<NormalizedRecord> =
-            resp.result.into_iter().filter_map(|i| i.into_record(now)).collect();
+        let recs: Vec<NormalizedRecord> = resp
+            .result
+            .into_iter()
+            .filter_map(|i| i.into_record(now))
+            .collect();
         assert_eq!(recs.len(), 2);
 
         // First record: a lease, full fields populated.
@@ -1210,7 +1224,7 @@ mod tests {
             Some(&RecordValue::Str("2026-07-20".into()))
         );
         // Firsthand flag should NOT be set on this one (tags empty).
-        assert!(r0.fields.get("is_firsthand").is_none());
+        assert!(!r0.fields.contains_key("is_firsthand"));
 
         // Second record: a sale, tagged firsthand.
         let r1 = recs.iter().find(|r| r.record_id == "I20260700518").unwrap();
@@ -1218,7 +1232,10 @@ mod tests {
             r1.fields.get("tx_type"),
             Some(&RecordValue::Str("S".into()))
         );
-        assert_eq!(r1.fields.get("is_firsthand"), Some(&RecordValue::Bool(true)));
+        assert_eq!(
+            r1.fields.get("is_firsthand"),
+            Some(&RecordValue::Bool(true))
+        );
     }
 
     #[test]
@@ -1226,7 +1243,11 @@ mod tests {
         let raw = r#"{"result":[{"estate":{"name":"No-ID"},"price":1000000}]}"#;
         let resp: TxnResponse = serde_json::from_str(raw).unwrap();
         let now = Utc::now();
-        let recs: Vec<_> = resp.result.into_iter().filter_map(|i| i.into_record(now)).collect();
+        let recs: Vec<_> = resp
+            .result
+            .into_iter()
+            .filter_map(|i| i.into_record(now))
+            .collect();
         assert!(recs.is_empty(), "transactions without an id are dropped");
     }
 

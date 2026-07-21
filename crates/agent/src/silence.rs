@@ -302,7 +302,7 @@ where
 
 /// Squash a raw weighted sum to a 0–100 score. `100 · (1 − 1/(1 + raw/k))`
 /// asymptotes to 100; `raw == k` yields exactly 50.
-fn squash(raw: f64) -> f64 {
+pub(crate) fn squash(raw: f64) -> f64 {
     if raw <= 0.0 {
         return 0.0;
     }
@@ -313,7 +313,7 @@ fn squash(raw: f64) -> f64 {
 /// Does this insight's evidence fall in the given period? Uses the record_ids
 /// (dates) in the evidence. For a quarterly period "2026-Q2", matches any
 /// record_id starting with "2026-04".."2026-06" or containing the quarter tag.
-fn insight_in_period(insight: &Insight, period: &str) -> bool {
+pub(crate) fn insight_in_period(insight: &Insight, period: &str) -> bool {
     if period.is_empty() {
         return true; // "" = all periods (used for whole-history views).
     }
@@ -371,7 +371,7 @@ fn date_in_quarter(record_id: &str, year: i32, start_month: u8, end_month: u8) -
 /// Cross-source-gap evidence conventionally carries a "press release date
 /// without matching data" context. Treat that as press-only; anything else as
 /// data-only.
-fn evidence_says_press_only(evidence: &[crate::insight::EvidenceRef]) -> bool {
+pub(crate) fn evidence_says_press_only(evidence: &[crate::insight::EvidenceRef]) -> bool {
     evidence
         .iter()
         .any(|e| e.context.as_deref().unwrap_or("").contains("press"))
@@ -388,7 +388,7 @@ fn evidence_says_press_only(evidence: &[crate::insight::EvidenceRef]) -> bool {
 /// equality: two date strings cover the same period if one is a prefix of the
 /// other. This keeps the "attributed vs unattributed" distinction meaningful
 /// across daily and monthly cadences without an explicit cadence hint.
-fn has_same_period_press(jump: &Insight, all: &[Insight]) -> bool {
+pub(crate) fn has_same_period_press(jump: &Insight, all: &[Insight]) -> bool {
     let jump_dates: Vec<&str> = jump
         .evidence
         .iter()

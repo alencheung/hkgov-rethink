@@ -2,7 +2,7 @@
 
 use hkgov_agent::{
     AlertLog, FeedbackStore, InsightStore, InvestigationStore, LlmClient, MagicLinkDelivery,
-    SignalStore, UserStore,
+    ProvenanceStore, SignalStore, UserStore,
 };
 use hkgov_common::Settings;
 use hkgov_connectors::registry::Registry;
@@ -17,6 +17,11 @@ pub struct AppState {
     pub registry: Arc<Registry>,
     pub store: Arc<MemoryStore>,
     pub insights: Arc<InsightStore>,
+    /// M3 Responsible AI Audit Layer: provenance sidecar. Every insight the
+    /// agent produces gets a ProvenanceRecord here (detector, threshold,
+    /// evidence hash, producer, deterministic flag). Surfaced via the
+    /// /v1/insights/{id}/provenance, /v1/audit, /v1/audit/attestation routes.
+    pub provenance: Arc<ProvenanceStore>,
     /// User feedback (was-this-useful) — the cheapest success metric. v9.
     pub feedback: Arc<FeedbackStore>,
     /// P-102 Signal subscriptions (authoring + preview; push waits on P-108).

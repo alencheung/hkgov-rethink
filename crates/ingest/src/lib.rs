@@ -13,7 +13,7 @@
 
 use hkgov_common::{DataSource, Result};
 use hkgov_connectors::registry::Registry;
-use hkgov_store::{DatasetId, MemoryStore, RecordStore};
+use hkgov_store::{lineage_from, DatasetId, DatasetLineage, MemoryStore, RecordStore};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -90,9 +90,19 @@ async fn refresh_once(
     match connector.fetch(dataset).await {
         Ok(records) => {
             let count = records.len();
+            // M1: record lineage before the records move into put_dataset. The
+            // content hash borrows the slice; the URL/format come from the
+            // connector's optional lineage accessors (None/Unknown when the
+            // connector doesn't track them — lineage is still recorded with
+            // the hash + count, just without a verifiable URL).
+            let lineage = build_lineage(source, dataset, connector.as_ref(), &records);
             if let Err(e) = store.put_dataset(&id, records).await {
                 tracing::warn!(source = %source, dataset, error = %e, "ingest: store put failed");
             } else {
+                // Record lineage only after the publish succeeded — a failed
+                // put must not leave a lineage pointing at data that isn't
+                // actually cached.
+                store.record_lineage(lineage).await;
                 tracing::info!(source = %source, dataset, count, "ingest: refreshed");
             }
         }
@@ -100,6 +110,27 @@ async fn refresh_once(
             tracing::warn!(source = %source, dataset, error = %e, "ingest: fetch failed");
         }
     }
+}
+
+/// Build the lineage record for a fetch (M1). Borrows the records so the hash
+/// can be computed before they move into `put_dataset`. Connectors that don't
+/// implement `upstream_url`/`upstream_format` get a `None`/`Unknown` lineage —
+/// the hash + count are still recorded, so drift detection works even without
+/// a verifiable URL.
+fn build_lineage(
+    source: DataSource,
+    dataset: &str,
+    connector: &dyn hkgov_connectors::Connector,
+    records: &[hkgov_common::NormalizedRecord],
+) -> DatasetLineage {
+    let id = DatasetId::new(source, dataset);
+    let url = connector
+        .upstream_url(dataset)
+        .unwrap_or_else(|| format!("unknown:{source}/{dataset}"));
+    let format = connector.upstream_format(dataset);
+    // lineage_from computes the content hash internally (canonical slice,
+    // order-independent + NaN-safe, mirroring cite.rs).
+    lineage_from(&id, url, format, "1", records, chrono::Utc::now())
 }
 
 /// Pull a single dataset once. Used by API on-demand refresh and tests.

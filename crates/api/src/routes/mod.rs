@@ -12,16 +12,22 @@
 //!   GET  /alerts?limit=               — proactive alert dispatch log
 //!   POST /ask                         — natural-language Q&A over the data
 
+mod audit;
 mod auth_routes;
+mod gateway;
 mod investigations;
+mod property;
 mod signals;
 
 // Bring the extracted handlers into scope so `router()` can reference them.
+use audit::{attestation, insight_provenance, list_audit};
 use auth_routes::{auth_me, bearer_token, redeem_auth_token, request_auth_token};
+use gateway::{dataset_lineage, list_lineage, register_dataset};
 use investigations::{
     add_investigation_note, append_investigation_step, create_investigation, delete_investigation,
     get_investigation, list_investigations,
 };
+use property::{property_composite, property_divergence, property_portals};
 use signals::{
     create_signal, delete_signal, get_signal, list_signals, preview_signal_route, update_signal,
 };
@@ -62,8 +68,14 @@ pub fn router(state: AppState) -> Router {
         .route("/sources", get(list_sources))
         .route("/categories", get(list_categories))
         .route("/market-players", get(list_market_players))
+        .route("/property/composite", get(property_composite))
+        .route("/property/portals", get(property_portals))
+        .route("/property/divergence", get(property_divergence))
+        .route("/datasets", post(register_dataset))
         .route("/datasets/{source}/{dataset}", get(dataset_meta))
         .route("/datasets/{source}/{dataset}/records", get(dataset_records))
+        .route("/datasets/{source}/{dataset}/lineage", get(dataset_lineage))
+        .route("/lineage", get(list_lineage))
         .route("/insights", get(list_insights))
         .route(
             "/insights/{id}/feedback",
@@ -71,9 +83,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/insights/{id}/cite", get(cite_insight))
         .route("/insights/{id}/history", get(insight_history))
+        .route("/insights/{id}/provenance", get(insight_provenance))
+        .route("/audit", get(list_audit))
+        .route("/audit/attestation/{id}", get(attestation))
         .route("/brief", get(get_brief))
         .route("/alerts", get(list_alerts))
         .route("/silence-index", get(silence_index))
+        .route("/transparency-index", get(transparency_index))
+        .route("/transparency-index/report", get(transparency_report_route))
         .route("/unprecedentedness", get(unprecedentedness))
         .route("/signals", post(create_signal).get(list_signals))
         .route("/signals/preview", post(preview_signal_route))
@@ -302,15 +319,27 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
             "GET /v1/health/sources",
             "GET /v1/sources",
             "GET /v1/categories",
+            "GET /v1/market-players",
+            "GET /v1/property/composite",
+            "GET /v1/property/portals",
+            "GET /v1/property/divergence",
+            "POST /v1/datasets",
             "GET /v1/datasets/{source}/{dataset}",
             "GET /v1/datasets/{source}/{dataset}/records",
+            "GET /v1/datasets/{source}/{dataset}/lineage",
+            "GET /v1/lineage",
             "GET /v1/insights",
             "POST /v1/insights/{id}/feedback",
             "GET /v1/insights/{id}/cite",
             "GET /v1/insights/{id}/history",
+            "GET /v1/insights/{id}/provenance",
+            "GET /v1/audit",
+            "GET /v1/audit/attestation/{id}",
             "GET /v1/brief",
             "GET /v1/alerts",
             "GET /v1/silence-index",
+            "GET /v1/transparency-index",
+            "GET /v1/transparency-index/report",
             "GET /v1/unprecedentedness",
             "POST /v1/signals",
             "GET /v1/signals",
@@ -1053,6 +1082,131 @@ fn is_valid_silence_period(period: &str) -> bool {
     false
 }
 
+// ---- M6: Transparency Foundation (composite index + report) -----------------
+
+/// `GET /v1/transparency-index?sources=&period=` — the multi-source composite.
+/// Each named source is scored independently (via the generalized signal
+/// registry), then the composite is the events-weighted average. `?sources=`
+/// is a comma-separated list (e.g. `hkma,rvd,landregistry`); omitting it
+/// scores all sources the system has insights for.
+#[derive(Deserialize, Default)]
+struct TransparencyIndexQuery {
+    #[serde(default)]
+    sources: Option<String>,
+    #[serde(default)]
+    period: Option<String>,
+}
+
+async fn transparency_index(
+    State(state): State<AppState>,
+    Query(q): Query<TransparencyIndexQuery>,
+) -> Result<Json<hkgov_agent::CompositeTransparencyIndex>, ApiError> {
+    let period = q.period.unwrap_or_default();
+    if !period.is_empty() && !is_valid_silence_period(&period) {
+        return Err(ApiError(hkgov_common::Error::BadRequest(format!(
+            "invalid `period` ({period:?}): expected one of '', 'YYYY', 'YYYY-MM', or 'YYYY-Qn'"
+        ))));
+    }
+    // Parse the comma-separated source list; fall back to all sources the
+    // registry knows if omitted.
+    let sources: Vec<DataSource> = match q.sources.as_deref() {
+        Some(s) if !s.trim().is_empty() => {
+            let mut out = Vec::new();
+            for part in s.split(',') {
+                let part = part.trim();
+                if !part.is_empty() {
+                    out.push(parse_source(part)?);
+                }
+            }
+            out
+        }
+        _ => state.registry.sources(),
+    };
+    let idx =
+        hkgov_agent::build_composite_index(&state.insights, &sources, &period, chrono::Utc::now())
+            .await;
+    Ok(Json(idx))
+}
+
+/// `GET /v1/transparency-index/report?source=&period=&format=` — the quarterly
+/// transparency report. `format=markdown` (default) returns text/markdown;
+/// `format=json` returns the structured report; `format=pdf-data` returns the
+/// JSON payload a PDF renderer consumes.
+#[derive(Deserialize, Default)]
+struct TransparencyReportQuery {
+    /// The source to report on (default hkma — backward compat).
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    period: Option<String>,
+    /// markdown | json | pdf-data. Defaults to markdown.
+    #[serde(default)]
+    format: Option<String>,
+    /// Public origin for cite permalinks (default http://localhost:8080).
+    #[serde(default)]
+    base_url: Option<String>,
+    /// Institution name for the report header.
+    #[serde(default)]
+    publisher: Option<String>,
+    /// Max contributing insights to list (default 10, clamped 1..=50).
+    #[serde(default = "default_report_top_n")]
+    top_n: usize,
+}
+
+fn default_report_top_n() -> usize {
+    10
+}
+
+async fn transparency_report_route(
+    State(state): State<AppState>,
+    Query(q): Query<TransparencyReportQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
+    let period = q.period.unwrap_or_default();
+    if !period.is_empty() && !is_valid_silence_period(&period) {
+        return Err(ApiError(hkgov_common::Error::BadRequest(format!(
+            "invalid `period` ({period:?}): expected one of '', 'YYYY', 'YYYY-MM', or 'YYYY-Qn'"
+        ))));
+    }
+    let source = match q.source.as_deref() {
+        Some(s) if !s.trim().is_empty() => parse_source(s)?,
+        _ => DataSource::Hkma,
+    };
+    let base_url = q
+        .base_url
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "http://localhost:8080".to_string());
+    let publisher = q
+        .publisher
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| hkgov_agent::DEFAULT_PUBLISHER.to_string());
+    let top_n = q.top_n.clamp(1, 50);
+    let opts = hkgov_agent::ReportOptions::new(source, period)
+        .base_url(base_url)
+        .publisher(publisher)
+        .top_n(top_n);
+    let report = hkgov_agent::build_report(
+        &state.insights,
+        &state.provenance,
+        &opts,
+        chrono::Utc::now(),
+    )
+    .await;
+    let format = q.format.as_deref().unwrap_or("markdown");
+    match format {
+        "json" | "pdf-data" => {
+            Ok(([(header::CONTENT_TYPE, "application/json")], Json(report)).into_response())
+        }
+        "markdown" | "md" => {
+            let md = hkgov_agent::render_markdown(&report);
+            Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], md).into_response())
+        }
+        other => Err(ApiError(hkgov_common::Error::BadRequest(format!(
+            "unknown format {other:?}: expected markdown, json, or pdf-data"
+        )))),
+    }
+}
+
 // ---- GET /unprecedentedness — how rare is this value? (P-103) --------------
 //
 // Scores a numeric value against its own stored history: percentile rank, a
@@ -1217,6 +1371,7 @@ mod tests {
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             users: Arc::new(hkgov_agent::UserStore::new()),
+            provenance: Arc::new(hkgov_agent::ProvenanceStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
@@ -1398,6 +1553,7 @@ mod tests {
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             users: Arc::new(hkgov_agent::UserStore::new()),
+            provenance: Arc::new(hkgov_agent::ProvenanceStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
@@ -1712,6 +1868,7 @@ mod tests {
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             users: Arc::new(hkgov_agent::UserStore::new()),
+            provenance: Arc::new(hkgov_agent::ProvenanceStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
@@ -1866,6 +2023,7 @@ mod tests {
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             users: Arc::new(hkgov_agent::UserStore::new()),
+            provenance: Arc::new(hkgov_agent::ProvenanceStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
@@ -2001,6 +2159,7 @@ mod tests {
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             users: Arc::new(hkgov_agent::UserStore::new()),
+            provenance: Arc::new(hkgov_agent::ProvenanceStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
@@ -2116,6 +2275,7 @@ mod tests {
             signals: Arc::new(hkgov_agent::SignalStore::new()),
             investigations: Arc::new(hkgov_agent::InvestigationStore::new()),
             users: Arc::new(hkgov_agent::UserStore::new()),
+            provenance: Arc::new(hkgov_agent::ProvenanceStore::new()),
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),

@@ -22,6 +22,13 @@ use chrono::Utc;
 use hkgov_common::{Cadence, DataSource, NormalizedRecord, RecordValue};
 use serde::{Deserialize, Serialize};
 
+/// The detector-layer version (M3 provenance). Bumped when the scoring or
+/// evidence shape of any detector in this module changes materially. Recorded
+/// on every `ProvenanceRecord` so a reviewer can tell whether a re-run would
+/// reproduce against the same detector version. Re-exported from
+/// `provenance.rs` as the single source of truth.
+pub const DETECTOR_VERSION: &str = "1.0";
+
 /// A raw, structured finding before an LLM frames it. Serializable so the HTTP
 /// LLM client can ship it verbatim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,11 +41,28 @@ pub struct Finding {
     pub severity: String,
     pub confidence: f64,
     pub evidence: Vec<EvidenceRef>,
+    /// M3 determinism attestation: true iff this finding originated from a
+    /// pure-Rust detector in this module. Defaults to false (serde) so any
+    /// Finding constructed outside analysis.rs (e.g. a synthetic test fixture)
+    /// is honestly non-attested until a detector stamps it. The LLM framing
+    /// path never touches this field — it only reads it — so the flag is the
+    /// typed, checkable form of the determinism guarantee (ARCHITECTURE.md).
+    #[serde(default)]
+    pub deterministic: bool,
 }
 
 impl Finding {
     pub fn heuristic_summary(&self) -> String {
         self.heuristic_summary.clone()
+    }
+
+    /// M3 determinism attestation: stamp this finding as originating from a
+    /// pure-Rust detector. Called by every detector in this module on the
+    /// findings it returns. Findings constructed elsewhere (test fixtures,
+    /// future non-detector producers) stay `false` — honestly non-attested.
+    pub fn stamp_deterministic(mut self) -> Self {
+        self.deterministic = true;
+        self
     }
 
     pub fn severity_enum(&self) -> InsightSeverity {
@@ -211,6 +235,7 @@ pub fn detect_series_jumps(
                         context: Some("current period".into()),
                     },
                 ],
+                deterministic: true,
             });
         }
     }
@@ -273,6 +298,7 @@ pub fn detect_cross_source_gaps(
                     context: Some("press release date without matching data".into()),
                 })
                 .collect(),
+            deterministic: true,
         });
     }
 
@@ -312,6 +338,7 @@ pub fn detect_cross_source_gaps(
                     context: Some("data date without matching press release".into()),
                 })
                 .collect(),
+            deterministic: true,
         });
     }
 
@@ -468,6 +495,7 @@ pub fn detect_outliers(
                         context: Some("series median (MAD baseline)".into()),
                     },
                 ],
+            deterministic: true,
             });
         }
     }
@@ -529,6 +557,7 @@ pub fn detect_seasonality(
                     value: serde_json::json!(r),
                     context: Some(format!("lag-{lag} autocorrelation coefficient")),
                 }],
+                deterministic: true,
             });
         }
     }
@@ -591,6 +620,7 @@ pub fn detect_correlation(
                 value: serde_json::json!(r),
                 context: Some("Pearson correlation over paired observations".into()),
             }],
+            deterministic: true,
         });
     }
     findings
@@ -738,6 +768,7 @@ pub fn detect_year_over_year(
                         context: Some("current period".into()),
                     },
                 ],
+                deterministic: true,
             });
         }
     }
@@ -851,6 +882,7 @@ pub fn detect_proxy_divergence(
                         )),
                     },
                 ],
+                deterministic: true,
             });
         }
     }
@@ -882,6 +914,7 @@ pub fn detect_proxy_divergence(
                 value: serde_json::json!(r),
                 context: Some("correlation over all joined periods".into()),
             }],
+            deterministic: true,
         });
     }
 
@@ -987,6 +1020,7 @@ pub fn detect_benchmark_deviation(
                         context: Some("benchmark (assumed/projected)".into()),
                     },
                 ],
+                deterministic: true,
             });
         }
     }
@@ -1085,6 +1119,7 @@ pub fn detect_threshold_crossing(
                 context: Some(format!("watch {direction:?} threshold")),
             },
         ],
+        deterministic: true,
     }]
 }
 
@@ -1196,6 +1231,7 @@ pub fn detect_trend_break(
                             context: Some(format!("first point of the new {to_dir} direction")),
                         },
                     ],
+                deterministic: true,
                 });
             }
             run_start = i;
@@ -2038,7 +2074,7 @@ mod tests {
         // ratio >= cap → 5.0/5.0 = 1.0 → clamp ceiling 1.0 (the "capped" case).
         assert!((safe_confidence(5.0, 5.0) - 1.0).abs() < f64::EPSILON);
         assert!((safe_confidence(99.0, 5.0) - 1.0).abs() < f64::EPSILON); // over cap
-        // A mid-band ratio lands inside [0.5, 1.0].
+                                                                          // A mid-band ratio lands inside [0.5, 1.0].
         let mid = safe_confidence(2.5, 5.0);
         assert!((0.5..=1.0).contains(&mid), "mid-band in range, got {mid}");
         // The A-008 repro: a NaN ratio (e.g. 0/0 from signal=0, threshold=0).

@@ -30,11 +30,14 @@ pub mod investigation;
 pub mod llm;
 pub mod loop_mod;
 pub mod persist;
+pub mod provenance;
 pub mod qa;
 pub mod scheduler;
 pub mod signal;
 pub mod silence;
 pub mod tools;
+pub mod transparency;
+pub mod transparency_report;
 pub mod unprecedentedness;
 
 pub use alerts::{AlertDispatcher, AlertLog, AlertLogEntry, AlertSink};
@@ -61,6 +64,10 @@ pub use investigation::{
 pub use llm::HttpLlmClient;
 pub use llm::{AgentStep, HeuristicClient, LlmClient, LlmFraming, Message, ToolCall};
 pub use loop_mod::{run_agent_loop, AgentOutcome, Answer, TraceStep};
+pub use provenance::{
+    build_attestation, filter_audit, Attestation, AuditQuery, Producer, ProvenanceRecord,
+    ProvenanceStore, ATTESTATION_VERSION, PROVENANCE_VERSION,
+};
 pub use qa::heuristic_answer;
 pub use scheduler::AgentSupervisor;
 pub use signal::{
@@ -73,6 +80,14 @@ pub use silence::{
     SilenceSignalKind, METHODOLOGY_VERSION as SILENCE_METHODOLOGY_VERSION,
 };
 pub use tools::{FindingDto, Tool, ToolBelt};
+pub use transparency::{
+    build_composite_index, build_index_from_registry, default_registry, CompositeTransparencyIndex,
+    SourceBreakdown, TransparencySignal, TransparencySignalRegistry,
+};
+pub use transparency_report::{
+    build_report, render_markdown, ReportInsight, ReportOptions, ReportSignal, TransparencyReport,
+    DEFAULT_PUBLISHER, REPORT_VERSION,
+};
 pub use unprecedentedness::{
     score as score_unprecedentedness, LastExceeded, NormalRange, Unprecedentedness, DEFAULT_BAND_K,
     MIN_HISTORY_POINTS,
