@@ -11,6 +11,7 @@ authors.workspace = true
 hkgov-common.workspace = true
 hkgov-connectors.workspace = true
 hkgov-store.workspace = true
+chrono.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 async-trait.workspace = true

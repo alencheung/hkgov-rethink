@@ -6,12 +6,14 @@
 //! (Redis / Postgres read replica) will satisfy later — see
 //! docs/ARCHITECTURE.md §"Scaling path".
 
+pub mod lineage;
 pub mod memory;
 #[cfg(feature = "pg")]
 pub mod pg_store;
 #[cfg(feature = "redis")]
 pub mod redis_store;
 
+pub use lineage::{content_hash, lineage_from, DatasetLineage, LineageStore, UpstreamFormat};
 pub use memory::MemoryStore;
 #[cfg(feature = "pg")]
 pub use pg_store::PgStore;
@@ -20,6 +22,8 @@ pub use redis_store::RedisStore;
 
 use async_trait::async_trait;
 use hkgov_common::{DataSource, DatasetMeta, NormalizedRecord, Result};
+// DatasetLineage is re-exported above via `pub use lineage::*`; the trait
+// method signature resolves through that re-export, so no separate import.
 
 /// A page of records. We never hand the caller unbounded arrays.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -91,6 +95,14 @@ pub trait RecordStore: Send + Sync + 'static {
 
     /// All datasets currently held, by source.
     async fn list(&self, source: Option<DataSource>) -> Result<Vec<DatasetMeta>>;
+
+    /// Lineage for a dataset (M1 Open Data Gateway): upstream URL, wire format,
+    /// content hash, fetch timestamp. Returns `None` by default (backends that
+    /// don't track lineage); `MemoryStore` overrides this to read its sidecar.
+    /// Non-breaking: existing implementations keep compiling.
+    async fn lineage(&self, _dataset_id: &DatasetId) -> Result<Option<DatasetLineage>> {
+        Ok(None)
+    }
 }
 
 /// Stable identity for a (source, dataset) pair — used as a cache key.

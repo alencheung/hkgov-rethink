@@ -179,6 +179,21 @@ pub trait Connector: Send + Sync + 'static {
     /// Fetch one dataset's records. Large datasets should be paged upstream and
     /// streamed back; the caller decides how big a batch to cache.
     async fn fetch(&self, dataset: &str) -> Result<Vec<NormalizedRecord>>;
+
+    /// The upstream URL the records for `dataset` are fetched from (M1 lineage).
+    /// `None` by default (connectors that don't track their URL); connectors
+    /// that do override this so the gateway's lineage index carries a verifiable
+    /// provenance pointer. Non-breaking: existing connectors keep compiling.
+    fn upstream_url(&self, _dataset: &str) -> Option<String> {
+        None
+    }
+
+    /// The wire format the connector decodes (M1 lineage). `Unknown` by default;
+    /// connectors that know their format override this so the lineage record
+    /// documents the upstream shape. Non-breaking.
+    fn upstream_format(&self, _dataset: &str) -> hkgov_store::UpstreamFormat {
+        hkgov_store::UpstreamFormat::Unknown
+    }
 }
 
 /// Static description of a dataset a connector exposes.

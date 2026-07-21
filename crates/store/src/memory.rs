@@ -4,6 +4,7 @@
 //! record vectors keyed by [`DatasetId`], plus a parallel small cache of
 //! metadata so counts/refresh timestamps survive independently of the data.
 
+use crate::lineage::{DatasetLineage, LineageStore};
 use crate::{DatasetId, RecordPage, RecordStore};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -56,6 +57,11 @@ pub struct MemoryStore {
     records: Cache<DatasetId, CacheEntry>,
     /// Light-touch registry of static dataset metadata.
     registry: RwLock<HashMap<DatasetId, RegisteredMeta>>,
+    /// M1 Open Data Gateway: per-dataset lineage sidecar (upstream URL, content
+    /// hash, fetch timestamp). Populated by `record_lineage` after a connector
+    /// fetch completes. Survives a record-cache eviction the same way the
+    /// persisted count does (D-029).
+    lineage: LineageStore,
 }
 
 impl MemoryStore {
@@ -81,6 +87,7 @@ impl MemoryStore {
         Self {
             records,
             registry: RwLock::new(HashMap::new()),
+            lineage: LineageStore::new(),
         }
     }
 
@@ -116,6 +123,20 @@ impl MemoryStore {
                 last_refreshed_at: preserved_last,
             },
         );
+    }
+
+    /// Record lineage for a dataset (M1). Called by the ingest layer after a
+    /// successful connector fetch, alongside `put_dataset`. Also used by the
+    /// `POST /v1/datasets` registration route to seed lineage for an externally
+    /// registered dataset.
+    pub async fn record_lineage(&self, lineage: DatasetLineage) {
+        self.lineage.record(lineage).await;
+    }
+
+    /// Borrow the lineage sidecar. Used by the gateway routes (`GET /v1/lineage`,
+    /// `GET /v1/datasets/{src}/{ds}/lineage`) and by snapshot/restore wiring.
+    pub fn lineage_sidecar(&self) -> &LineageStore {
+        &self.lineage
     }
 }
 
@@ -286,4 +307,12 @@ impl RecordStore for MemoryStore {
         }
         Ok(out)
     }
+
+    // M1: read the lineage sidecar. Returns `None` when no lineage was ever
+    // recorded for this dataset (the trait's default behaviour); the ingest
+    // layer records lineage for every connector-sourced dataset on each fetch.
+    async fn lineage(&self, dataset_id: &DatasetId) -> Result<Option<DatasetLineage>> {
+        Ok(self.lineage.get(dataset_id).await)
+    }
 }
+

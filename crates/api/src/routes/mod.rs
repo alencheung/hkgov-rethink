@@ -13,11 +13,13 @@
 //!   POST /ask                         — natural-language Q&A over the data
 
 mod auth_routes;
+mod gateway;
 mod investigations;
 mod signals;
 
 // Bring the extracted handlers into scope so `router()` can reference them.
 use auth_routes::{auth_me, bearer_token, redeem_auth_token, request_auth_token};
+use gateway::{dataset_lineage, list_lineage, register_dataset};
 use investigations::{
     add_investigation_note, append_investigation_step, create_investigation, delete_investigation,
     get_investigation, list_investigations,
@@ -62,8 +64,11 @@ pub fn router(state: AppState) -> Router {
         .route("/sources", get(list_sources))
         .route("/categories", get(list_categories))
         .route("/market-players", get(list_market_players))
+        .route("/datasets", post(register_dataset))
         .route("/datasets/{source}/{dataset}", get(dataset_meta))
         .route("/datasets/{source}/{dataset}/records", get(dataset_records))
+        .route("/datasets/{source}/{dataset}/lineage", get(dataset_lineage))
+        .route("/lineage", get(list_lineage))
         .route("/insights", get(list_insights))
         .route(
             "/insights/{id}/feedback",
@@ -302,8 +307,12 @@ async fn root(State(_): State<AppState>) -> Json<Root> {
             "GET /v1/health/sources",
             "GET /v1/sources",
             "GET /v1/categories",
+            "GET /v1/market-players",
+            "POST /v1/datasets",
             "GET /v1/datasets/{source}/{dataset}",
             "GET /v1/datasets/{source}/{dataset}/records",
+            "GET /v1/datasets/{source}/{dataset}/lineage",
+            "GET /v1/lineage",
             "GET /v1/insights",
             "POST /v1/insights/{id}/feedback",
             "GET /v1/insights/{id}/cite",

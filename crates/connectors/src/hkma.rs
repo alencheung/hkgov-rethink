@@ -186,6 +186,18 @@ impl Connector for HkmaConnector {
             .expect("HKMA specs initialized")
     }
 
+    // M1 lineage: HKMA knows its exact upstream URL + envelope shape. The
+    // gateway's lineage index therefore carries a verifiable provenance pointer
+    // for every HKMA dataset (the offset=0 URL; pagination is connector-
+    // internal and not part of the lineage identity).
+    fn upstream_url(&self, dataset: &str) -> Option<String> {
+        self.dataset(dataset).map(|ds| ds.url(&self.base_url, 0))
+    }
+
+    fn upstream_format(&self, _dataset: &str) -> hkgov_store::UpstreamFormat {
+        hkgov_store::UpstreamFormat::HkmaJson
+    }
+
     async fn fetch(&self, dataset: &str) -> Result<Vec<NormalizedRecord>> {
         let ds = self.dataset(dataset).ok_or_else(|| {
             Error::Internal(format!("hkma: no path mapping for dataset {dataset}"))
