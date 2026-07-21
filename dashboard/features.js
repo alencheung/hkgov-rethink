@@ -368,6 +368,12 @@
     // before the in-memory store could warm (wiping all data on every restart).
     // Now processed in a small bounded concurrency window so a freshly-booted
     // container can serve these without being overwhelmed.
+    //
+    // PERF (daily-view layer): these calls can't be folded into the snapshot
+    // (the `value` query parameter is dynamic per insight) and the endpoint
+    // stays outside the cacheable-route group for the same reason. The win is
+    // bounded concurrency + the snapshot-backed hero routes being fast enough
+    // that the container's worker pool is never starved when these fire.
     async function hydrateUnprec(insights){
       const targets=[];
       for(const i of insights){

@@ -125,6 +125,7 @@ mod tests {
             llm: Arc::new(hkgov_agent::HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
+            daily_view: crate::daily_view::empty_slot(),
             settings: Arc::new(settings),
         };
         router(state)

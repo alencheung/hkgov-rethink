@@ -62,18 +62,47 @@ pub fn router(state: AppState) -> Router {
 
     // The versioned API routes. State is applied here so the nested router is
     // fully resolved before it's mounted under the prefix.
+    //
+    // Cache policy (Phase 3 of the daily-view perf work): the hero read
+    // endpoints are split into a `cacheable_routes` group that gets a
+    // `Cache-Control: public, max-age=N, stale-while-revalidate=M` layer; the
+    // rest inherit the global `no-store` default set further down. The global
+    // `SetResponseHeaderLayer::if_not_present` means a route-level layer that
+    // sets the header first wins — so the hero group opts into caching while
+    // auth/mutations/health stay no-store.
+    //
+    // `max-age=300` (5 min) matches the dashboard's "good enough" freshness
+    // bar; the snapshot regenerates every 6h so a 5-min browser cache can
+    // never serve data older than one snapshot cycle. Records get a shorter
+    // `max-age=60` (1 min) because the moka cache keeps shifting under them as
+    // warmup progresses.
+    let cacheable_hero = Router::new()
+        .route("/silence-index", get(silence_index))
+        .route("/transparency-index", get(transparency_index))
+        .route("/transparency-index/report", get(transparency_report_route))
+        .route("/brief", get(get_brief))
+        .route("/property/composite", get(property_composite))
+        .route("/property/portals", get(property_portals))
+        .route("/property/divergence", get(property_divergence))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=300, stale-while-revalidate=600"),
+        ));
+    let cacheable_records = Router::new()
+        .route("/datasets/{source}/{dataset}/records", get(dataset_records))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=60"),
+        ));
+
     let mut api_routes = Router::new()
         .route("/health", get(health))
         .route("/health/sources", get(health_sources))
         .route("/sources", get(list_sources))
         .route("/categories", get(list_categories))
         .route("/market-players", get(list_market_players))
-        .route("/property/composite", get(property_composite))
-        .route("/property/portals", get(property_portals))
-        .route("/property/divergence", get(property_divergence))
         .route("/datasets", post(register_dataset))
         .route("/datasets/{source}/{dataset}", get(dataset_meta))
-        .route("/datasets/{source}/{dataset}/records", get(dataset_records))
         .route("/datasets/{source}/{dataset}/lineage", get(dataset_lineage))
         .route("/lineage", get(list_lineage))
         .route("/insights", get(list_insights))
@@ -86,11 +115,7 @@ pub fn router(state: AppState) -> Router {
         .route("/insights/{id}/provenance", get(insight_provenance))
         .route("/audit", get(list_audit))
         .route("/audit/attestation/{id}", get(attestation))
-        .route("/brief", get(get_brief))
         .route("/alerts", get(list_alerts))
-        .route("/silence-index", get(silence_index))
-        .route("/transparency-index", get(transparency_index))
-        .route("/transparency-index/report", get(transparency_report_route))
         .route("/unprecedentedness", get(unprecedentedness))
         .route("/signals", post(create_signal).get(list_signals))
         .route("/signals/preview", post(preview_signal_route))
@@ -114,7 +139,9 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/request-token", post(request_auth_token))
         .route("/auth/redeem", post(redeem_auth_token))
         .route("/auth/me", get(auth_me))
-        .route("/ask", post(ask));
+        .route("/ask", post(ask))
+        .merge(cacheable_hero)
+        .merge(cacheable_records);
 
     if let Some(key) = api_key {
         api_routes = api_routes.layer(from_fn(move |req, next| {
@@ -820,6 +847,22 @@ async fn get_brief(
     Query(q): Query<InsightsQuery>,
 ) -> Json<hkgov_agent::Brief> {
     let limit = q.limit.clamp(1, MAX_INSIGHTS_LIMIT);
+    // Snapshot fast path: the default brief (`limit=50`, no filters) is the
+    // shape the materializer precomputes. Custom limits fall through to live.
+    if limit == 50 {
+        if let Some(v) = crate::daily_view::read_hero(
+            &state.daily_view,
+            crate::daily_view::HeroField::Brief,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            // The value is the serialized `Brief`; re-typed via JSON.
+            if let Ok(brief) = serde_json::from_value::<hkgov_agent::Brief>(v) {
+                return Json(brief);
+            }
+        }
+    }
     let brief = hkgov_agent::build_brief(&state.insights, limit, chrono::Utc::now()).await;
     Json(brief)
 }
@@ -1029,7 +1072,7 @@ struct SilenceIndexQuery {
 async fn silence_index(
     State(state): State<AppState>,
     Query(q): Query<SilenceIndexQuery>,
-) -> Result<Json<hkgov_agent::SilenceIndex>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let period = q.period.unwrap_or_default();
     // A-010: validate the period shape. Without this, a non-quarter key like
     // "2026" or "2026-Q9" silently fell through to `starts_with` in the silence
@@ -1047,10 +1090,22 @@ async fn silence_index(
         Some(s) if !s.is_empty() => parse_source(s)?,
         _ => DataSource::Hkma,
     };
+    // Snapshot fast path: if the daily-view materializer already rolled up
+    // this (source, period) bucket, serve the precomputed value without
+    // walking the InsightStore. Falls back to live compute when the snapshot
+    // is missing or stale.
+    if let Some(v) =
+        crate::daily_view::read_silence(&state.daily_view, source, &period, chrono::Utc::now())
+            .await
+    {
+        return Ok(Json(v));
+    }
     let idx =
         hkgov_agent::build_silence_index(&state.insights, source, &period, chrono::Utc::now())
             .await;
-    Ok(Json(idx))
+    Ok(Json(
+        serde_json::to_value(&idx).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 /// A-010: shape-check a silence-index `period` query value. Accepts `YYYY`,
@@ -1100,7 +1155,7 @@ struct TransparencyIndexQuery {
 async fn transparency_index(
     State(state): State<AppState>,
     Query(q): Query<TransparencyIndexQuery>,
-) -> Result<Json<hkgov_agent::CompositeTransparencyIndex>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let period = q.period.unwrap_or_default();
     if !period.is_empty() && !is_valid_silence_period(&period) {
         return Err(ApiError(hkgov_common::Error::BadRequest(format!(
@@ -1122,10 +1177,28 @@ async fn transparency_index(
         }
         _ => state.registry.sources(),
     };
+    // Snapshot fast path: serve the precomputed composite when the caller used
+    // the default (no source override, no period override — the dashboard's
+    // typical call). A custom source/period query falls through to live
+    // compute so ad-hoc analyst queries still work.
+    let snapshot_applicable = q.sources.is_none() && period.is_empty();
+    if snapshot_applicable {
+        if let Some(v) = crate::daily_view::read_hero(
+            &state.daily_view,
+            crate::daily_view::HeroField::TransparencyIndex,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            return Ok(Json(v));
+        }
+    }
     let idx =
         hkgov_agent::build_composite_index(&state.insights, &sources, &period, chrono::Utc::now())
             .await;
-    Ok(Json(idx))
+    Ok(Json(
+        serde_json::to_value(&idx).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 /// `GET /v1/transparency-index/report?source=&period=&format=` — the quarterly
@@ -1181,6 +1254,47 @@ async fn transparency_report_route(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| hkgov_agent::DEFAULT_PUBLISHER.to_string());
     let top_n = q.top_n.clamp(1, 50);
+    // Snapshot fast path: serve the precomputed report when the caller used
+    // the default HKMA + current-quarter shape. Honors markdown, json, and
+    // pdf-data formats (the snapshot stores both the Markdown render and the
+    // structured JSON). Custom source/period/top_n queries fall through to
+    // live compute.
+    let snapshot_applicable = matches!(q.source.as_deref(), None | Some("") | Some("hkma"))
+        && period.is_empty()
+        && matches!(
+            q.format.as_deref(),
+            None | Some("") | Some("markdown") | Some("md") | Some("json") | Some("pdf-data")
+        );
+    if snapshot_applicable {
+        use axum::response::IntoResponse;
+        match q.format.as_deref() {
+            None | Some("") | Some("markdown") | Some("md") => {
+                if let Some(md) =
+                    crate::daily_view::read_report_markdown(&state.daily_view, chrono::Utc::now())
+                        .await
+                {
+                    return Ok(
+                        ([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], md)
+                            .into_response(),
+                    );
+                }
+            }
+            Some("json") | Some("pdf-data") => {
+                if let Some(v) = crate::daily_view::read_hero(
+                    &state.daily_view,
+                    crate::daily_view::HeroField::TransparencyReportJson,
+                    chrono::Utc::now(),
+                )
+                .await
+                {
+                    return Ok(
+                        ([(header::CONTENT_TYPE, "application/json")], Json(v)).into_response()
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
     let opts = hkgov_agent::ReportOptions::new(source, period)
         .base_url(base_url)
         .publisher(publisher)
@@ -1375,6 +1489,7 @@ mod tests {
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
+            daily_view: crate::daily_view::empty_slot(),
             settings: Arc::new(settings),
         }
     }
@@ -1557,6 +1672,7 @@ mod tests {
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
+            daily_view: crate::daily_view::empty_slot(),
             settings: Arc::new(settings),
         }
     }
@@ -1872,6 +1988,7 @@ mod tests {
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
+            daily_view: crate::daily_view::empty_slot(),
             settings: Arc::new(settings),
         }
     }
@@ -1883,16 +2000,25 @@ mod tests {
             period: Some("2026-Q2".into()),
             ..Default::default()
         };
+        // The route now returns `Json<Value>` (snapshot fast path: serve the
+        // precomputed value without re-deserializing through SilenceIndex's
+        // `&'static str` field). Assert on the raw JSON payload — the wire
+        // shape is unchanged.
         let idx = silence_index(State(state), Query(q)).await.unwrap().0;
-        assert_eq!(idx.methodology_version, "1.0");
-        assert!(idx.label.contains("HKMA"), "label: {}", idx.label);
-        assert_eq!(idx.source, DataSource::Hkma);
-        assert_eq!(idx.period, "2026-Q2");
+        assert_eq!(idx["methodology_version"], "1.0");
+        assert!(
+            idx["label"].as_str().unwrap_or("").contains("HKMA"),
+            "label: {}",
+            idx["label"]
+        );
+        assert_eq!(idx["source"], "hkma");
+        assert_eq!(idx["period"], "2026-Q2");
         // One press-only gap → positive score.
-        assert!(idx.score > 0.0, "score should be > 0, got {}", idx.score);
-        assert!(idx.total_events > 0);
+        let score = idx["score"].as_f64().unwrap_or(-1.0);
+        assert!(score > 0.0, "score should be > 0, got {score}");
+        assert!(idx["total_events"].as_u64().unwrap_or(0) > 0);
         // Determinism: signals are populated + auditable.
-        assert!(!idx.signals.is_empty());
+        assert!(!idx["signals"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1908,8 +2034,8 @@ mod tests {
             ..Default::default()
         };
         let idx = silence_index(State(empty_state), Query(q)).await.unwrap().0;
-        assert_eq!(idx.score, 0.0);
-        assert_eq!(idx.total_events, 0);
+        assert_eq!(idx["score"].as_f64().unwrap_or(-1.0), 0.0);
+        assert_eq!(idx["total_events"].as_u64().unwrap_or(1), 0);
     }
 
     #[tokio::test]
@@ -2027,6 +2153,7 @@ mod tests {
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
+            daily_view: crate::daily_view::empty_slot(),
             settings: Arc::new(settings),
         }
     }
@@ -2163,6 +2290,7 @@ mod tests {
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
+            daily_view: crate::daily_view::empty_slot(),
             settings: Arc::new(settings),
         };
         let q = Query(UnprecedentednessQuery {
@@ -2279,6 +2407,7 @@ mod tests {
             llm: Arc::new(HeuristicClient::new()),
             alert_log: Arc::new(hkgov_agent::AlertLog::new(200)),
             magic_link_delivery: Arc::new(hkgov_agent::LogMagicLinkDelivery),
+            daily_view: crate::daily_view::empty_slot(),
             settings: Arc::new(settings),
         }
     }

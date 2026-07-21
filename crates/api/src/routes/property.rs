@@ -46,10 +46,28 @@ pub struct CompositeQuery {
 /// per-net-sqft price for a region/month bucket, with per-portal contribution.
 /// The composite is what a planner reads; the per-portal breakdown is the
 /// transparency layer (which portals agreed, which diverged).
+///
+/// Returns `Json<Value>` rather than `Json<PortalComposite>` so the snapshot
+/// fast path can serve the precomputed value without re-deserializing through
+/// a `Deserialize` impl the property types don't carry. The wire shape is
+/// identical either way (the snapshot was serialized from the same type).
 pub async fn property_composite(
     State(state): State<AppState>,
     Query(q): Query<CompositeQuery>,
-) -> Result<Json<hkgov_connectors::property_canon::PortalComposite>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Snapshot fast path: the all-region/all-month view is what the
+    // materializer precomputes. Custom region/month queries fall through.
+    if q.region.is_none() && q.month.is_none() {
+        if let Some(v) = crate::daily_view::read_hero(
+            &state.daily_view,
+            crate::daily_view::HeroField::PropertyComposite,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            return Ok(Json(v));
+        }
+    }
     let mut portal_listings: Vec<(DataSource, Vec<CanonicalListing>)> = Vec::new();
     for &source in PROJECTABLE_PORTALS {
         let listings = collect_projected(&state, source).await;
@@ -62,16 +80,32 @@ pub async fn property_composite(
         .map(|(s, v)| (*s, v.as_slice()))
         .collect();
     let composite = build_composite(q.region.as_deref(), q.month.as_deref(), &portal_refs);
-    Ok(Json(composite))
+    Ok(Json(
+        serde_json::to_value(&composite).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 /// `GET /v1/property/portals` — health + dataset coverage for each property
 /// portal. Mirrors the `/health/sources` pattern but scoped to the property
 /// domain. Shows which portals are active (warmed) and how many listings each
 /// contributes — the transparency view behind the composite.
+///
+/// Returns `Json<Value>` so the snapshot fast path can serve the precomputed
+/// payload directly (see `property_composite` for the same rationale).
 pub async fn property_portals(
     State(state): State<AppState>,
-) -> Result<Json<Vec<PortalStatus>>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Snapshot fast path: the portal-status rollup is precomputed. The shape
+    // is stable (no query params), so always try the snapshot first.
+    if let Some(v) = crate::daily_view::read_hero(
+        &state.daily_view,
+        crate::daily_view::HeroField::PropertyPortals,
+        chrono::Utc::now(),
+    )
+    .await
+    {
+        return Ok(Json(v));
+    }
     let mut out = Vec::new();
     for &source in PROJECTABLE_PORTALS {
         let datasets = state.store.list(Some(source)).await?;
@@ -88,7 +122,9 @@ pub async fn property_portals(
                 .collect(),
         });
     }
-    Ok(Json(out))
+    Ok(Json(
+        serde_json::to_value(&out).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 #[derive(Debug, Serialize)]
@@ -119,8 +155,24 @@ pub struct DivergenceQuery {
 pub async fn property_divergence(
     State(state): State<AppState>,
     Query(q): Query<DivergenceQuery>,
-) -> Result<Json<Vec<hkgov_connectors::property_canon::PortalDivergenceFinding>>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let threshold = q.threshold.unwrap_or(DEFAULT_PORTAL_DIVERGENCE_PCT);
+    // Snapshot fast path: serve the precomputed divergence at the default
+    // threshold + no region scope. Custom threshold/region queries fall
+    // through to live compute.
+    let snapshot_applicable =
+        q.threshold.is_none() && q.region.is_none() && threshold == DEFAULT_PORTAL_DIVERGENCE_PCT;
+    if snapshot_applicable {
+        if let Some(v) = crate::daily_view::read_hero(
+            &state.daily_view,
+            crate::daily_view::HeroField::PropertyDivergence,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            return Ok(Json(v));
+        }
+    }
     // Collect each portal's projected listings.
     let mut by_portal: Vec<(DataSource, Vec<CanonicalListing>)> = Vec::new();
     for &source in PROJECTABLE_PORTALS {
@@ -149,7 +201,9 @@ pub async fn property_divergence(
             ));
         }
     }
-    Ok(Json(all_findings))
+    Ok(Json(
+        serde_json::to_value(&all_findings).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 /// Collect all records for a property-portal source and project them onto the
