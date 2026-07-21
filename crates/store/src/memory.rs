@@ -315,4 +315,3 @@ impl RecordStore for MemoryStore {
         Ok(self.lineage.get(dataset_id).await)
     }
 }
-

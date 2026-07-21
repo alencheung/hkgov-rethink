@@ -291,10 +291,7 @@ pub fn filter_audit(records: Vec<ProvenanceRecord>, q: &AuditQuery) -> Vec<Prove
     let mut out: Vec<ProvenanceRecord> = records
         .into_iter()
         .filter(|r| q.since.is_none_or(|s| r.produced_at >= s))
-        .filter(|r| {
-            q.deterministic
-                .is_none_or(|d| r.deterministic == d)
-        })
+        .filter(|r| q.deterministic.is_none_or(|d| r.deterministic == d))
         .filter(|r| {
             q.producer
                 .as_deref()
@@ -409,7 +406,11 @@ mod tests {
         let i1 = make_insight("det", "series_jump", vec![]);
         let i2 = make_insight("llm", "series_jump", vec![]);
         store
-            .record(ProvenanceRecord::for_insight(&i1, Producer::Heuristic, true))
+            .record(ProvenanceRecord::for_insight(
+                &i1,
+                Producer::Heuristic,
+                true,
+            ))
             .await;
         store
             .record(ProvenanceRecord::for_insight(
@@ -422,17 +423,23 @@ mod tests {
             .await;
 
         let all = store.snapshot().await;
-        let det_only = filter_audit(all.clone(), &AuditQuery {
-            deterministic: Some(true),
-            ..Default::default()
-        });
+        let det_only = filter_audit(
+            all.clone(),
+            &AuditQuery {
+                deterministic: Some(true),
+                ..Default::default()
+            },
+        );
         assert_eq!(det_only.len(), 1);
         assert_eq!(det_only[0].insight_id, "det");
 
-        let llm_only = filter_audit(all, &AuditQuery {
-            producer: Some("gpt-4o".into()),
-            ..Default::default()
-        });
+        let llm_only = filter_audit(
+            all,
+            &AuditQuery {
+                producer: Some("gpt-4o".into()),
+                ..Default::default()
+            },
+        );
         assert_eq!(llm_only.len(), 1);
         assert_eq!(llm_only[0].insight_id, "llm");
     }

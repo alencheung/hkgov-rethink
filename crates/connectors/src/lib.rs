@@ -98,10 +98,7 @@ pub(crate) async fn worker_fetch(
         .get(&worker_url)
         .header(
             "CF-Access-Client-Id",
-            settings
-                .proxy_cf_access_client_id
-                .as_deref()
-                .unwrap_or(""),
+            settings.proxy_cf_access_client_id.as_deref().unwrap_or(""),
         )
         .header(
             "CF-Access-Client-Secret",

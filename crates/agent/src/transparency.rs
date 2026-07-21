@@ -262,7 +262,10 @@ pub fn build_index_from_registry(
     ));
     // Missing-data days derived from the data-only partition (v1 approximation:
     // sum evidence counts, capped at 30 per finding).
-    let missing = data_only.iter().map(|i| i.evidence.len().min(30)).sum::<usize>();
+    let missing = data_only
+        .iter()
+        .map(|i| i.evidence.len().min(30))
+        .sum::<usize>();
     signals.push(make_signal_with_weight(
         SilenceSignalKind::MissingDataDay,
         missing,
@@ -475,13 +478,7 @@ mod tests {
     #[test]
     fn build_index_from_registry_empty_insights_yields_zero_score() {
         let reg = default_registry();
-        let idx = build_index_from_registry(
-            &[],
-            DataSource::Hkma,
-            "2026-Q2",
-            Utc::now(),
-            &reg,
-        );
+        let idx = build_index_from_registry(&[], DataSource::Hkma, "2026-Q2", Utc::now(), &reg);
         assert_eq!(idx.score, 0.0);
         assert_eq!(idx.total_events, 0);
         // All 4 signal rows present (stable breakdown shape).
@@ -502,13 +499,8 @@ mod tests {
                 context: Some("press release with no data row".into()),
             }],
         );
-        let idx = build_index_from_registry(
-            &[press_only],
-            DataSource::Hkma,
-            "2026-Q2",
-            Utc::now(),
-            &reg,
-        );
+        let idx =
+            build_index_from_registry(&[press_only], DataSource::Hkma, "2026-Q2", Utc::now(), &reg);
         // One press-only gap → weight 3.0 → raw 3.0 → score = 100*(1-1/(1+3/40))
         let press_signal = idx
             .signals
@@ -537,9 +529,13 @@ mod tests {
         );
         store.upsert(hkma_gap).await;
 
-        let composite =
-            build_composite_index(&store, &[DataSource::Hkma, DataSource::Immigration], "2026-Q2", Utc::now())
-                .await;
+        let composite = build_composite_index(
+            &store,
+            &[DataSource::Hkma, DataSource::Immigration],
+            "2026-Q2",
+            Utc::now(),
+        )
+        .await;
         // HKMA has events, Immigration has none → composite == HKMA's score.
         assert_eq!(composite.sources.len(), 2);
         let hkma = composite

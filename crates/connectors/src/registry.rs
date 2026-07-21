@@ -141,15 +141,9 @@ impl Registry {
         // contribute nothing to `/sources` or the ingest schedule.
 
         // Chung Sen (中誠地產) — 筍盤推介 / 銀主獨家 auction listings.
-        let chungsen: Arc<dyn Connector> =
-            Arc::new(ChungSenConnector::new(&settings.upstream)?);
+        let chungsen: Arc<dyn Connector> = Arc::new(ChungSenConnector::new(&settings.upstream)?);
         // Small site, polite. Two page fetches per refresh (wid=88 + wid=91).
-        by_source.push(wrap(
-            chungsen,
-            1.0,
-            3,
-            std::time::Duration::from_secs(120),
-        ));
+        by_source.push(wrap(chungsen, 1.0, 3, std::time::Duration::from_secs(120)));
 
         // AA Property (環亞物業拍賣) — open auction lot list.
         let aaproperty: Arc<dyn Connector> =

@@ -235,7 +235,7 @@ pub fn detect_series_jumps(
                         context: Some("current period".into()),
                     },
                 ],
-            deterministic: true,
+                deterministic: true,
             });
         }
     }
@@ -298,7 +298,7 @@ pub fn detect_cross_source_gaps(
                     context: Some("press release date without matching data".into()),
                 })
                 .collect(),
-        deterministic: true,
+            deterministic: true,
         });
     }
 
@@ -338,7 +338,7 @@ pub fn detect_cross_source_gaps(
                     context: Some("data date without matching press release".into()),
                 })
                 .collect(),
-        deterministic: true,
+            deterministic: true,
         });
     }
 
@@ -557,7 +557,7 @@ pub fn detect_seasonality(
                     value: serde_json::json!(r),
                     context: Some(format!("lag-{lag} autocorrelation coefficient")),
                 }],
-            deterministic: true,
+                deterministic: true,
             });
         }
     }
@@ -620,7 +620,7 @@ pub fn detect_correlation(
                 value: serde_json::json!(r),
                 context: Some("Pearson correlation over paired observations".into()),
             }],
-        deterministic: true,
+            deterministic: true,
         });
     }
     findings
@@ -768,7 +768,7 @@ pub fn detect_year_over_year(
                         context: Some("current period".into()),
                     },
                 ],
-            deterministic: true,
+                deterministic: true,
             });
         }
     }
@@ -882,7 +882,7 @@ pub fn detect_proxy_divergence(
                         )),
                     },
                 ],
-            deterministic: true,
+                deterministic: true,
             });
         }
     }
@@ -914,7 +914,7 @@ pub fn detect_proxy_divergence(
                 value: serde_json::json!(r),
                 context: Some("correlation over all joined periods".into()),
             }],
-        deterministic: true,
+            deterministic: true,
         });
     }
 
@@ -1020,7 +1020,7 @@ pub fn detect_benchmark_deviation(
                         context: Some("benchmark (assumed/projected)".into()),
                     },
                 ],
-            deterministic: true,
+                deterministic: true,
             });
         }
     }
@@ -1119,7 +1119,7 @@ pub fn detect_threshold_crossing(
                 context: Some(format!("watch {direction:?} threshold")),
             },
         ],
-    deterministic: true,
+        deterministic: true,
     }]
 }
 
@@ -2074,7 +2074,7 @@ mod tests {
         // ratio >= cap → 5.0/5.0 = 1.0 → clamp ceiling 1.0 (the "capped" case).
         assert!((safe_confidence(5.0, 5.0) - 1.0).abs() < f64::EPSILON);
         assert!((safe_confidence(99.0, 5.0) - 1.0).abs() < f64::EPSILON); // over cap
-        // A mid-band ratio lands inside [0.5, 1.0].
+                                                                          // A mid-band ratio lands inside [0.5, 1.0].
         let mid = safe_confidence(2.5, 5.0);
         assert!((0.5..=1.0).contains(&mid), "mid-band in range, got {mid}");
         // The A-008 repro: a NaN ratio (e.g. 0/0 from signal=0, threshold=0).

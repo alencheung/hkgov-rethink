@@ -140,10 +140,7 @@ impl Connector for AaPropertyConnector {
             DATASET_ID => {
                 let rows = parse_lots(&body);
                 tracing::info!(dataset, lots = rows.len(), "aaproperty: parsed lots");
-                Ok(rows
-                    .into_iter()
-                    .map(|r| r.into_record(now))
-                    .collect())
+                Ok(rows.into_iter().map(|r| r.into_record(now)).collect())
             }
             AUCTION_SESSIONS_ID => {
                 let sessions = parse_sessions(&body, now);
@@ -249,7 +246,9 @@ fn parse_lots(body: &str) -> Vec<LotRow> {
                 break;
             }
         }
-        let Some(addr_idx) = address_cell_idx else { continue };
+        let Some(addr_idx) = address_cell_idx else {
+            continue;
+        };
         let (address, property_id) = split_address_and_id(&strip_tags(&cells[addr_idx]));
         // property_type, occupancy, area, price_hint, agent come from the
         // remaining cells after the address cell — the live layout has them
@@ -273,14 +272,19 @@ fn parse_lots(body: &str) -> Vec<LotRow> {
         // Area cell: the one containing 建築/實用/地段 + a digit.
         let area_cell = rest
             .iter()
-            .find(|c| (c.contains("建築") || c.contains("實用") || c.contains("地段")) && c.chars().any(|ch| ch.is_ascii_digit()))
+            .find(|c| {
+                (c.contains("建築") || c.contains("實用") || c.contains("地段"))
+                    && c.chars().any(|ch| ch.is_ascii_digit())
+            })
             .cloned()
             .unwrap_or_default();
         let area_sqft = parse_first_int(&area_cell);
         // Price hint: 歡迎查詢 or a dollar value.
         let price_hint = rest
             .iter()
-            .find(|c| c.contains("歡迎查詢") || c.contains("詢價") || c.contains("萬") || c.contains("元"))
+            .find(|c| {
+                c.contains("歡迎查詢") || c.contains("詢價") || c.contains("萬") || c.contains("元")
+            })
             .cloned()
             .unwrap_or_default();
         // Agent phone: a cell with phone-shaped digits.
@@ -533,7 +537,11 @@ fn strip_tags(html: &str) -> String {
 
 fn split_address_and_id(plain: &str) -> (String, String) {
     if let Some(idx) = plain.find("物業編號") {
-        let address = plain[..idx].trim().trim_end_matches('。').trim().to_string();
+        let address = plain[..idx]
+            .trim()
+            .trim_end_matches('。')
+            .trim()
+            .to_string();
         // Slice by BYTE length (find returns byte offset) — char-count
         // arithmetic would land mid-codepoint on CJK text.
         let rest = &plain[idx + "物業編號".len()..];
@@ -575,7 +583,8 @@ fn is_property_type(s: &str) -> bool {
     }
     matches!(
         trimmed,
-        "空地" | "住宅"
+        "空地"
+            | "住宅"
             | "工商"
             | "舖位"
             | "商業"
@@ -602,9 +611,8 @@ mod tests {
 
     #[test]
     fn splits_address_and_id_with_parens() {
-        let (addr, id) = split_address_and_id(
-            "新界元朗八鄉田心村543號金爵花園2期空地 (物業編號: 000123)",
-        );
+        let (addr, id) =
+            split_address_and_id("新界元朗八鄉田心村543號金爵花園2期空地 (物業編號: 000123)");
         assert!(addr.starts_with("新界元朗"));
         assert_eq!(id, "000123");
     }

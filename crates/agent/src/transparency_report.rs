@@ -85,8 +85,7 @@ pub async fn build_report(
     let registry = crate::transparency::default_registry();
     let snapshot = insights.snapshot().await;
     let all = &snapshot.insights;
-    let index: SilenceIndex =
-        build_index_from_registry(all, source, period, now, &registry);
+    let index: SilenceIndex = build_index_from_registry(all, source, period, now, &registry);
 
     // Map signal kinds to human-readable labels.
     let signal_breakdown: Vec<ReportSignal> = index
@@ -105,21 +104,27 @@ pub async fn build_report(
     // ranked by severity (critical > warning > info) then confidence.
     let mut in_period: Vec<&Insight> = all
         .iter()
-        .filter(|i| {
-            i.source == source && crate::silence::insight_in_period(i, period)
-        })
+        .filter(|i| i.source == source && crate::silence::insight_in_period(i, period))
         .collect();
     in_period.sort_by(|a, b| {
         severity_rank(&a.severity)
             .cmp(&severity_rank(&b.severity))
-            .then_with(|| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     });
 
     let mut top: Vec<ReportInsight> = Vec::new();
     for i in in_period.iter().take(top_n) {
         let provenance = provenance.get(&i.id).await;
         // Cite permalink (best-effort; base_url is the public origin).
-        let permalink = format!("{}/cite/{}", base_url.trim_end_matches('/'), url_encoded(&i.id));
+        let permalink = format!(
+            "{}/cite/{}",
+            base_url.trim_end_matches('/'),
+            url_encoded(&i.id)
+        );
         top.push(ReportInsight {
             insight_id: i.id.clone(),
             kind: i.kind.clone(),
@@ -154,7 +159,10 @@ pub async fn build_report(
 /// Render the report as Markdown — the citable, human-readable form.
 pub fn render_markdown(report: &TransparencyReport) -> String {
     let mut md = String::new();
-    md.push_str(&format!("# {} Transparency Report — {}\n\n", report.source_label, report.period));
+    md.push_str(&format!(
+        "# {} Transparency Report — {}\n\n",
+        report.source_label, report.period
+    ));
     md.push_str(&format!(
         "*Publisher: {} · Methodology v{} · Cite v{} · Report v{} · Generated {}*\n\n",
         report.publisher,
@@ -163,7 +171,10 @@ pub fn render_markdown(report: &TransparencyReport) -> String {
         report.report_version,
         report.generated_at.format("%Y-%m-%d"),
     ));
-    md.push_str(&format!("## Opacity score: **{:.1}** / 100\n\n", report.score));
+    md.push_str(&format!(
+        "## Opacity score: **{:.1}** / 100\n\n",
+        report.score
+    ));
     md.push_str(&format!(
         "Higher = more opaque. Raw weighted sum: {:.1}. Total opacity events: {}.\n\n",
         report.raw_score, report.total_events
@@ -196,14 +207,19 @@ pub fn render_markdown(report: &TransparencyReport) -> String {
             if let Some(p) = &ins.provenance {
                 md.push_str(&format!(
                     "   *Provenance: detector `{}` v{}, evidence hash `{}`, deterministic: {}.*\n",
-                    p.detector, p.detector_version, &p.input_sha256[..16], p.deterministic
+                    p.detector,
+                    p.detector_version,
+                    &p.input_sha256[..16],
+                    p.deterministic
                 ));
             }
         }
     }
-    md.push_str("\n---\n*This report is reproducible: same insights in → same report out. \
+    md.push_str(
+        "\n---\n*This report is reproducible: same insights in → same report out. \
                  Each insight carries a provenance record attesting its detector + evidence hash; \
-                 the cite permalinks resolve to CI-reproducible manifests.*\n");
+                 the cite permalinks resolve to CI-reproducible manifests.*\n",
+    );
     md
 }
 

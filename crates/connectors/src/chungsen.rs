@@ -264,7 +264,11 @@ fn parse_listings(body: &str, wid: u32, page_label: &str) -> Vec<ListingRow> {
 
 /// Merge rows from the two wid pages by `property_id`. A row seen under both
 /// pages is emitted once with `page_label` joined by `; `.
-fn merge_rows(hot: &[ListingRow], bank: &[ListingRow], now: chrono::DateTime<Utc>) -> Vec<NormalizedRecord> {
+fn merge_rows(
+    hot: &[ListingRow],
+    bank: &[ListingRow],
+    now: chrono::DateTime<Utc>,
+) -> Vec<NormalizedRecord> {
     use std::collections::BTreeMap;
     // key = property_id → (row, labels set)
     let mut by_id: BTreeMap<String, (ListingRow, Vec<String>)> = BTreeMap::new();
@@ -408,7 +412,11 @@ fn strip_tags(html: &str) -> String {
 fn split_address_and_id(plain: &str) -> (String, String) {
     // Find "物業編號" (property id marker). The colon may be ASCII or fullwidth.
     if let Some(idx) = plain.find("物業編號") {
-        let address = plain[..idx].trim().trim_end_matches('。').trim().to_string();
+        let address = plain[..idx]
+            .trim()
+            .trim_end_matches('。')
+            .trim()
+            .to_string();
         // Slice by BYTE length (find returns byte offset), not char count —
         // `idx + chars().count()` would land mid-codepoint on CJK text.
         let rest = &plain[idx + "物業編號".len()..];
@@ -449,12 +457,15 @@ mod tests {
 
     #[test]
     fn splits_address_and_id() {
-        let (addr, id) = split_address_and_id("大角咀中匯街3號中和樓1樓9室。\n物業編號 : 260612-01");
+        let (addr, id) =
+            split_address_and_id("大角咀中匯街3號中和樓1樓9室。\n物業編號 : 260612-01");
         assert_eq!(addr, "大角咀中匯街3號中和樓1樓9室");
         assert_eq!(id, "260612-01");
 
         // Fullwidth colon variant.
-        let (addr, id) = split_address_and_id("馬鞍山西沙路638號錦豐苑錦莉閣 (D座)31字樓1單位。\n物業編號: 260611-02");
+        let (addr, id) = split_address_and_id(
+            "馬鞍山西沙路638號錦豐苑錦莉閣 (D座)31字樓1單位。\n物業編號: 260611-02",
+        );
         assert_eq!(id, "260611-02");
         assert!(addr.contains("馬鞍山"));
 

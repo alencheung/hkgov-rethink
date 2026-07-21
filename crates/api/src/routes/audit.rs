@@ -161,10 +161,7 @@ fn parse_since(s: &str) -> Result<chrono::DateTime<chrono::Utc>, ApiError> {
             return Ok(dt);
         }
     }
-    Err(hkgov_common::Error::BadRequest(
-        "since must be RFC3339 or epoch seconds".into(),
-    )
-    .into())
+    Err(hkgov_common::Error::BadRequest("since must be RFC3339 or epoch seconds".into()).into())
 }
 
 #[cfg(test)]

@@ -23,11 +23,11 @@ mod signals;
 use audit::{attestation, insight_provenance, list_audit};
 use auth_routes::{auth_me, bearer_token, redeem_auth_token, request_auth_token};
 use gateway::{dataset_lineage, list_lineage, register_dataset};
-use property::{property_composite, property_divergence, property_portals};
 use investigations::{
     add_investigation_note, append_investigation_step, create_investigation, delete_investigation,
     get_investigation, list_investigations,
 };
+use property::{property_composite, property_divergence, property_portals};
 use signals::{
     create_signal, delete_signal, get_signal, list_signals, preview_signal_route, update_signal,
 };
@@ -1120,17 +1120,11 @@ async fn transparency_index(
             }
             out
         }
-        _ => state
-            .registry
-            .sources(),
+        _ => state.registry.sources(),
     };
-    let idx = hkgov_agent::build_composite_index(
-        &state.insights,
-        &sources,
-        &period,
-        chrono::Utc::now(),
-    )
-    .await;
+    let idx =
+        hkgov_agent::build_composite_index(&state.insights, &sources, &period, chrono::Utc::now())
+            .await;
     Ok(Json(idx))
 }
 
@@ -1200,18 +1194,12 @@ async fn transparency_report_route(
     .await;
     let format = q.format.as_deref().unwrap_or("markdown");
     match format {
-        "json" | "pdf-data" => Ok((
-            [(header::CONTENT_TYPE, "application/json")],
-            Json(report),
-        )
-            .into_response()),
+        "json" | "pdf-data" => {
+            Ok(([(header::CONTENT_TYPE, "application/json")], Json(report)).into_response())
+        }
         "markdown" | "md" => {
             let md = hkgov_agent::render_markdown(&report);
-            Ok((
-                [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
-                md,
-            )
-                .into_response())
+            Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], md).into_response())
         }
         other => Err(ApiError(hkgov_common::Error::BadRequest(format!(
             "unknown format {other:?}: expected markdown, json, or pdf-data"

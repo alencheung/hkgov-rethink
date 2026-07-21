@@ -61,11 +61,7 @@ pub async fn property_composite(
         .iter()
         .map(|(s, v)| (*s, v.as_slice()))
         .collect();
-    let composite = build_composite(
-        q.region.as_deref(),
-        q.month.as_deref(),
-        &portal_refs,
-    );
+    let composite = build_composite(q.region.as_deref(), q.month.as_deref(), &portal_refs);
     Ok(Json(composite))
 }
 
@@ -159,10 +155,7 @@ pub async fn property_divergence(
 /// Collect all records for a property-portal source and project them onto the
 /// canonical vocabulary. Lists every dataset the source exposes (each portal
 /// has 1-4 datasets); projects each record.
-async fn collect_projected(
-    state: &AppState,
-    source: DataSource,
-) -> Vec<CanonicalListing> {
+async fn collect_projected(state: &AppState, source: DataSource) -> Vec<CanonicalListing> {
     let mut out = Vec::new();
     let datasets = match state.store.list(Some(source)).await {
         Ok(d) => d,

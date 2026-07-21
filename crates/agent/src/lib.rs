@@ -70,14 +70,6 @@ pub use provenance::{
 };
 pub use qa::heuristic_answer;
 pub use scheduler::AgentSupervisor;
-pub use transparency::{
-    build_composite_index, build_index_from_registry, default_registry,
-    CompositeTransparencyIndex, SourceBreakdown, TransparencySignal, TransparencySignalRegistry,
-};
-pub use transparency_report::{
-    build_report, render_markdown, ReportInsight, ReportSignal, TransparencyReport,
-    DEFAULT_PUBLISHER, REPORT_VERSION,
-};
 pub use signal::{
     preview_signal, signal_id, FindingDto as SignalFindingDto, Signal, SignalChannel, SignalPatch,
     SignalPreview, SignalStore, SignalStoreSnapshot,
@@ -88,6 +80,14 @@ pub use silence::{
     SilenceSignalKind, METHODOLOGY_VERSION as SILENCE_METHODOLOGY_VERSION,
 };
 pub use tools::{FindingDto, Tool, ToolBelt};
+pub use transparency::{
+    build_composite_index, build_index_from_registry, default_registry, CompositeTransparencyIndex,
+    SourceBreakdown, TransparencySignal, TransparencySignalRegistry,
+};
+pub use transparency_report::{
+    build_report, render_markdown, ReportInsight, ReportSignal, TransparencyReport,
+    DEFAULT_PUBLISHER, REPORT_VERSION,
+};
 pub use unprecedentedness::{
     score as score_unprecedentedness, LastExceeded, NormalRange, Unprecedentedness, DEFAULT_BAND_K,
     MIN_HISTORY_POINTS,

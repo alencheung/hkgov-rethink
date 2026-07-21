@@ -133,10 +133,9 @@ fn project_midland(r: &NormalizedRecord) -> Option<CanonicalListing> {
     }
     let region = str_field(r, "region").map(normalize_region);
     let estate = str_field(r, "estate_name");
-    // Midland's is_foreclosure is the market-segment signal; a foreclosure is
-    // by definition secondary.
-    let is_primary = bool_field(r, "is_foreclosure").map(|fc| !fc && false);
-    let _ = is_primary; // Midland doesn't cleanly distinguish primary; leave None.
+    // Midland's is_foreclosure doesn't cleanly distinguish primary/secondary
+    // (a foreclosure is secondary, but a non-foreclosure could be either), so
+    // is_primary is honestly None here.
     let tx_type = str_field(r, "tx_type");
     Some(CanonicalListing {
         source: DataSource::Midland,
@@ -196,7 +195,7 @@ fn project_aaproperty(r: &NormalizedRecord) -> Option<CanonicalListing> {
         estate: None,
         price_hkd,
         build_area_sqft: area,
-        net_area_sqft: None, // ambiguous — can't reliably map to net
+        net_area_sqft: None,  // ambiguous — can't reliably map to net
         unit_price_net: None, // no net area → can't derive
         is_primary: None,
         tx_date_month: None,
@@ -335,9 +334,15 @@ impl PortalDivergenceFinding {
         format!(
             "{}/{} per-sqft prices diverge by {:.1}% in {where_clause} \
              ({}: {:.0}/sqft from {} listings; {}: {:.0}/sqft from {} listings)",
-            self.source_a, self.source_b, self.pct_divergence,
-            self.source_a, self.median_a, self.count_a,
-            self.source_b, self.median_b, self.count_b,
+            self.source_a,
+            self.source_b,
+            self.pct_divergence,
+            self.source_a,
+            self.median_a,
+            self.count_a,
+            self.source_b,
+            self.median_b,
+            self.count_b,
         )
     }
 }
@@ -410,7 +415,11 @@ pub fn detect_portal_divergence(
         }
     }
     // Sort by divergence descending so the worst gaps surface first.
-    findings.sort_by(|a, b| b.pct_divergence.partial_cmp(&a.pct_divergence).unwrap_or(std::cmp::Ordering::Equal));
+    findings.sort_by(|a, b| {
+        b.pct_divergence
+            .partial_cmp(&a.pct_divergence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     findings
 }
 
@@ -660,7 +669,13 @@ mod tests {
 
     // ---- cross-portal divergence + composite ----
 
-    fn listing(source: DataSource, id: &str, region: &str, month: &str, price: f64) -> CanonicalListing {
+    fn listing(
+        source: DataSource,
+        id: &str,
+        region: &str,
+        month: &str,
+        price: f64,
+    ) -> CanonicalListing {
         CanonicalListing {
             source,
             source_record_id: id.into(),
@@ -681,10 +696,26 @@ mod tests {
         // HKP reports ~10,000/sqft; Midland reports ~15,000/sqft for the same
         // region/month → 50% gap, should fire at the 10% threshold.
         let hkp: Vec<_> = (0..5)
-            .map(|i| listing(DataSource::Hkp, &format!("h{i}"), "kln", "2026-06", 1_000_000.0))
+            .map(|i| {
+                listing(
+                    DataSource::Hkp,
+                    &format!("h{i}"),
+                    "kln",
+                    "2026-06",
+                    1_000_000.0,
+                )
+            })
             .collect();
         let midland: Vec<_> = (0..5)
-            .map(|i| listing(DataSource::Midland, &format!("m{i}"), "kln", "2026-06", 1_500_000.0))
+            .map(|i| {
+                listing(
+                    DataSource::Midland,
+                    &format!("m{i}"),
+                    "kln",
+                    "2026-06",
+                    1_500_000.0,
+                )
+            })
             .collect();
         let findings = detect_portal_divergence(
             DataSource::Hkp,
@@ -704,10 +735,26 @@ mod tests {
     fn detect_portal_divergence_quiet_under_threshold() {
         // ~5% gap → under the 10% threshold → no finding.
         let hkp: Vec<_> = (0..5)
-            .map(|i| listing(DataSource::Hkp, &format!("h{i}"), "nt", "2026-06", 1_000_000.0))
+            .map(|i| {
+                listing(
+                    DataSource::Hkp,
+                    &format!("h{i}"),
+                    "nt",
+                    "2026-06",
+                    1_000_000.0,
+                )
+            })
             .collect();
         let midland: Vec<_> = (0..5)
-            .map(|i| listing(DataSource::Midland, &format!("m{i}"), "nt", "2026-06", 1_045_000.0))
+            .map(|i| {
+                listing(
+                    DataSource::Midland,
+                    &format!("m{i}"),
+                    "nt",
+                    "2026-06",
+                    1_045_000.0,
+                )
+            })
             .collect();
         let findings = detect_portal_divergence(
             DataSource::Hkp,
@@ -717,7 +764,10 @@ mod tests {
             JoinKey::RegionAndMonth,
             DEFAULT_PORTAL_DIVERGENCE_PCT,
         );
-        assert!(findings.is_empty(), "5% gap should not fire at 10% threshold");
+        assert!(
+            findings.is_empty(),
+            "5% gap should not fire at 10% threshold"
+        );
     }
 
     #[test]
@@ -728,7 +778,15 @@ mod tests {
             listing(DataSource::Hkp, "h1", "hk", "2026-06", 1_000_000.0),
         ];
         let midland: Vec<_> = (0..5)
-            .map(|i| listing(DataSource::Midland, &format!("m{i}"), "hk", "2026-06", 5_000_000.0))
+            .map(|i| {
+                listing(
+                    DataSource::Midland,
+                    &format!("m{i}"),
+                    "hk",
+                    "2026-06",
+                    5_000_000.0,
+                )
+            })
             .collect();
         let findings = detect_portal_divergence(
             DataSource::Hkp,
@@ -738,16 +796,35 @@ mod tests {
             JoinKey::RegionAndMonth,
             DEFAULT_PORTAL_DIVERGENCE_PCT,
         );
-        assert!(findings.is_empty(), "bucket with <3 listings on one side should not fire");
+        assert!(
+            findings.is_empty(),
+            "bucket with <3 listings on one side should not fire"
+        );
     }
 
     #[test]
     fn build_composite_merges_portals() {
         let hkp: Vec<_> = (0..3)
-            .map(|i| listing(DataSource::Hkp, &format!("h{i}"), "kln", "2026-06", 1_000_000.0))
+            .map(|i| {
+                listing(
+                    DataSource::Hkp,
+                    &format!("h{i}"),
+                    "kln",
+                    "2026-06",
+                    1_000_000.0,
+                )
+            })
             .collect();
         let midland: Vec<_> = (0..3)
-            .map(|i| listing(DataSource::Midland, &format!("m{i}"), "kln", "2026-06", 1_200_000.0))
+            .map(|i| {
+                listing(
+                    DataSource::Midland,
+                    &format!("m{i}"),
+                    "kln",
+                    "2026-06",
+                    1_200_000.0,
+                )
+            })
             .collect();
         let portals: [(DataSource, &[CanonicalListing]); 2] = [
             (DataSource::Hkp, hkp.as_slice()),

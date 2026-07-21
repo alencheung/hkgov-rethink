@@ -71,7 +71,8 @@ fn datasets() -> &'static [DatasetSpec] {
 }
 
 /// The SPA shell URL we fetch once to extract the build token.
-const LISTING_PAGE_URL: &str = "https://www.midland.com.hk/zh-hk/list/buy/%E6%90%9C%E5%B0%8B-H-3b9d6de8";
+const LISTING_PAGE_URL: &str =
+    "https://www.midland.com.hk/zh-hk/list/buy/%E6%90%9C%E5%B0%8B-H-3b9d6de8";
 
 /// One page of the search API — 24 results max per call (verified).
 const SEARCH_PAGE_SIZE: u32 = 24;
@@ -107,22 +108,16 @@ impl MidlandConnector {
     /// is a build-time constant.
     async fn fetch_build_token(&self) -> Result<String> {
         let html = worker_fetch(&self.client, &self.upstream, LISTING_PAGE_URL, &[]).await?;
-        extract_build_token(&html).ok_or_else(|| {
-            Error::Decode {
-                origin: "midland",
-                backtrace: serde::de::Error::custom(
-                    "no runtimeConfig.BUILD_TOKEN in __NEXT_DATA__ — page shape changed?",
-                ),
-            }
+        extract_build_token(&html).ok_or_else(|| Error::Decode {
+            origin: "midland",
+            backtrace: serde::de::Error::custom(
+                "no runtimeConfig.BUILD_TOKEN in __NEXT_DATA__ — page shape changed?",
+            ),
         })
     }
 
     /// Hit the search API for one page of foreclosure results.
-    async fn fetch_search_page(
-        &self,
-        auth_token: &str,
-        page: u32,
-    ) -> Result<SearchResponse> {
+    async fn fetch_search_page(&self, auth_token: &str, page: u32) -> Result<SearchResponse> {
         let url = format!(
             "https://data.midland.com.hk/search/v2/properties?q={FORECLOSURE_HASH}&ad=true&lang=zh-hk&currency=HKD&unit=feet&search_behavior=normal&tx_type=S&category=foreclosure&limit={SEARCH_PAGE_SIZE}&page={page}"
         );
@@ -317,10 +312,7 @@ impl ListingItem {
             }
         }
         if !self.tx_type.is_empty() {
-            f.insert(
-                "tx_type".into(),
-                RecordValue::Str(self.tx_type.join(",")),
-            );
+            f.insert("tx_type".into(), RecordValue::Str(self.tx_type.join(",")));
         }
         // The 銀主盤 flag — we know this is foreclosure because we queried
         // category=foreclosure, but record the explicit tag when present.
@@ -328,10 +320,7 @@ impl ListingItem {
             .tags
             .iter()
             .any(|t| t.eq_ignore_ascii_case("foreclosure") || t.contains("銀主"));
-        f.insert(
-            "is_foreclosure".into(),
-            RecordValue::Bool(is_foreclosure),
-        );
+        f.insert("is_foreclosure".into(), RecordValue::Bool(is_foreclosure));
         if !self.tags.is_empty() {
             f.insert("tags".into(), RecordValue::Str(self.tags.join(",")));
         }
@@ -383,7 +372,10 @@ mod tests {
         let html = r#"<html><head>
             <script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{}},"runtimeConfig":{"BUILD_TOKEN":"eyJabc123.BUILD.day"}}</script>
         </head></html>"#;
-        assert_eq!(extract_build_token(html).as_deref(), Some("eyJabc123.BUILD.day"));
+        assert_eq!(
+            extract_build_token(html).as_deref(),
+            Some("eyJabc123.BUILD.day")
+        );
     }
 
     #[test]
@@ -419,25 +411,42 @@ mod tests {
         assert_eq!(resp.count, Some(42));
         assert_eq!(resp.result.len(), 1);
         let now = Utc::now();
-        let rec = resp.result.into_iter().next().unwrap().into_record(now).unwrap();
+        let rec = resp
+            .result
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_record(now)
+            .unwrap();
         assert_eq!(rec.record_id, "M350591670");
         assert_eq!(
             rec.fields.get("estate_name"),
             Some(&RecordValue::Str("溱柏".into()))
         );
-        assert_eq!(rec.fields.get("region"), Some(&RecordValue::Str("新界".into())));
-        assert_eq!(rec.fields.get("net_area_sqft"), Some(&RecordValue::Float(660.0)));
-        assert_eq!(rec.fields.get("sale_price_hkd"), Some(&RecordValue::Float(5_200_000.0)));
-        assert_eq!(rec.fields.get("is_foreclosure"), Some(&RecordValue::Bool(true)));
+        assert_eq!(
+            rec.fields.get("region"),
+            Some(&RecordValue::Str("新界".into()))
+        );
+        assert_eq!(
+            rec.fields.get("net_area_sqft"),
+            Some(&RecordValue::Float(660.0))
+        );
+        assert_eq!(
+            rec.fields.get("sale_price_hkd"),
+            Some(&RecordValue::Float(5_200_000.0))
+        );
+        assert_eq!(
+            rec.fields.get("is_foreclosure"),
+            Some(&RecordValue::Bool(true))
+        );
         assert_eq!(rec.fields.get("bedroom"), Some(&RecordValue::Float(2.0)));
     }
 
     #[test]
     fn skips_listing_without_id() {
-        let item: ListingItem = serde_json::from_str(
-            r#"{"estate":{"name":"No-ID Estate"},"price_hkd":1000000}"#,
-        )
-        .unwrap();
+        let item: ListingItem =
+            serde_json::from_str(r#"{"estate":{"name":"No-ID Estate"},"price_hkd":1000000}"#)
+                .unwrap();
         let now = Utc::now();
         let rec = item.into_record(now);
         assert!(rec.is_none(), "listings without an id are dropped");
@@ -445,12 +454,13 @@ mod tests {
 
     #[test]
     fn handles_string_bedroom_label() {
-        let item: ListingItem = serde_json::from_str(
-            r#"{"id":"M1","bedroom":"開放式","tx_type":["S"]}"#,
-        )
-        .unwrap();
+        let item: ListingItem =
+            serde_json::from_str(r#"{"id":"M1","bedroom":"開放式","tx_type":["S"]}"#).unwrap();
         let now = Utc::now();
         let rec = item.into_record(now).unwrap();
-        assert_eq!(rec.fields.get("bedroom"), Some(&RecordValue::Str("開放式".into())));
+        assert_eq!(
+            rec.fields.get("bedroom"),
+            Some(&RecordValue::Str("開放式".into()))
+        );
     }
 }
