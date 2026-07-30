@@ -23,7 +23,7 @@ description = "Consolidated, AI-infused insights from Hong Kong Government publi
 tokio = { version = "1.45", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "stream"] }
 tower = { version = "0.5", features = ["limit", "timeout", "retry", "util"] }
-tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip", "timeout", "set-header", "limit"] }
+tower-http = { version = "0.7", features = ["trace", "cors", "compression-gzip", "timeout", "set-header", "limit"] }
 # V-003: per-IP inbound rate limiting. `tower-governor` does not yet support
 # axum 0.8's body type, so we drive `governor` directly from a tiny axum
 # `from_fn` middleware (see `crate::ratelimit`). `governor` is tower-version-
