@@ -84,8 +84,3 @@ const _: () = {
     assert!(MAX_DATA_BYTES <= 256 * 1024 * 1024);
     assert!(MAX_ERROR_BYTES < MAX_DATA_BYTES);
 };
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}
