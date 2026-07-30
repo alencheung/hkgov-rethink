@@ -19,6 +19,9 @@ hkgov-common.workspace = true
 # (no store runtime), keeping the dependency surface minimal.
 hkgov-store.workspace = true
 reqwest.workspace = true
+# Stream iteration for the size-limited response reader (`limited.rs`). reqwest's
+# `stream` feature yields `impl Stream`; we need `StreamExt::next` to drain it.
+futures-util = "0.3"
 tokio.workspace = true
 tracing.workspace = true
 serde.workspace = true

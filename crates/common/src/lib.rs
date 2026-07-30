@@ -16,4 +16,6 @@ pub use config::{
     ReferenceSettings, ScanTarget, Settings, StoreSettings, UpstreamSettings,
 };
 pub use error::{Error, Result};
-pub use model::{Category, DataSource, DatasetMeta, NormalizedRecord, RecordValue};
+pub use model::{
+    Category, DataSource, DatasetMeta, NormalizedRecord, RecordValue, MAX_FIELD_BYTES,
+};

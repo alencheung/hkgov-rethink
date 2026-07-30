@@ -87,7 +87,7 @@ impl LandRegistryConnector {
     async fn fetch_consideration(&self) -> Result<Vec<serde_json::Value>> {
         let year = Utc::now().format("%Y").to_string();
         let url = format!("{BASE_URL}/consideration_{year}.json");
-        let body = self
+        let resp = self
             .client
             .get(&url)
             .send()
@@ -102,13 +102,12 @@ impl LandRegistryConnector {
                 origin: "landregistry",
                 status: e.status().map(|s| s.as_u16()).unwrap_or(0),
                 detail: format!("http: {e}"),
-            })?
-            .text()
-            .await
-            .map_err(|e| Error::Decode {
-                origin: "landregistry",
-                backtrace: serde::de::Error::custom(format!("consideration body read: {e}")),
             })?;
+        // Cap the body before parsing — without a bound a runaway or
+        // malformed JSON file could OOM the process (PERF-CON-01).
+        let body =
+            crate::limited::read_text_limited(resp, "landregistry", crate::limited::MAX_DATA_BYTES)
+                .await?;
         // The Land Registry publishes these JSON files with a UTF-8 BOM
         // prefix. serde_json's `.json()` does not strip it, so the decode
         // fails on byte 0xEF before parsing even starts. Read as text and
@@ -146,10 +145,13 @@ impl LandRegistryConnector {
             if !resp.status().is_success() {
                 continue;
             }
-            let body = resp.text().await.map_err(|e| Error::Decode {
-                origin: "landregistry",
-                backtrace: serde::de::Error::custom(format!("instruments body read: {e}")),
-            })?;
+            // Cap the instruments body before parsing (PERF-CON-01).
+            let body = crate::limited::read_text_limited(
+                resp,
+                "landregistry",
+                crate::limited::MAX_DATA_BYTES,
+            )
+            .await?;
             // Same BOM issue as fetch_consideration — see that method.
             let body = strip_bom(&body);
             let parsed: serde_json::Value =

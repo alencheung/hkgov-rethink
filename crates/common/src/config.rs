@@ -43,7 +43,18 @@ pub struct ApiSettings {
     ///
     /// V-002: the `?api_key=` query fallback was removed — the key is now
     /// header-only so it never lands in access logs / browser history / Referer.
+    ///
+    /// SEC-API-01 / OPS-CONF-01: in production (`HKGOV_ENV=production`) an empty
+    /// key is a fail-closed condition — the server refuses to boot rather than
+    /// silently expose every read endpoint. Set `api.allow_anonymous = true` to
+    /// opt out of that check for a genuinely-public read-only deploy.
     pub api_key: Option<String>,
+    /// Explicit opt-in for anonymous access in production. Has no effect except
+    /// to silence the boot-time "no API key set" guard under
+    /// `HKGOV_ENV=production`. Use only for a deliberately-public, read-only
+    /// deployment where unauthenticated access is the intent.
+    #[serde(default)]
+    pub allow_anonymous: bool,
     /// Per-IP request rate limit, requests/sec. 0 = unlimited (dev/CI only —
     /// disables flood protection; see `Settings::validate`). Defaults to 20 for
     /// a safe production baseline.
@@ -73,6 +84,10 @@ impl Default for ApiSettings {
             request_timeout_ms: 15_000,
             api_prefix: "/v1".to_string(),
             api_key: None,
+            // Anonymous access is allowed by default for local/dev (the
+            // historical behavior); the production guard in main.rs is what
+            // prevents an accidental open deploy.
+            allow_anonymous: false,
             // Safe non-zero default: gives basic flood protection out-of-the-box.
             // 0 disables the limiter entirely (dev/CI only) — see validate().
             rate_per_sec: 20,

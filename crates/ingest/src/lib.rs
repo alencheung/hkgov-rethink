@@ -89,6 +89,12 @@ async fn refresh_once(
     let id = DatasetId::new(source, dataset);
     match connector.fetch(dataset).await {
         Ok(records) => {
+            // SEC-CON-03: bound untrusted upstream free-text before it reaches
+            // the store / API / LLM layer. Connectors store scraped addresses,
+            // agent names, and price hints verbatim; a malicious source could
+            // otherwise inject multi-MB strings (memory amplification + a
+            // prompt-injection vector for the framing layer).
+            let records = sanitize_records(records);
             let count = records.len();
             // M1: record lineage before the records move into put_dataset. The
             // content hash borrows the slice; the URL/format come from the
@@ -110,6 +116,31 @@ async fn refresh_once(
             tracing::warn!(source = %source, dataset, error = %e, "ingest: fetch failed");
         }
     }
+}
+
+/// Bound the length of every `Str` field across a batch of records to
+/// [`hkgov_common::MAX_FIELD_BYTES`]. Applied at the ingest chokepoint so every
+/// source (HKMA, data.gov.hk, the property-portal scrapers, …) inherits the
+/// cap uniformly (SEC-CON-03).
+fn sanitize_records(
+    mut records: Vec<hkgov_common::NormalizedRecord>,
+) -> Vec<hkgov_common::NormalizedRecord> {
+    use hkgov_common::{RecordValue, MAX_FIELD_BYTES};
+    let cap = MAX_FIELD_BYTES;
+    let dirty = records.iter().any(|r| {
+        r.fields
+            .values()
+            .any(|v| matches!(v, RecordValue::Str(s) if s.len() > cap))
+    });
+    if !dirty {
+        return records; // fast path: almost no record carries an oversized field
+    }
+    for rec in records.iter_mut() {
+        for v in rec.fields.values_mut() {
+            *v = std::mem::replace(v, RecordValue::Null).cap_str(cap);
+        }
+    }
+    records
 }
 
 /// Build the lineage record for a fetch (M1). Borrows the records so the hash
@@ -134,6 +165,12 @@ fn build_lineage(
 }
 
 /// Pull a single dataset once. Used by API on-demand refresh and tests.
+///
+/// QUAL-ING-01: this previously wrote records WITHOUT recording lineage, so an
+/// on-demand refresh left the lineage index pointing at stale data and the
+/// content-hash drift detector couldn't see the refresh. It now builds +
+/// records lineage exactly like the scheduled `refresh_once` path, so
+/// provenance stays consistent between the two entry points.
 pub async fn fetch_once(
     source: DataSource,
     connector: &Arc<dyn hkgov_connectors::Connector>,
@@ -141,8 +178,15 @@ pub async fn fetch_once(
     dataset: &str,
 ) -> Result<usize> {
     let records = connector.fetch(dataset).await?;
+    // SEC-CON-03: bound untrusted upstream free-text (same as refresh_once).
+    let records = sanitize_records(records);
     let count = records.len();
     let id = DatasetId::new(source, dataset);
+    // Build lineage before the records move into put_dataset (the hash borrows
+    // the slice), then record it only after the publish succeeded — mirroring
+    // refresh_once so both paths leave identical provenance.
+    let lineage = build_lineage(source, dataset, connector.as_ref(), &records);
     store.put_dataset(&id, records).await?;
+    store.record_lineage(lineage).await;
     Ok(count)
 }

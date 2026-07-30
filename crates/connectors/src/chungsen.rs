@@ -107,7 +107,7 @@ impl ChungSenConnector {
     /// Fetch one wid page and return (page_label, parsed rows).
     async fn fetch_page(&self, wid: u32) -> Result<(String, Vec<ListingRow>)> {
         let url = format!("{BASE_URL}?wid={wid}");
-        let body = self
+        let resp = self
             .client
             .get(&url)
             .header("Accept-Language", "zh-HK,zh;q=0.9,en;q=0.8")
@@ -123,14 +123,12 @@ impl ChungSenConnector {
                 origin: "chungsen",
                 status: e.status().map(|s| s.as_u16()).unwrap_or(0),
                 detail: format!("http: {e}"),
-            })?
-            .text()
-            .await
-            .map_err(|e| Error::Upstream {
-                origin: "chungsen",
-                status: 0,
-                detail: format!("body read: {e}"),
             })?;
+        // Cap the listing HTML before parsing — a malformed/huge page would
+        // otherwise OOM the process (PERF-CON-01).
+        let body =
+            crate::limited::read_text_limited(resp, "chungsen", crate::limited::MAX_DATA_BYTES)
+                .await?;
         let page_label = extract_page_label(&body, wid);
         let rows = parse_listings(&body, wid, &page_label);
         Ok((page_label, rows))

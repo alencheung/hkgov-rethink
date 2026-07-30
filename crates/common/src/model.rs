@@ -110,7 +110,36 @@ impl RecordValue {
     pub fn is_null(&self) -> bool {
         matches!(self, RecordValue::Null)
     }
+
+    /// Cap a `Str` value to `max_bytes` (on a UTF-8 char boundary), leaving
+    /// other variants untouched. Used to bound the size of untrusted upstream
+    /// free-text (addresses, agent names, scraped price hints) so a malicious
+    /// or compromised source can't inject multi-MB strings that later surface
+    /// in the store, the API, or the LLM-framing layer (SEC-CON-03).
+    pub fn cap_str(self, max_bytes: usize) -> Self {
+        match self {
+            RecordValue::Str(s) => {
+                if s.len() <= max_bytes {
+                    RecordValue::Str(s)
+                } else {
+                    // Truncate to a char boundary at or below the cap.
+                    let mut end = max_bytes;
+                    while !s.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    RecordValue::Str(s[..end].to_string())
+                }
+            }
+            other => other,
+        }
+    }
 }
+
+/// Maximum byte length of a single `RecordValue::Str` field. Generous enough
+/// for any legitimate government data value (addresses, names, descriptions)
+/// yet small enough that a hostile upstream can't use free-text fields as a
+/// memory-amplification or prompt-injection vector. SEC-CON-03.
+pub const MAX_FIELD_BYTES: usize = 4 * 1024;
 
 /// A single normalized row from any source. Keys are the original field names
 /// from upstream; the [`NormalizedRecord::source`] + [`NormalizedRecord::dataset`]

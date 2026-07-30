@@ -103,6 +103,21 @@
       function dispatch(ev){
         const el = ev.target.closest && ev.target.closest('[data-action]');
         if(!el) return;
+        // A11Y-DASH-04: for keyboard activation of non-control widgets
+        // (role="button" divs/spans carrying data-action), only fire on the
+        // activation keys Enter/Space — otherwise Tab, arrow keys, or even
+        // typing into an ancestor toggles the control by accident, violating
+        // the ARIA button contract. Real <input>/<textarea>/<select> keep
+        // their full keydown semantics (they dispatch on every keystroke by
+        // design, e.g. inv-ask-on-enter / render-palette).
+        if(ev.type === 'keydown'){
+          const tag = el.tagName;
+          const isNativeControl = tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT';
+          if(!isNativeControl && ev.key!=='Enter' && ev.key!==' '){ return; }
+          // Space on a role=button widget would also scroll the page; suppress
+          // the default so it activates cleanly like a real <button>.
+          if(!isNativeControl && ev.key===' '){ ev.preventDefault(); }
+        }
         const fn = A[el.dataset.action];
         if(fn){ fn(el, ev); }
       }

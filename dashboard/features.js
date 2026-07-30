@@ -1,6 +1,59 @@
     // ============ routing ============
     let lastTab='overview';
-    function go(tab){ lastTab=tab; document.querySelectorAll('.page').forEach(p=>p.classList.remove('active')); document.getElementById('page-'+tab).classList.add('active'); document.querySelectorAll('nav.tabs button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab)); if(location.hash!=='#'+tab) history.replaceState(null,'','#'+tab); if(tab==='datasets'){loadCategories();loadSources();} if(tab==='divergence')dvInit(); if(tab==='signals'){sigSourceFill();loadSignals();} if(tab==='cases')loadCases(); if(tab==='health')loadHealth(); if(tab==='licences'){renderLicences();loadMarketPlayers().then(renderLicences);} if(tab==='funding')renderFund(); window.scrollTo(0,0); }
+    function go(tab){ lastTab=tab; document.querySelectorAll('.page').forEach(p=>p.classList.remove('active')); document.getElementById('page-'+tab).classList.add('active');
+      // A11Y-DASH-02: maintain the WAI-ARIA Tabs contract — the active tab is
+      // selected and in the tab order (tabindex 0); the rest are deselected
+      // and removed from the roving tabindex (-1) so arrow keys move between
+      // tabs without leaving the tablist.
+      document.querySelectorAll('nav.tabs button[role="tab"]').forEach(b=>{ const on=b.dataset.tab===tab; b.classList.toggle('active',on); b.setAttribute('aria-selected',on?'true':'false'); b.setAttribute('tabindex',on?'0':'-1'); });
+      if(location.hash!=='#'+tab) history.replaceState(null,'','#'+tab); if(tab==='datasets'){loadCategories();loadSources();} if(tab==='divergence')dvInit(); if(tab==='signals'){sigSourceFill();loadSignals();} if(tab==='cases')loadCases(); if(tab==='health')loadHealth(); if(tab==='licences'){renderLicences();loadMarketPlayers().then(renderLicences);} if(tab==='funding')renderFund(); window.scrollTo(0,0); }
+
+    // ============ tablist arrow-key navigation (A11Y-DASH-02) ============
+    // WAI-ARIA Tabs: when focus is on a tab, ArrowLeft/Right move between tabs,
+    // Home/End jump to the first/last. Activating follows focus (single-select).
+    (function(){
+      const tablist=document.querySelector('nav.tabs[role="tablist"]');
+      if(!tablist) return;
+      tablist.addEventListener('keydown', ev=>{
+        const tabs=Array.from(tablist.querySelectorAll('button[role="tab"]'));
+        const cur=tabs.indexOf(document.activeElement);
+        if(cur<0) return;
+        let next=-1;
+        if(ev.key==='ArrowRight') next=(cur+1)%tabs.length;
+        else if(ev.key==='ArrowLeft') next=(cur-1+tabs.length)%tabs.length;
+        else if(ev.key==='Home') next=0;
+        else if(ev.key==='End') next=tabs.length-1;
+        if(next<0) return;
+        ev.preventDefault();
+        tabs[next].focus();
+        go(tabs[next].dataset.tab); // activate on follow
+      });
+    })();
+
+    // ============ toast (inline, accessible status messages) ============
+    // Replaces native alert() for user-facing errors/confirmations (UX-DASH-01):
+    // alert() blocks the tab, can't be styled/translated, and carries no
+    // context. This toast is a role="status" aria-live="assertive" region so
+    // screen readers announce it without trapping focus, styles with the
+    // banner tokens, and auto-dismisses.
+    function ensureToastRegion(){
+      let r=document.getElementById('toastRegion');
+      if(!r){ r=document.createElement('div'); r.id='toastRegion'; r.className='toast-region'; r.setAttribute('role','status'); r.setAttribute('aria-live','assertive'); document.body.appendChild(r); }
+      return r;
+    }
+    function toast(msg, kind){
+      // kind: 'warn' | 'crit' | 'info' (default). Translates through t() if a
+      // key is passed, but accepts a literal string too.
+      const r=ensureToastRegion();
+      const el=document.createElement('div');
+      el.className='toast '+(kind==='warn'?'warn':kind==='crit'?'crit':'info');
+      const icon=kind==='warn'?'ri-alert-line':kind==='crit'?'ri-error-warning-fill':'ri-information-line';
+      el.innerHTML=`<i class="${icon}"></i> <span>${escapeHtml(msg)}</span>`;
+      r.appendChild(el);
+      // Animate in, then out. CSS handles the transition; JS just removes.
+      requestAnimationFrame(()=>el.classList.add('show'));
+      setTimeout(()=>{ el.classList.remove('show'); setTimeout(()=>el.remove(),250); }, 5000);
+    }
 
     // ============ read/unread + since-you-left (P-104) ============
     function getSeen(){ try { return JSON.parse(localStorage.getItem(LS_SEEN)||'{}'); } catch(e){ return {}; } }
@@ -26,7 +79,7 @@
       when.textContent='checked '+relTime(new Date().toISOString());
     }
     function flashTitle(n){ if(!document.title.startsWith('(')){ document.title='('+n+') HK City Pulse'; } }
-    function showOnlyNew(){ const lv=getLastVisit(); if(!lv) return; const sinceIso=new Date(lv).toISOString(); getJSON('/v1/insights?since='+encodeURIComponent(sinceIso)+'&limit=100').then(r=>{ if(!r||r.__error){alert('no new-since tracking available in this session');return;} allInsights=r; sevFilter='all'; renderInsights(); }); }
+    function showOnlyNew(){ const lv=getLastVisit(); if(!lv) return; const sinceIso=new Date(lv).toISOString(); getJSON('/v1/insights?since='+encodeURIComponent(sinceIso)+'&limit=100').then(r=>{ if(!r||r.__error){toast('no new-since tracking available in this session','warn');return;} allInsights=r; sevFilter='all'; renderInsights(); }); }
 
     // ============ since-you-left banner (P-104) ============
     async function renderReturnBanner(){
@@ -183,7 +236,7 @@
       // gap list
       const gl=document.getElementById('tlGaps');
       gl.innerHTML = gaps.length? '<div style="font-size:11px;color:var(--muted);margin-top:12px;margin-bottom:6px;">'+t('tl_gaps_header')+' ('+gaps.length+'):</div>' : '';
-      gl.innerHTML += gaps.slice(0,8).map(g=>{ const kindStr=t(g.kindKey); return `<div class="tl-gap-row ${g.cls}" data-action="explain-and-ask" data-kind="${escapeHtml(kindStr)}" data-date="${escapeHtml(g.date)}"><span class="date">${escapeHtml(g.date)}</span><span class="desc">${escapeHtml(kindStr)}${g.val!==undefined?` · ${field} = <b>${escapeHtml(g.val.toFixed(4))}</b> (${(g.pct*100).toFixed(0)}% move)`:''}</span><span class="kind">${escapeHtml(kindStr.split(' ')[0])}</span></div>`; }).join('');
+      gl.innerHTML += gaps.slice(0,8).map(g=>{ const kindStr=t(g.kindKey); return `<div class="tl-gap-row ${g.cls}" data-action="explain-and-ask" data-kind="${escapeHtml(kindStr)}" data-date="${escapeHtml(g.date)}" role="button" tabindex="0"><span class="date">${escapeHtml(g.date)}</span><span class="desc">${escapeHtml(kindStr)}${g.val!==undefined?` · ${field} = <b>${escapeHtml(g.val.toFixed(4))}</b> (${(g.pct*100).toFixed(0)}% move)`:''}</span><span class="kind">${escapeHtml(kindStr.split(' ')[0])}</span></div>`; }).join('');
     }
 
     // ============ Silence Index + drill-down ============
@@ -213,7 +266,7 @@
       document.getElementById('silenceSub').textContent=t('silence_methodology',{v:idx.methodology_version});
       document.getElementById('silenceBar').style.width=score+'%';
       const sigWrap=document.getElementById('silenceSignals');
-      sigWrap.innerHTML=(idx.signals||[]).filter(s=>s.count>0).map(s=>{ const dot=s.contribution>50?'var(--crit)':s.contribution>10?'var(--warn)':'var(--ok)'; const k='sk_'+s.kind; const label=t(k)===k?s.kind.replace(/_/g,' '):t(k); return `<span class="silence-signal" data-action="toggle-silence-breakdown"><span class="dot" style="background:${dot}"></span>${escapeHtml(label)}: ${s.count} (${Math.round(s.contribution)}%)</span>`; }).join('')||'<span style="color:var(--muted);font-size:12px;">'+t('silence_no_signals')+'</span>';
+      sigWrap.innerHTML=(idx.signals||[]).filter(s=>s.count>0).map(s=>{ const dot=s.contribution>50?'var(--crit)':s.contribution>10?'var(--warn)':'var(--ok)'; const k='sk_'+s.kind; const label=t(k)===k?s.kind.replace(/_/g,' '):t(k); return `<span class="silence-signal" data-action="toggle-silence-breakdown" role="button" tabindex="0"><span class="dot" style="background:${dot}"></span>${escapeHtml(label)}: ${s.count} (${Math.round(s.contribution)}%)</span>`; }).join('')||'<span style="color:var(--muted);font-size:12px;">'+t('silence_no_signals')+'</span>';
     }
     // P-118 v1: bind a signal that proxies "opacity spiked" via a series_jump
     // watch on the flagship HIBOR feed (the Silence Index's dominant driver).
@@ -245,7 +298,7 @@
     function renderSilenceBreakdown(){
       const wrap=document.getElementById('silenceRows');
       wrap.innerHTML=(silenceIdx.signals||[]).filter(s=>s.count>0).map(s=>{
-        const evs=(s.evidence_ids||[]).slice(0,8).map(eid=>`<span class="ev-id" data-action="open-cite" data-id="${escapeHtml(eid)}">${escapeHtml(eid.split(':').slice(-1)[0])}<i class="ri-bookmark-line" style="margin-left:4px"></i></span>`).join('');
+        const evs=(s.evidence_ids||[]).slice(0,8).map(eid=>`<span class="ev-id" data-action="open-cite" data-id="${escapeHtml(eid)}" role="button" tabindex="0" aria-label="cite ${escapeHtml(eid)}">${escapeHtml(eid.split(':').slice(-1)[0])}<i class="ri-bookmark-line" style="margin-left:4px"></i></span>`).join('');
         const kk='sk_'+s.kind; const label=t(kk)===kk?s.kind.replace(/_/g,' '):t(kk);
         return `<div class="row" data-action="noop"><span class="ev-count">${s.count}×</span><span class="ev-kind">${escapeHtml(label)} <div class="silence-evidence">${evs||'<span style="color:var(--muted)">'+t('silence_no_ids')+'</span>'}</div></span><span class="ev-weight">${t('silence_weight')} ${s.weight}</span></div>`;
       }).join('') || '<div class="empty">'+t('silence_no_signals')+'</div>';
@@ -301,7 +354,7 @@
       // Thread it under the originating card if we can find one on-page.
       const host=document.querySelector('.card.unread .unprec, .card .unprec')||document.querySelector('#insights .card, #brief .card');
       if(host){ const wrap=document.createElement('div'); wrap.innerHTML=html; host.parentElement.insertBefore(wrap.firstElementChild, host.nextSibling); wrap.firstElementChild.scrollIntoView({behavior:'smooth',block:'center'}); }
-      else { alert('Prior parallel: '+field+' @ '+recordId+' = '+value); }
+      else { toast('Prior parallel: '+field+' @ '+recordId+' = '+value,'info'); }
     }
 
     // ============ human-readable side-by-side evidence ============
@@ -441,20 +494,69 @@
     // ============ feedback ============
     async function vote(id, useful, btn){ const {base,headers}=api(); let ok=false; try { const r=await fetch(base+'/v1/insights/'+encodeURIComponent(id)+'/feedback',{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify({useful})}); ok=r.ok; } catch(e){ ok=false; } const note=document.getElementById('fb-'+id); if(note) note.textContent=ok?(useful?'thanks — marked useful':'thanks — marked not useful'):'failed (HTTP) — not recorded'; }
 
+    // ============ modal focus management (A11Y-DASH-01) ============
+    // All three dialogs (cite, auth, palette) declare role="dialog"
+    // aria-modal="true", but without focus management Tab bleeds onto the page
+    // behind the overlay, the previously-focused control loses focus on close,
+    // and screen readers can't announce the dialog. trapFocus()/releaseFocus()
+    // give every modal a correct focus cycle: on open, remember the trigger and
+    // move focus into the dialog; Tab/Shift-Tab wrap within the dialog; on
+    // close, restore focus to the trigger. Each open/close pair is bracketed
+    // by these so keyboard + SR users can fully operate the dialogs.
+    let _lastFocusBeforeModal=null;
+    let _activeModalTrap=null;
+    function _focusableEls(root){
+      return Array.from(root.querySelectorAll(
+        'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+      )).filter(el=>el.offsetParent!==null || el.getClientRects().length);
+    }
+    function trapFocus(modalEl){
+      releaseFocus(); // close any prior trap first (defensive)
+      _lastFocusBeforeModal=document.activeElement;
+      _activeModalTrap=modalEl;
+      const focusables=_focusableEls(modalEl);
+      const first=focusables[0];
+      if(first) first.focus(); else modalEl.setAttribute('tabindex','-1'), modalEl.focus();
+      // Bind a handler scoped to this trap; releaseFocus() removes it.
+      const handler=(e)=>{
+        if(!_activeModalTrap||_activeModalTrap!==modalEl) return;
+        if(e.key!=='Tab') return;
+        const f=_focusableEls(modalEl);
+        if(!f.length){ e.preventDefault(); return; }
+        const firstEl=f[0], lastEl=f[f.length-1];
+        if(e.shiftKey){ if(document.activeElement===firstEl){ e.preventDefault(); lastEl.focus(); } }
+        else { if(document.activeElement===lastEl){ e.preventDefault(); firstEl.focus(); } }
+      };
+      modalEl._trapHandler=handler;
+      modalEl.addEventListener('keydown',handler);
+    }
+    function releaseFocus(){
+      if(_activeModalTrap&&_activeModalTrap._trapHandler){
+        _activeModalTrap.removeEventListener('keydown',_activeModalTrap._trapHandler);
+        delete _activeModalTrap._trapHandler;
+      }
+      _activeModalTrap=null;
+      if(_lastFocusBeforeModal&&typeof _lastFocusBeforeModal.focus==='function'){
+        // Restore focus to the element that opened the modal.
+        try{ _lastFocusBeforeModal.focus({preventScroll:true}); }catch(e){}
+      }
+      _lastFocusBeforeModal=null;
+    }
+
     // ============ Cite-It modal + permalink ============
     let citeId=null, citeFmt='bibtex', citeManifestObj=null, citeBundleObj=null;
     // The permalink must point at the real public origin (window.location.origin)
     // so a shared link actually resolves for whoever opens it — NOT localhost:8080,
     // which is only the API's fallback when no base_url is supplied. PR-002.
     function citeBaseParam(){ return 'base_url='+encodeURIComponent(window.location.origin); }
-    async function openCite(id){ citeId=id; document.getElementById('citeModal').classList.add('open'); // permalink first
+    async function openCite(id){ citeId=id; const modal=document.getElementById('citeModal'); modal.classList.add('open'); trapFocus(modal); // permalink first
       const bundle=await getJSON('/v1/insights/'+encodeURIComponent(id)+'/cite?'+citeBaseParam());
       // D-031: 503 = records cache cold (refresh in flight); the manifest can't
       // be hashed without the evidence records. Tell the user to retry shortly
       // rather than showing a blank manifest that looks like the cite is broken.
       if(bundle&&bundle.__error===503){ citeBundleObj=null; document.getElementById('citePermalink').textContent='…/cite/'+id; document.getElementById('citeOut').textContent=t('sig_preview_data_unavailable'); document.getElementById('citeManifest').innerHTML='<span style="color:var(--warn)"><i class="ri-database-2-line"></i> '+t('sig_preview_data_unavailable')+'</span>'; return; }
       citeBundleObj=(bundle&&!bundle.__error)?bundle:null; document.getElementById('citePermalink').textContent=citeBundleObj?citeBundleObj.permalink:('…/cite/'+id); setFmt('bibtex'); const m=citeBundleObj&&citeBundleObj.manifest; citeManifestObj=m; document.getElementById('citeManifest').innerHTML=m?`Reproducibility manifest · detector <code>${escapeHtml(m.detector)}</code> · data SHA-256 <code>${escapeHtml(m.data_sha256).slice(0,16)}…</code>${citeBundleObj.experimental?' · <i class="ri-alert-line" style="color:var(--crit)"></i> experimental':''}`:''; }
-    function closeCite(){ document.getElementById('citeModal').classList.remove('open'); }
+    function closeCite(){ document.getElementById('citeModal').classList.remove('open'); releaseFocus(); }
     async function setFmt(fmt){ citeFmt=fmt; document.querySelectorAll('#fmtTabs button').forEach(b=>b.classList.toggle('active',b.dataset.fmt===fmt)); document.getElementById('citeOut').textContent='loading…'; const txt=await fetchText('/v1/insights/'+encodeURIComponent(citeId)+'/cite?format='+fmt+'&'+citeBaseParam()); document.getElementById('citeOut').textContent=txt||'(error loading)'; }
     async function copyCite(){ try { await navigator.clipboard.writeText(document.getElementById('citeOut').textContent); } catch(e){ const ta=document.createElement('textarea'); ta.value=document.getElementById('citeOut').textContent; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); } }
     async function copyPermalink(){ const url=document.getElementById('citePermalink').textContent; try { await navigator.clipboard.writeText(url); } catch(e){} }
@@ -467,10 +569,10 @@
     let activeInvId=null;
     async function investigate(id, source, dataset, title){
       const inv=await postJSON('/v1/investigations',{seed_insight_id:id,seed_source:source,seed_dataset:dataset,seed_title:title});
-      if(!inv||inv.__error){ alert('Could not create case: '+(inv&&inv.__text?inv.__text:'HTTP '+(inv&&inv.__error))); return; }
+      if(!inv||inv.__error){ toast('Could not create case: '+(inv&&inv.__text?inv.__text:'HTTP '+(inv&&inv.__error)),'crit'); return; }
       activeInvId=inv.id; go('cases'); openInvWorkspace(inv.id);
     }
-    async function loadCases(){ const list=await getJSON('/v1/investigations?limit=50'); const el=document.getElementById('casesList'); if(list&&list.__error===401){ el.innerHTML='<div class="empty">'+(t('auth_needed_cases'))+' <button class="icon-btn" data-action="open-auth" style="margin-left:8px;"><i class="ri-login-circle-line"></i> '+t('auth_sign_in')+'</button></div>'; document.getElementById('navCases').textContent='0'; return; } if(!list||list.__error||!list.length){ el.innerHTML='<div class="empty">'+t('cases_none')+'</div>'; document.getElementById('navCases').textContent='0'; return; } document.getElementById('navCases').textContent=list.length; el.innerHTML=list.map(c=>`<div class="case-card" data-action="open-inv-workspace" data-id="${escapeHtml(c.id)}"><div class="ct">${escapeHtml(c.title||'(untitled)')} <i class="ri-arrow-right-line" style="color:var(--accent)"></i></div><div class="cm">seed: ${escapeHtml(c.seed_source||'?')}/${escapeHtml(c.seed_dataset||'?')} · ${escapeHtml(c.status||(c.steps&&c.steps.length?c.steps.length+' steps':'empty'))} · ${escapeHtml(relTime(c.updated_at||c.created_at))}</div></div>`).join(''); }
+    async function loadCases(){ const list=await getJSON('/v1/investigations?limit=50'); const el=document.getElementById('casesList'); if(list&&list.__error===401){ el.innerHTML='<div class="empty">'+(t('auth_needed_cases'))+' <button class="icon-btn" data-action="open-auth" style="margin-left:8px;"><i class="ri-login-circle-line"></i> '+t('auth_sign_in')+'</button></div>'; document.getElementById('navCases').textContent='0'; return; } if(!list||list.__error||!list.length){ el.innerHTML='<div class="empty">'+t('cases_none')+'</div>'; document.getElementById('navCases').textContent='0'; return; } document.getElementById('navCases').textContent=list.length; el.innerHTML=list.map(c=>`<div class="case-card" data-action="open-inv-workspace" data-id="${escapeHtml(c.id)}" role="button" tabindex="0"><div class="ct">${escapeHtml(c.title||'(untitled)')} <i class="ri-arrow-right-line" style="color:var(--accent)"></i></div><div class="cm">seed: ${escapeHtml(c.seed_source||'?')}/${escapeHtml(c.seed_dataset||'?')} · ${escapeHtml(c.status||(c.steps&&c.steps.length?c.steps.length+' steps':'empty'))} · ${escapeHtml(relTime(c.updated_at||c.created_at))}</div></div>`).join(''); }
     async function openInvWorkspace(id){
       const inv=await getJSON('/v1/investigations/'+encodeURIComponent(id));
       const mount=document.getElementById('invWorkspaceMount');
@@ -508,7 +610,7 @@
       if(n===0 && p.data_available===false){ box.innerHTML='<span style="color:var(--warn)"><i class="ri-database-2-line"></i> '+t('sig_preview_data_unavailable')+'</span>'; return; }
       box.innerHTML=t('sig_fired',{n,days:(p.window_days||90),s:(n===1?'':'s'),det:escapeHtml(p.compiled.detector),src:escapeHtml(p.compiled.source)+'/'+escapeHtml(p.compiled.dataset)})+'<br>'+(n?'<span style="color:var(--muted)">'+t('sig_recent',{list:((p.findings||[]).slice(0,3).map(f=>escapeHtml(f.record_id||f.title||'?')).join(', '))})+'</span>':'<span style="color:var(--ok)">'+t('sig_none_fired')+'</span>'); }
     async function saveSignal(){ const q=document.getElementById('sigQuestion').value.trim(); const compiled=buildScanTarget(); // D-033: 401 means no session — open the sign-in modal rather than a generic alert.
-      const s=await postJSON('/v1/signals',{question:q||null, compiled, channels:[]}); if(s&&s.__error===401){ openAuth(); return; } if(!s||s.__error){ alert(t('sig_could_not_save',{detail:((s&&s.__text)||('HTTP '+(s&&s.__error)))})); return; } document.getElementById('sigQuestion').value=''; const note=document.getElementById('sigSaveNote'); if(note){ note.textContent=t('sig_saved_ok'); note.style.display='block'; setTimeout(()=>{ note.style.display='none'; }, 6000); } loadSignals(); }
+      const s=await postJSON('/v1/signals',{question:q||null, compiled, channels:[]}); if(s&&s.__error===401){ openAuth(); return; } if(!s||s.__error){ toast(t('sig_could_not_save',{detail:((s&&s.__text)||('HTTP '+(s&&s.__error)))}),'crit'); return; } document.getElementById('sigQuestion').value=''; const note=document.getElementById('sigSaveNote'); if(note){ note.textContent=t('sig_saved_ok'); note.style.display='block'; setTimeout(()=>{ note.style.display='none'; }, 6000); } loadSignals(); }
     async function loadSignals(){ const list=await getJSON('/v1/signals?limit=50'); const el=document.getElementById('signalsList'); if(list&&list.__error===401){ el.innerHTML='<div class="empty">'+(t('auth_needed_signals'))+' <button class="icon-btn" data-action="open-auth" style="margin-left:8px;"><i class="ri-login-circle-line"></i> '+t('auth_sign_in')+'</button></div>'; document.getElementById('navSignals').textContent='0'; return; } if(!list||list.__error||!list.length){ el.innerHTML='<div class="empty">'+t('sig_none')+'</div>'; document.getElementById('navSignals').textContent='0'; return; } document.getElementById('navSignals').textContent=list.length; el.innerHTML=list.map(s=>`<div class="case-card"><div class="ct">${escapeHtml(s.question||(s.compiled.detector+' on '+s.compiled.source+'/'+s.compiled.dataset))}</div><div class="cm"><code>${escapeHtml(s.compiled.detector)}</code> · ${escapeHtml(s.compiled.source)}/${escapeHtml(s.compiled.dataset)} · ${s.enabled?t('sig_enabled'):t('sig_paused')}</div><div class="actions"><button data-action="toggle-signal" data-id="${escapeHtml(s.id)}" data-enable="${!s.enabled}">${s.enabled?t('sig_pause'):t('sig_enable')}</button><button data-action="del-signal" data-id="${escapeHtml(s.id)}">${t('sig_delete')}</button><button data-action="load-dispatch-log" data-id="${escapeHtml(s.id)}"><i class="ri-history-line"></i> ${t('sig_dispatch')}</button></div><div class="dispatch-log" id="dlog-${escapeHtml(s.id)}" style="display:none;margin-top:8px;"></div></div>`).join(''); }
     // P-110: surface the shipped GET /v1/alerts as a per-signal dispatch timeline.
     // Shows whether each signal fired / delivered / bounced — the "did my signal
@@ -534,7 +636,7 @@
 
     // ============ datasets page ============
     async function loadCategories(){ const cats=await getJSON('/v1/categories'); const sel=document.getElementById('catFilter'); const cur=sel.value; sel.innerHTML='<option value="">'+t('th_all_categories')+'</option>'; if(cats&&!cats.__error) for(const c of cats){ const o=document.createElement('option'); o.value=c.category; o.textContent=`${catLabel(c.category)} (${c.count})`; sel.appendChild(o); } sel.value=cur; }
-    async function loadSources(){ const cat=document.getElementById('catFilter').value; const q=document.getElementById('srcSearch').value.trim(); const params=new URLSearchParams(); if(cat) params.set('category',cat); if(q) params.set('q',q); const qs=params.toString()?('?'+params.toString()):''; const src=await getJSON('/v1/sources'+qs); const sb=document.getElementById('sources'); if(src&&!src.__error&&src.length){ sb.innerHTML=src.map(s=>`<tr><td>${catBadge(s.category)}</td><td>${escapeHtml(s.source)}/${escapeHtml(s.dataset)}<br><span style="color:var(--muted)">${escapeHtml(s.title)}</span></td><td>${(s.tags||[]).map(tt=>`<span class="tag-chip" data-action="tag-search" data-tag="${escapeHtml(tt)}">${escapeHtml(tt)}</span>`).join('')||'—'}</td><td style="color:var(--muted)">${escapeHtml(cadenceLabel(s.cadence))}</td><td>${s.record_count}</td></tr>`).join(''); } else { sb.innerHTML='<tr><td class="empty" colspan="5">'+t('ds_no_match')+'</td></tr>'; } }
+    async function loadSources(){ const cat=document.getElementById('catFilter').value; const q=document.getElementById('srcSearch').value.trim(); const params=new URLSearchParams(); if(cat) params.set('category',cat); if(q) params.set('q',q); const qs=params.toString()?('?'+params.toString()):''; const src=await getJSON('/v1/sources'+qs); const sb=document.getElementById('sources'); if(src&&!src.__error&&src.length){ sb.innerHTML=src.map(s=>`<tr><td>${catBadge(s.category)}</td><td>${escapeHtml(s.source)}/${escapeHtml(s.dataset)}<br><span style="color:var(--muted)">${escapeHtml(s.title)}</span></td><td>${(s.tags||[]).map(tt=>`<span class="tag-chip" data-action="tag-search" data-tag="${escapeHtml(tt)}" role="button" tabindex="0">${escapeHtml(tt)}</span>`).join('')||'—'}</td><td style="color:var(--muted)">${escapeHtml(cadenceLabel(s.cadence))}</td><td>${s.record_count}</td></tr>`).join(''); } else { sb.innerHTML='<tr><td class="empty" colspan="5">'+t('ds_no_match')+'</td></tr>'; } }
     function tagSearch(t){ document.getElementById('srcSearch').value=t; loadSources(); }
 
     // ============ health page ============
@@ -569,9 +671,11 @@
     // token inline (dev_return_auth_token off).
     function openAuth(){
       refreshAuthModal();
-      document.getElementById('authModal').classList.add('open');
+      const modal=document.getElementById('authModal');
+      modal.classList.add('open');
+      trapFocus(modal);
     }
-    function closeAuth(){ document.getElementById('authModal').classList.remove('open'); }
+    function closeAuth(){ document.getElementById('authModal').classList.remove('open'); releaseFocus(); }
     function isSignedIn(){ return !!(sessionStorage.getItem(LS_SESSION) || localStorage.getItem(LS_SESSION)); }
     function refreshAuthModal(){
       const step1=document.getElementById('authStep1'), step2=document.getElementById('authStep2');
@@ -635,8 +739,8 @@
     }
 
     // ============ command palette ============
-    function openPalette(){ document.getElementById('palette').classList.add('open'); document.getElementById('paletteInput').value=''; document.getElementById('paletteInput').focus(); renderPalette(); }
-    function closePalette(){ document.getElementById('palette').classList.remove('open'); }
+    function openPalette(){ const modal=document.getElementById('palette'); modal.classList.add('open'); trapFocus(modal); document.getElementById('paletteInput').value=''; document.getElementById('paletteInput').focus(); renderPalette(); }
+    function closePalette(){ document.getElementById('palette').classList.remove('open'); releaseFocus(); }
     let paletteItems=[], paletteSel=0;
     function renderPalette(){ const q=document.getElementById('paletteInput').value.trim().toLowerCase(); paletteItems=[]; // pages
       const pages=[{t:'Overview',tab:'overview',icon:'ri-dashboard-line'},{t:'Divergences',tab:'divergence',icon:'ri-radar-line'},{t:'Datasets',tab:'datasets',icon:'ri-database-2-line'},{t:'Signals',tab:'signals',icon:'ri-notification-3-line'},{t:'Cases',tab:'cases',icon:'ri-folder-line'},{t:'System health',tab:'health',icon:'ri-pulse-line'},{t:'Licences',tab:'licences',icon:'ri-government-line'},{t:'Funding & Credits',tab:'funding',icon:'ri-hand-coin-line'}];
@@ -648,7 +752,7 @@
     }
     function palettePick(idx){ const it=paletteItems[idx]; if(!it) return; if(it.type==='page'){ go(it.tab); } else if(it.type==='insight'){ go('overview'); setTimeout(()=>{ const c=document.getElementById('card-'+cssEsc(it.id)); if(c){ c.classList.add('anchored'); c.scrollIntoView({behavior:'smooth',block:'center'}); } else { openCite(it.id); } },200); } closePalette(); }
     document.getElementById('paletteInput').addEventListener('keydown', e=>{ if(e.key==='ArrowDown'){ e.preventDefault(); paletteSel=Math.min(paletteSel+1,paletteItems.length-1); renderPalette(); } else if(e.key==='ArrowUp'){ e.preventDefault(); paletteSel=Math.max(paletteSel-1,0); renderPalette(); } else if(e.key==='Enter'){ e.preventDefault(); palettePick(paletteSel); } else if(e.key==='Escape'){ closePalette(); } });
-    document.addEventListener('keydown', e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='k'){ e.preventDefault(); openPalette(); } else if(e.key==='Escape'){ closePalette(); closeCite(); } });
+    document.addEventListener('keydown', e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='k'){ e.preventDefault(); openPalette(); } else if(e.key==='Escape'){ closePalette(); closeCite(); closeAuth(); } });
 
     // keyboard nav: g then letter
     let gPressed=false; document.addEventListener('keydown', e=>{ if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT') return; if(e.key==='g'){ gPressed=true; setTimeout(()=>gPressed=false,800); return; } if(gPressed){ const map={o:'overview',v:'divergence',d:'datasets',s:'signals',c:'cases',h:'health',l:'licences',f:'funding'}; if(map[e.key]){ go(map[e.key]); gPressed=false; } } });

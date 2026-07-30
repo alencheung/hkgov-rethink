@@ -95,7 +95,8 @@ impl AaPropertyConnector {
     }
 
     async fn fetch_body(&self) -> Result<String> {
-        self.client
+        let resp = self
+            .client
             .get(BID_LIST_URL)
             .header("Accept-Language", "zh-HK,zh;q=0.9,en;q=0.8")
             .send()
@@ -110,14 +111,9 @@ impl AaPropertyConnector {
                 origin: "aaproperty",
                 status: e.status().map(|s| s.as_u16()).unwrap_or(0),
                 detail: format!("http: {e}"),
-            })?
-            .text()
-            .await
-            .map_err(|e| Error::Upstream {
-                origin: "aaproperty",
-                status: 0,
-                detail: format!("body read: {e}"),
-            })
+            })?;
+        // Cap the bid-list HTML before parsing (PERF-CON-01).
+        crate::limited::read_text_limited(resp, "aaproperty", crate::limited::MAX_DATA_BYTES).await
     }
 }
 

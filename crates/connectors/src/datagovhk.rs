@@ -262,7 +262,13 @@ impl DataGovHkConnector {
 
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            let detail = resp.text().await.unwrap_or_default();
+            let detail = crate::limited::read_text_limited(
+                resp,
+                "datagovhk",
+                crate::limited::MAX_ERROR_BYTES,
+            )
+            .await
+            .unwrap_or_default();
             return Err(Error::Upstream {
                 origin: "datagovhk",
                 status,
@@ -271,11 +277,11 @@ impl DataGovHkConnector {
         }
 
         // The filter API returns either a bare JSON array or an error object
-        // like {"code":"422","message":"..."}. Handle both.
-        let text = resp.text().await.map_err(|e| Error::Decode {
-            origin: "datagovhk",
-            backtrace: serde::de::Error::custom(format!("body read: {e}")),
-        })?;
+        // like {"code":"422","message":"..."}. Handle both. Cap the body so a
+        // runaway upstream can't OOM the process (PERF-CON-01).
+        let text =
+            crate::limited::read_text_limited(resp, "datagovhk", crate::limited::MAX_DATA_BYTES)
+                .await?;
         let trimmed = text.trim_start();
         if trimmed.starts_with('[') {
             serde_json::from_str::<Vec<serde_json::Value>>(&text).map_err(|e| Error::Decode {
@@ -324,14 +330,24 @@ impl DataGovHkConnector {
             })?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            let detail = resp.text().await.unwrap_or_default();
+            let detail = crate::limited::read_text_limited(
+                resp,
+                "datagovhk",
+                crate::limited::MAX_ERROR_BYTES,
+            )
+            .await
+            .unwrap_or_default();
             return Err(Error::Upstream {
                 origin: "datagovhk",
                 status,
                 detail,
             });
         }
-        resp.json().await.map_err(|e| Error::Decode {
+        // Cap the archive listing body (PERF-CON-01).
+        let body =
+            crate::limited::read_text_limited(resp, "datagovhk", crate::limited::MAX_DATA_BYTES)
+                .await?;
+        serde_json::from_str::<serde_json::Value>(&body).map_err(|e| Error::Decode {
             origin: "datagovhk",
             backtrace: serde::de::Error::custom(e.to_string()),
         })
@@ -447,14 +463,12 @@ fn record_id_for(
             };
         }
     }
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    for (k, v) in fields {
-        k.hash(&mut h);
-        format!("{v:?}").hash(&mut h);
-    }
-    format!("id-{:016x}", h.finish())
+    // No natural key: derive a version-stable synthetic id. Previously this used
+    // `std::collections::hash_map::DefaultHasher`, whose output the std docs
+    // explicitly warn is NOT guaranteed stable across Rust versions — a
+    // toolchain upgrade would silently re-key every persisted row and falsify
+    // the cite manifest's drift signal (QUAL-CON-01). FNV-1a is stable.
+    crate::ids::synthetic_record_id(fields)
 }
 
 #[cfg(test)]

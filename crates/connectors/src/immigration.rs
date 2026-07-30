@@ -111,7 +111,7 @@ impl Connector for ImmigrationConnector {
     }
 
     async fn fetch(&self, dataset: &str) -> Result<Vec<NormalizedRecord>> {
-        let body = self
+        let resp = self
             .client
             .get(&self.csv_url)
             .send()
@@ -126,14 +126,11 @@ impl Connector for ImmigrationConnector {
                 origin: "immigration",
                 status: e.status().map(|s| s.as_u16()).unwrap_or(0),
                 detail: format!("http: {e}"),
-            })?
-            .text()
-            .await
-            .map_err(|e| Error::Upstream {
-                origin: "immigration",
-                status: 0,
-                detail: format!("body read: {e}"),
             })?;
+        // Cap the daily-traffic CSV before parsing (PERF-CON-01).
+        let body =
+            crate::limited::read_text_limited(resp, "immigration", crate::limited::MAX_DATA_BYTES)
+                .await?;
 
         let rows = parse_csv(&body)?;
         let now = Utc::now();

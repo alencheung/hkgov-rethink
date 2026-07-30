@@ -22,9 +22,21 @@ export default {
     if (request.method !== 'GET') return json({ error: 'method not allowed' }, 405);
 
     // Optional custom headers to forward upstream (e.g. Authorization for
-    // Midland's data API). Pass as ?header_<name>=<value>; we forward any
-    // such header verbatim, but only to allowlisted hosts.
+    // Midland's data API). The preferred path is a single `X-Upstream-Auth`
+    // request header carrying the raw `Authorization` value — secrets in
+    // headers never reach edge logs / browser history / Referer the way query
+    // params do (SEC-CON-01). We forward it upstream verbatim as
+    // `Authorization`, but only to allowlisted hosts.
+    //
+    // Legacy: `?header_<name>=<value>` query params are still honored so a
+    // rolling deploy (new connector + old Worker, or vice-versa) doesn't drop
+    // auth mid-flight. Once every deployed connector has switched to the
+    // header path, the query-param branch can be removed.
     const fwdHeaders = {};
+    const upstreamAuth = request.headers.get('x-upstream-auth');
+    if (upstreamAuth) {
+      fwdHeaders['authorization'] = upstreamAuth;
+    }
     for (const [k, v] of url.searchParams.entries()) {
       if (k.startsWith('header_') && v) {
         fwdHeaders[k.slice(7)] = v;

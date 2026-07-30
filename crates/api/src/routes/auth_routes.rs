@@ -52,14 +52,19 @@ pub(super) async fn request_auth_token(
         None
     };
     // Deliver the magic link via the configured delivery sink (log-based by
-    // default; HTTP email-gateway when HKGOV_MAGIC_LINK__API_URL is set). The
-    // redeem URL carries the token to the user's email. When dev_return_auth_token
-    // is on (dev/CI), the token is also in the response body so tests can redeem
-    // without email; in production the token reaches the user only via delivery.
-    let redeem_url = format!(
-        "{}/auth/redeem?token={}",
-        state.settings.api.api_prefix.trim_matches('/'),
-        t.token
+    // default; HTTP email-gateway when HKGOV_MAGIC_LINK__API_URL is set).
+    //
+    // SEC-API-02: the token is passed to the sink as a DISCRETE parameter, NOT
+    // pre-interpolated into a `…?token=` URL. A pre-built credential URL is
+    // exactly the shape that leaks into access/reverse-proxy logs, browser
+    // history, and the Referer header. The sink assembles the redeem link from
+    // a configured public origin (`redeem_base_path`) + the token, and never
+    // logs the token verbatim. When dev_return_auth_token is on (dev/CI), the
+    // token is also in the response body so tests can redeem without email; in
+    // production the token reaches the user only via delivery.
+    let redeem_base_path = format!(
+        "{}/auth/redeem",
+        state.settings.api.api_prefix.trim_matches('/')
     );
     // The delivery sink handles failures gracefully (logs + returns Err), but
     // a delivery failure should NOT fail the request — the token is already
@@ -67,7 +72,7 @@ pub(super) async fn request_auth_token(
     // a broken email gateway.
     if let Err(e) = state
         .magic_link_delivery
-        .deliver(&t.email, &redeem_url, t.expires_at)
+        .deliver(&t.email, &t.token, &redeem_base_path, t.expires_at)
         .await
     {
         tracing::warn!(
