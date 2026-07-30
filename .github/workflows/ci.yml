@@ -93,10 +93,14 @@ jobs:
       # floats to latest on every run, so a yanked/compromised version could
       # silently skip the security scan or fail nondeterministically. taiki-e's
       # installer fetches a specific release by tag. Bump these explicitly when
-      # upgrading; the versions track recent stable releases.
+      # upgrading.
+      #
+      # cargo-audit MUST be >= 0.22.0: the RustSec advisory DB now carries CVSS
+      # 4.0 vectors, which 0.21.x cannot parse (the scan errors out instead of
+      # running). 0.22.2 is the current stable with CVSS 4 support.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit@0.21.2,cargo-deny@0.16.3
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - name: Run cargo-audit
         run: cargo audit
       - name: Run cargo-deny

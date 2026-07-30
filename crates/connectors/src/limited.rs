@@ -75,16 +75,17 @@ where
     decode(&text)
 }
 
+// Compile-time invariant checks on the caps. `assertions_on_constants` (clippy
+// 1.97) flags runtime `assert!` on constants; a const-block makes these a
+// build-time check instead, so an edit that shrinks the data cap below a sane
+// floor or sets the error cap above the data cap fails to compile.
+const _: () = {
+    assert!(MAX_DATA_BYTES >= 32 * 1024 * 1024);
+    assert!(MAX_DATA_BYTES <= 256 * 1024 * 1024);
+    assert!(MAX_ERROR_BYTES < MAX_DATA_BYTES);
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn caps_are_sane() {
-        // The data cap must comfortably exceed any legitimate payload but stay
-        // well clear of a process-killing buffer.
-        assert!(MAX_DATA_BYTES >= 32 * 1024 * 1024);
-        assert!(MAX_DATA_BYTES <= 256 * 1024 * 1024);
-        assert!(MAX_ERROR_BYTES < MAX_DATA_BYTES);
-    }
 }

@@ -22,10 +22,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Same pinned versions as ci.yml (OPS-CI-01).
+      # Same pinned versions as ci.yml (OPS-CI-01). cargo-audit >= 0.22.0 for
+      # CVSS 4.0 advisory support.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit@0.21.2,cargo-deny@0.16.3
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - name: Run cargo-audit
         run: cargo audit
       - name: Run cargo-deny (advisories + licenses + bans)
