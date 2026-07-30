@@ -92,6 +92,36 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // SEC-API-01 / OPS-CONF-01: auth is OFF by default (api_key=None), which is
+    // correct for local/dev but a footgun in production — a deploy that forgets
+    // to set HKGOV_API__API_KEY would silently expose every read endpoint. Fail
+    // closed under HKGOV_ENV=production unless the operator has explicitly opted
+    // into anonymous access via api.allow_anonymous. This mirrors the existing
+    // strict-config gate: a misconfigured prod deploys loudly, not silently.
+    let is_prod = std::env::var("HKGOV_ENV")
+        .map(|v| v.eq_ignore_ascii_case("production") || v.eq_ignore_ascii_case("prod"))
+        .unwrap_or(false);
+    let key_is_empty = settings
+        .api
+        .api_key
+        .as_deref()
+        .map(str::is_empty)
+        .unwrap_or(true);
+    if is_prod && key_is_empty && !settings.api.allow_anonymous {
+        tracing::error!(
+            "HKGOV_ENV=production but no api.api_key is set — the server would boot with \
+             every read endpoint anonymous. Refusing to start. Set HKGOV_API__API_KEY, or set \
+             api.allow_anonymous=true ONLY for a deliberately-public read-only deploy."
+        );
+        std::process::exit(1);
+    }
+    if key_is_empty {
+        tracing::warn!(
+            "api.api_key is empty — all routes are anonymous. This is fine for local/dev; \
+             in production it must be set (or the boot guard under HKGOV_ENV=production will refuse to start)."
+        );
+    }
+
     let registry = Arc::new(hkgov_connectors::registry::Registry::build(&settings)?);
 
     // D-012 guard: validate that every scan-target slug the agent will scan is

@@ -118,7 +118,13 @@ impl HkmaConnector {
 
             let status = resp.status().as_u16();
             if !resp.status().is_success() {
-                let detail = resp.text().await.unwrap_or_default();
+                let detail = crate::limited::read_text_limited(
+                    resp,
+                    "hkma",
+                    crate::limited::MAX_ERROR_BYTES,
+                )
+                .await
+                .unwrap_or_default();
                 last_err = Some(Error::Upstream {
                     origin: "hkma",
                     status,
@@ -131,10 +137,17 @@ impl HkmaConnector {
                 continue;
             }
 
-            let json: serde_json::Value = resp.json().await.map_err(|e| Error::Decode {
-                origin: "hkma",
-                backtrace: serde::de::Error::custom(e.to_string()),
-            })?;
+            // Cap the body before parsing — HKMA's monetary-statistics tables
+            // are large but bounded; a runaway response would otherwise OOM
+            // the process (PERF-CON-01).
+            let body =
+                crate::limited::read_text_limited(resp, "hkma", crate::limited::MAX_DATA_BYTES)
+                    .await?;
+            let json: serde_json::Value =
+                serde_json::from_str(&body).map_err(|e| Error::Decode {
+                    origin: "hkma",
+                    backtrace: serde::de::Error::custom(e.to_string()),
+                })?;
 
             return Ok(json);
         }
@@ -433,37 +446,10 @@ fn record_id_for(dataset: &str, fields: &BTreeMap<String, RecordValue>) -> Strin
         return date;
     }
 
-    // Deterministic fallback when no date/period field is present. We use a
-    // fixed FNV-1a hash rather than `std::collections::hash_map::DefaultHasher`,
-    // whose output the std docs explicitly warn is NOT guaranteed to be stable
-    // across Rust versions. record_ids are persisted (PgStore primary keys)
-    // and feed the reproducibility hash, so the digest must be version-stable.
-    let mut hash = fnv1a_64(b"");
-    for (k, v) in fields {
-        // Fold each field into the running hash in BTreeMap (sorted) order.
-        hash = fnv1a_64_with(hash, k.as_bytes());
-        let vrepr = format!("{v:?}");
-        hash = fnv1a_64_with(hash, vrepr.as_bytes());
-    }
-    format!("id-{:016x}", hash)
-}
-
-/// 64-bit FNV-1a hash with the canonical offset basis and prime. Deterministic
-/// and stable across Rust/compiler versions, unlike `DefaultHasher`.
-fn fnv1a_64(data: &[u8]) -> u64 {
-    fnv1a_64_with(FNV_OFFSET, data)
-}
-
-const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-const FNV_PRIME: u64 = 0x100000001b3;
-
-fn fnv1a_64_with(init: u64, data: &[u8]) -> u64 {
-    let mut hash = init;
-    for &byte in data {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
+    // Deterministic fallback when no date/period field is present. Delegates to
+    // the shared version-stable FNV-1a derivation so this and every other
+    // connector share one implementation (previously HKMA carried its own copy).
+    crate::ids::synthetic_record_id(fields)
 }
 
 /// Public test helper: expose normalization so unit tests can assert against

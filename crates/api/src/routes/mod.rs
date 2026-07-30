@@ -205,7 +205,14 @@ pub fn router(state: AppState) -> Router {
             axum::http::StatusCode::REQUEST_TIMEOUT,
             timeout,
         ))
-        .layer(CompressionLayer::new());
+        .layer(CompressionLayer::new())
+        // SEC-API-05: cap inbound request bodies. Without this every `Json<T>`
+        // handler (ask, feedback, signals, investigations, …) accepted an
+        // unbounded body — an attacker could POST arbitrarily large payloads to
+        // burn memory/LLM budget. 256 KiB is generous for every JSON payload
+        // this API accepts (the largest legitimate one is a signal preview);
+        // file/multipart upload isn't supported.
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(256 * 1024));
 
     // V-003: per-IP inbound rate limiting. `api.rate_per_sec` was previously
     // dead config — defined in config.rs but never wired to the router, so
@@ -992,9 +999,10 @@ async fn cite_insight(
         }
         recs
     };
-    let base_url = q
-        .base_url
-        .unwrap_or_else(|| "http://localhost:8080".to_string());
+    let base_url = match q.base_url.as_deref() {
+        Some(u) => sanitize_base_url(u)?,
+        None => "http://localhost:8080".to_string(),
+    };
     let citation = hkgov_agent::build_citation(
         &insight,
         &records,
@@ -1245,10 +1253,15 @@ async fn transparency_report_route(
         Some(s) if !s.trim().is_empty() => parse_source(s)?,
         _ => DataSource::Hkma,
     };
-    let base_url = q
+    let base_url = match q
         .base_url
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "http://localhost:8080".to_string());
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(u) => sanitize_base_url(u)?,
+        None => "http://localhost:8080".to_string(),
+    };
     let publisher = q
         .publisher
         .filter(|s| !s.trim().is_empty())
@@ -1368,6 +1381,22 @@ async fn unprecedentedness(
         }
     }
     let k = q.k.unwrap_or(hkgov_agent::DEFAULT_BAND_K);
+    // SEC-API-06: validate the user-supplied f64 params. `?value=NaN` or
+    // `?k=Infinity` is accepted by serde_urlencoded/`f64::parse` and would
+    // flow unchecked into the scoring math, risking misleading or
+    // panic-prone downstream computation. Reject non-finite values explicitly.
+    if !q.value.is_finite() {
+        return Err(ApiError(hkgov_common::Error::BadRequest(
+            "value must be a finite number (NaN/Infinity rejected)".into(),
+        )));
+    }
+    if let Some(kv) = q.k {
+        if !kv.is_finite() || kv <= 0.0 {
+            return Err(ApiError(hkgov_common::Error::BadRequest(
+                "k must be a finite, positive number".into(),
+            )));
+        }
+    }
     // History = all field values in chronological order.
     let history: Vec<f64> = page
         .records
@@ -1426,6 +1455,36 @@ async fn ask(
 
 fn parse_source(s: &str) -> Result<DataSource, ApiError> {
     DataSource::parse(s).ok_or_else(|| ApiError(hkgov_common::Error::UnknownSource(s.to_string())))
+}
+
+/// SEC-API-07: validate an operator-supplied `base_url` before reflecting it
+/// into citation permalinks or report headers. A malicious `?base_url=` value
+/// with embedded CRLF, HTML, or a `javascript:` scheme could be reflected into
+/// the rendered Markdown/BibTeX and the report header, enabling content
+/// injection into downstream PDF/Markdown consumers. Require an absolute
+/// http(s) URL and reject any control characters / angle brackets.
+fn sanitize_base_url(raw: &str) -> Result<String, ApiError> {
+    // Reject embedded CRLF / control chars / HTML metacharacters outright —
+    // these have no place in a URL and enable header/markdown injection.
+    if raw
+        .chars()
+        .any(|c| c.is_control() || c == '<' || c == '>' || c == '"' || c == '\'')
+    {
+        return Err(ApiError(hkgov_common::Error::BadRequest(
+            "base_url contains illegal characters".into(),
+        )));
+    }
+    // Require an http(s) scheme prefix. We avoid pulling the `url` crate into
+    // this binary just for this check; a scheme-prefix test is sufficient for
+    // the content-injection threat model (javascript:/data: are the dangerous
+    // schemes, and they're rejected here).
+    let lower = raw.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err(ApiError(hkgov_common::Error::BadRequest(
+            "base_url must be an absolute http(s) URL".into(),
+        )));
+    }
+    Ok(raw.trim_end_matches('/').to_string())
 }
 
 #[cfg(test)]

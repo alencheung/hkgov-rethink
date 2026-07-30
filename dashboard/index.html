@@ -50,7 +50,7 @@
   <style>
     :root {
       --bg: #0d1117; --panel: #161b22; --panel2: #1c2230; --border: #30363d;
-      --fg: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+      --fg: #e6edf3; --muted: #9da7b3; --accent: #58a6ff;
       --warn-bg: rgba(210,153,34,0.08); --warn: #d29922;
       --crit-bg: rgba(248,81,73,0.10);  --crit: #f85149;
       --info-bg: rgba(88,166,255,0.08); --info: #58a6ff;
@@ -271,7 +271,37 @@
     .skeleton { background:linear-gradient(90deg,var(--panel) 25%,var(--panel2) 50%,var(--panel) 75%); background-size:200% 100%; animation:sk 1.5s infinite; border-radius:8px; height:60px; margin-bottom:12px; }
     @keyframes sk { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
     .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); border:0; }
+
+    /* ---- accessibility: keyboard focus + reduced motion ---- */
+    /* Visible focus ring for keyboard users across every interactive control
+       (UI-DASH-02). Mouse users don't see it (:focus-visible only fires on
+       keyboard/programmatic focus). Without this the dark theme made the
+       browser default ring nearly invisible. */
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+    /* Honour the OS "reduce motion" preference (A11Y-DASH-03): users with
+       vestibular sensitivities cannot otherwise suppress the infinite skeleton
+       shimmer and the live-agent pulse ring. */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+        scroll-behavior: auto !important;
+      }
+    }
     .banner { border-radius:8px; padding:10px 14px; margin-bottom:16px; font-size:13px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    /* Toast region (UX-DASH-01) — stacks top-right, out of the flow, used by
+       toast() for accessible inline error/confirm messages. */
+    .toast-region { position:fixed; top:16px; right:16px; z-index:200; display:flex; flex-direction:column; gap:8px; max-width:380px; }
+    .toast { display:flex; gap:8px; align-items:flex-start; padding:10px 14px; border-radius:8px; font-size:13px; border:1px solid var(--border); background:var(--panel); color:var(--fg); opacity:0; transform:translateY(-8px); transition:opacity .2s, transform .2s; box-shadow:0 4px 16px rgba(0,0,0,.4); }
+    .toast.show { opacity:1; transform:translateY(0); }
+    .toast.warn { background:var(--warn-bg); border-color:var(--warn); }
+    .toast.crit { background:var(--crit-bg); border-color:var(--crit); }
+    .toast.info { background:var(--info-bg); border-color:var(--info); }
+    .toast i { font-size:16px; flex-shrink:0; }
+    .toast.warn i { color:var(--warn); }
+    .toast.crit i { color:var(--crit); }
+    .toast.info i { color:var(--info); }
     .banner.warn { background:var(--warn-bg); border:1px solid var(--warn); color:var(--warn); }
     .banner.crit { background:var(--crit-bg); border:1px solid var(--crit); color:var(--crit); }
     .banner button { background:transparent; border:1px solid currentColor; color:inherit; border-radius:4px; padding:3px 8px; cursor:pointer; font-size:12px; }
@@ -396,20 +426,20 @@
       </div>
     </div>
     <nav class="tabs" role="tablist" data-i18n-aria="aria_primary_nav" aria-label="Primary">
-      <button data-tab="overview" class="active" data-action="go" data-tab="overview" role="tab" data-i18n="nav_overview">Overview</button>
-      <button data-tab="divergence" data-action="go" data-tab="divergence" role="tab" data-i18n="nav_divergence">Divergences</button>
-      <button data-tab="datasets" data-action="go" data-tab="datasets" role="tab" data-i18n="nav_datasets">Datasets</button>
-      <button data-tab="signals" data-action="go" data-tab="signals" role="tab" data-i18n="nav_signals">Signals <span class="count" id="navSignals">0</span></button>
-      <button data-tab="cases" data-action="go" data-tab="cases" role="tab" data-i18n="nav_cases">Cases <span class="count" id="navCases">0</span></button>
-      <button data-tab="health" data-action="go" data-tab="health" role="tab" data-i18n="nav_system">System</button>
-      <button data-tab="licences" data-action="go" data-tab="licences" role="tab" data-i18n="nav_licences">Licences</button>
-      <button data-tab="funding" data-action="go" data-tab="funding" role="tab" data-i18n="nav_funding">Funding &amp; Credits</button>
+      <button data-tab="overview" class="active" data-action="go" role="tab" id="tab-overview" aria-selected="true" aria-controls="page-overview" tabindex="0" data-i18n="nav_overview">Overview</button>
+      <button data-tab="divergence" data-action="go" role="tab" id="tab-divergence" aria-selected="false" aria-controls="page-divergence" tabindex="-1" data-i18n="nav_divergence">Divergences</button>
+      <button data-tab="datasets" data-action="go" role="tab" id="tab-datasets" aria-selected="false" aria-controls="page-datasets" tabindex="-1" data-i18n="nav_datasets">Datasets</button>
+      <button data-tab="signals" data-action="go" role="tab" id="tab-signals" aria-selected="false" aria-controls="page-signals" tabindex="-1" data-i18n="nav_signals">Signals <span class="count" id="navSignals">0</span></button>
+      <button data-tab="cases" data-action="go" role="tab" id="tab-cases" aria-selected="false" aria-controls="page-cases" tabindex="-1" data-i18n="nav_cases">Cases <span class="count" id="navCases">0</span></button>
+      <button data-tab="health" data-action="go" role="tab" id="tab-health" aria-selected="false" aria-controls="page-health" tabindex="-1" data-i18n="nav_system">System</button>
+      <button data-tab="licences" data-action="go" role="tab" id="tab-licences" aria-selected="false" aria-controls="page-licences" tabindex="-1" data-i18n="nav_licences">Licences</button>
+      <button data-tab="funding" data-action="go" role="tab" id="tab-funding" aria-selected="false" aria-controls="page-funding" tabindex="-1" data-i18n="nav_funding">Funding &amp; Credits</button>
     </nav>
   </header>
 
   <main>
     <!-- =================== OVERVIEW =================== -->
-    <div id="page-overview" class="page active">
+    <div id="page-overview" class="page active" role="tabpanel" aria-labelledby="tab-overview" tabindex="0">
       <!-- Agent presence strip: makes the supervisor visible (replaces silent 30s poll) -->
       <div id="agentStrip" class="agent-strip">
         <span class="pulse live" id="agentPulse"></span>
@@ -527,7 +557,7 @@
     </div>
 
     <!-- =================== DIVERGENCE (P-113 flagship) =================== -->
-    <div id="page-divergence" class="page">
+    <div id="page-divergence" class="page" role="tabpanel" aria-labelledby="tab-divergence" tabindex="0">
       <h2 style="margin-bottom:4px;"><span data-i18n="div_h2">Proxy Divergence Radar</span> <span class="sub" style="color:var(--muted);font-weight:400" data-i18n="div_sub">— two official numbers that should agree, but don't</span></h2>
       <p style="color:var(--muted); margin:0 0 14px;" data-i18n="div_p">Overlay two series measuring the same underlying fact. The <b>gap between them</b> is the signal — a disagreement no single-source dashboard can see. Each divergence is a citable insight.</p>
       <div class="composer">
@@ -572,7 +602,7 @@
             <button class="icon-btn" data-action="run-divergence" style="background:var(--accent);color:var(--bg);font-weight:600" data-i18n="div_run"><i class="ri-radar-line"></i> Detect divergence</button>
           </div>
         </div>
-        <div style="font-size:11px;color:var(--muted);margin-top:8px"><i class="ri-information-line"></i> <b><span data-i18n="div_known_pairs">Known vetted pairs:</span></b> <span class="tag-chip" data-action="dv-preset" data-which="hibor">HIBOR: two feeds</span> <span class="tag-chip" data-action="dv-preset" data-which="land">land premium: receipts vs transactions</span> <span class="tag-chip" data-action="dv-preset" data-which="clear">clear</span></div>
+        <div style="font-size:11px;color:var(--muted);margin-top:8px"><i class="ri-information-line"></i> <b><span data-i18n="div_known_pairs">Known vetted pairs:</span></b> <span class="tag-chip" data-action="dv-preset" data-which="hibor" role="button" tabindex="0">HIBOR: two feeds</span> <span class="tag-chip" data-action="dv-preset" data-which="land" role="button" tabindex="0">land premium: receipts vs transactions</span> <span class="tag-chip" data-action="dv-preset" data-which="clear" role="button" tabindex="0">clear</span></div>
         <div id="dvCoverage" class="mode-badge" style="margin-top:8px;display:inline-block" data-i18n="div_coverage">paired-source coverage: limited — cross-agency pairs fire when data.gov.hk expansion lands</div>
       </div>
       <div id="dvChart" style="margin-bottom:16px"></div>
@@ -580,7 +610,7 @@
     </div>
 
     <!-- =================== DATASETS =================== -->
-    <div id="page-datasets" class="page">
+    <div id="page-datasets" class="page" role="tabpanel" aria-labelledby="tab-datasets" tabindex="0">
       <h2 style="margin-bottom:4px;" data-i18n="ds_h2">Browse datasets</h2>
       <p style="color:var(--muted); margin:0 0 14px;" data-i18n="ds_p">Every ingested HKGOV source, filterable. Click a tag to search.</p>
       <div class="toolbar">
@@ -592,7 +622,7 @@
     </div>
 
     <!-- =================== SIGNALS =================== -->
-    <div id="page-signals" class="page">
+    <div id="page-signals" class="page" role="tabpanel" aria-labelledby="tab-signals" tabindex="0">
       <h2 style="margin-bottom:4px;" data-i18n="sig_h2">Signal subscriptions</h2>
       <p style="color:var(--muted); margin:0 0 14px;" data-i18n="sig_p">Author a detector watch, preview what it <i>would have</i> fired over the last 90 days (deterministic — preview IS what will fire), then save it.</p>
       <div class="composer">
@@ -621,7 +651,7 @@
     </div>
 
     <!-- =================== CASES (Investigations) =================== -->
-    <div id="page-cases" class="page">
+    <div id="page-cases" class="page" role="tabpanel" aria-labelledby="tab-cases" tabindex="0">
       <h2 style="margin-bottom:4px;" data-i18n="cases_h2">Drill-in investigations</h2>
       <p style="color:var(--muted); margin:0 0 14px;" data-i18n="cases_p">Saved, resumable, shareable case files. Launch one from any insight's <b>Investigate</b> button, or open one below to continue the step-through workspace.</p>
       <div id="casesList"><div class="empty" data-i18n="cases_none">no cases yet — open an insight on Overview and click "Investigate"</div></div>
@@ -629,14 +659,14 @@
     </div>
 
     <!-- =================== HEALTH (renamed "System", demoted conceptually) =================== -->
-    <div id="page-health" class="page">
+    <div id="page-health" class="page" role="tabpanel" aria-labelledby="tab-health" tabindex="0">
       <h2 style="margin-bottom:4px;" data-i18n="sys_h2">System health</h2>
       <p style="color:var(--muted); margin:0 0 14px;" data-i18n="sys_p">Per-source circuit-breaker state + record counts — operational detail. A source showing <code>open</code> or zero records is failing to warm.</p>
       <div id="health" class="lic-highlights"><div class="empty">loading…</div></div>
     </div>
 
     <!-- =================== LICENCES (kept, but demoted as secondary resource) =================== -->
-    <div id="page-licences" class="page">
+    <div id="page-licences" class="page" role="tabpanel" aria-labelledby="tab-licences" tabindex="0">
       <h2 style="margin-bottom:4px;" data-i18n="lic_h2">Licences, registration &amp; resources</h2>
       <p style="color:var(--muted); margin:0 0 14px;" data-i18n="lic_p">A secondary civic-resource directory. Curated highlights first, then the full directory by issuing department. Every entry links to an official HK source.</p>
       <div class="wiz">
@@ -654,7 +684,7 @@
     </div>
 
     <!-- =================== FUNDING & CREDITS (v10) =================== -->
-    <div id="page-funding" class="page">
+    <div id="page-funding" class="page" role="tabpanel" aria-labelledby="tab-funding" tabindex="0">
       <h2 style="margin-bottom:4px;" data-i18n="fc_h2">Funding &amp; credits for your business</h2>
       <p style="color:var(--muted); margin:0 0 14px;" data-i18n="fc_p">Government grants, loan guarantees, incubators, and vendor cloud/ad credits — what's out there, who it's for, and what it's worth. Curated as of June 2026; verify current terms on each official page before applying.</p>
       <div class="wiz">
@@ -671,17 +701,17 @@
   </main>
 
   <!-- citation modal -->
-  <div class="modal-bg" id="citeModal" data-action="close-cite-on-backdrop" role="dialog" aria-modal="true">
+  <div class="modal-bg" id="citeModal" data-action="close-cite-on-backdrop" role="dialog" aria-modal="true" aria-labelledby="citeModalTitle">
     <div class="modal">
-      <div class="modal-head"><span class="t" data-i18n="cite_title">Cite this finding</span><button data-action="close-cite" aria-label="Close"><i class="ri-close-line"></i></button></div>
+      <div class="modal-head"><span class="t" id="citeModalTitle" data-i18n="cite_title">Cite this finding</span><button data-action="close-cite" aria-label="Close"><i class="ri-close-line"></i></button></div>
       <div class="modal-body">
         <div class="cite-actions" style="margin-bottom:12px;"><span class="cite-permalink" id="citePermalink">…</span></div>
         <div class="fmt-tabs" id="fmtTabs">
-          <button class="active" data-fmt="bibtex" data-action="set-fmt" data-fmt="bibtex">BibTeX</button>
-          <button data-fmt="ris" data-action="set-fmt" data-fmt="ris">RIS</button>
-          <button data-fmt="apa" data-action="set-fmt" data-fmt="apa">APA</button>
-          <button data-fmt="chicago" data-action="set-fmt" data-fmt="chicago">Chicago</button>
-          <button data-fmt="markdown" data-action="set-fmt" data-fmt="markdown">Markdown</button>
+          <button class="active" data-fmt="bibtex" data-action="set-fmt">BibTeX</button>
+          <button data-fmt="ris" data-action="set-fmt">RIS</button>
+          <button data-fmt="apa" data-action="set-fmt">APA</button>
+          <button data-fmt="chicago" data-action="set-fmt">Chicago</button>
+          <button data-fmt="markdown" data-action="set-fmt">Markdown</button>
         </div>
         <div id="citeOut" class="cite-out" data-i18n="cite_loading">loading…</div>
         <div class="cite-actions">
@@ -695,9 +725,9 @@
   </div>
 
   <!-- command palette -->
-  <div class="palette-bg" id="palette" data-action="close-palette-on-backdrop">
+  <div class="palette-bg" id="palette" data-action="close-palette-on-backdrop" role="dialog" aria-modal="true" aria-label="Command palette">
     <div class="palette">
-      <input id="paletteInput" class="palette-input" data-i18n-ph="pal_ph" placeholder="Jump to a page, search insights or datasets…" data-action="render-palette" />
+      <input id="paletteInput" class="palette-input" data-i18n-ph="pal_ph" placeholder="Jump to a page, search insights or datasets…" data-action="render-palette" aria-label="Command palette search" />
       <div id="paletteList" class="palette-list"></div>
       <div class="palette-foot"><span><i class="ri-arrow-up-line"></i><i class="ri-arrow-down-line"></i> <span data-i18n="pal_nav">navigate</span></span><span><i class="ri-corner-down-left-line"></i> <span data-i18n="pal_open">open</span></span><span data-i18n="pal_esc">esc to close</span></div>
     </div>
@@ -706,9 +736,9 @@
   <!-- D-018/D-033: sign-in modal. Per-user features (signals, cases,
        silence-watch) need a session; this widget replaces the prior "hand-craft
        curl to /v1/auth/request-token + /v1/auth/redeem" non-flow. -->
-  <div class="modal-bg" id="authModal" data-action="close-auth-on-backdrop" role="dialog" aria-modal="true">
+  <div class="modal-bg" id="authModal" data-action="close-auth-on-backdrop" role="dialog" aria-modal="true" aria-labelledby="authModalTitle">
     <div class="modal" style="max-width:440px;">
-      <div class="modal-head"><span class="t" data-i18n="auth_modal_title">Sign in</span><button data-action="close-auth" aria-label="Close"><i class="ri-close-line"></i></button></div>
+      <div class="modal-head"><span class="t" id="authModalTitle" data-i18n="auth_modal_title">Sign in</span><button data-action="close-auth" aria-label="Close"><i class="ri-close-line"></i></button></div>
       <div class="modal-body">
         <div id="authStep1">
           <p style="margin:0 0 10px;color:var(--muted);" data-i18n="auth_step1_blurb">Sign in to save signals, open case files, and watch the Silence Index. A one-time sign-in link will be sent to your email.</p>

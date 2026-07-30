@@ -118,14 +118,21 @@ impl Connector for LandsDConnector {
             })?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            let detail = resp.text().await.unwrap_or_default();
+            let detail =
+                crate::limited::read_text_limited(resp, "landsd", crate::limited::MAX_ERROR_BYTES)
+                    .await
+                    .unwrap_or_default();
             return Err(Error::Upstream {
                 origin: "landsd",
                 status,
                 detail,
             });
         }
-        let arch: ArchiveResponse = resp.json().await.map_err(|e| Error::Decode {
+        // Cap the archive listing body before parsing (PERF-CON-01).
+        let body =
+            crate::limited::read_text_limited(resp, "landsd", crate::limited::MAX_DATA_BYTES)
+                .await?;
+        let arch: ArchiveResponse = serde_json::from_str(&body).map_err(|e| Error::Decode {
             origin: "landsd",
             backtrace: serde::de::Error::custom(e.to_string()),
         })?;

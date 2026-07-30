@@ -234,20 +234,24 @@ mod tests {
             path.clone(),
             std::time::Duration::from_millis(100),
         );
-        // Arm 10 times rapidly — should coalesce into a single pending write.
+        // Arm 10 times as fast as possible — should coalesce into a single
+        // pending write. The armed flag's compare_exchange makes every call
+        // after the first a no-op, so no per-iteration sleep is needed (the
+        // earlier 2ms×10 sleeps added ~20ms that, under concurrent workspace
+        // test load, could stretch past the 100ms debounce and let the write
+        // fire before the "updated" value below landed — a flaky race).
         for _ in 0..10 {
             ds.schedule();
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
-        // All arming done in ~20ms; the debounce is 100ms so the snapshot
-        // hasn't fired yet. Update the data NOW so the single coalesced write
-        // must pick up "updated".
+        // The debounce is 100ms; all arming happened in well under a
+        // millisecond, so the snapshot hasn't fired yet. Update the data NOW
+        // so the single coalesced write must pick up "updated".
         data.write().await.name = "updated".into();
-        // D-030: wait well past the debounce + write. The previous 300ms was
-        // too tight under concurrent test load on Windows (tokio scheduler
-        // latency pushed the debounce task past the window). 1s gives a wide
-        // margin while keeping the test fast.
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        // Wait well past the debounce + write. 500ms is comfortably past the
+        // 100ms debounce while keeping the test fast; the arming loop no longer
+        // consumes debounce-budget time, so this margin is reliable even under
+        // concurrent test load.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let restored: Sample = restore_from_file(&path)
             .await
             .expect("snapshot was written");

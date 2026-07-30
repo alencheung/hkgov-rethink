@@ -37,7 +37,11 @@ Issues = "https://github.com/alencheung/hkgov-rethink/issues"
 Changelog = "https://github.com/alencheung/hkgov-rethink/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-cov", "ruff", "mypy", "responses>=0.23", "types-requests"]
+# ruff pinned <0.16: 0.16 enabled UP045 (`Optional[X]` → `X | None`) and I001
+# (import-sort) by default, but this client targets py39 where the PEP 604
+# rewrite is only valid behind `from __future__ import annotations`. Pin until
+# the client either bumps its target or adopts `--fix` for the full UP ruleset.
+dev = ["pytest>=7", "pytest-cov", "ruff>=0.13,<0.16", "mypy", "responses>=0.23", "types-requests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hkgov"]

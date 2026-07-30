@@ -116,7 +116,7 @@ impl Connector for RvdConnector {
             }
         };
 
-        let body = self
+        let resp = self
             .client
             .get(url)
             .send()
@@ -131,14 +131,10 @@ impl Connector for RvdConnector {
                 origin: "rvd",
                 status: e.status().map(|s| s.as_u16()).unwrap_or(0),
                 detail: format!("http: {e}"),
-            })?
-            .text()
-            .await
-            .map_err(|e| Error::Upstream {
-                origin: "rvd",
-                status: 0,
-                detail: format!("body read: {e}"),
             })?;
+        // Cap the index CSV before parsing (PERF-CON-01).
+        let body =
+            crate::limited::read_text_limited(resp, "rvd", crate::limited::MAX_DATA_BYTES).await?;
 
         let now = Utc::now();
         let rows = parse_csv(&body)?;

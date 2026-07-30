@@ -1,12 +1,125 @@
-//! Per-source resilience: a token-bucket rate limiter and a circuit breaker.
+//! Per-source resilience: a token-bucket rate limiter, a circuit breaker, and a
+//! bounded retry-with-backoff policy.
 //!
 //! These wrap every outbound connector call so that one slow/degraded HKGOV
-//! endpoint can never starve the others or take the process down. Both are
+//! endpoint can never starve the others or take the process down. All are
 //! intentionally dependency-free (no extra crates) and lock-light.
 
+use hkgov_common::{Error, Result};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+
+/// A bounded exponential-backoff + jitter retry policy.
+///
+/// Retries a future up to `max_attempts` times (so `max_attempts` total tries).
+/// A failure is retried only when `should_retry(&error)` is true — by default
+/// that's transport errors and HTTP 429/5xx, NOT 4xx (a malformed request or a
+/// genuine 404 won't fix themselves, and a `Decode` error signals an upstream
+/// schema change that retrying won't help). Backoff is exponential
+/// (`base * 2^(attempt-1)`) capped at `max_backoff`, with up to ±25% jitter so a
+/// thundering herd of concurrent retries doesn't synchronizedly hammer the
+/// upstream. This supersedes HKMA's hand-rolled `get_with_retry` — every
+/// connector now inherits the same policy through `ResilientConnector::fetch`
+/// (ARCH-CON-01).
+pub struct RetryPolicy {
+    max_attempts: u32,
+    base: Duration,
+    max_backoff: Duration,
+}
+
+impl RetryPolicy {
+    /// `max_attempts` total tries (1 = no retry). `base` is the first backoff;
+    /// subsequent ones double, capped at `max_backoff`.
+    pub fn new(max_attempts: u32, base: Duration, max_backoff: Duration) -> Self {
+        Self {
+            max_attempts: max_attempts.max(1),
+            base,
+            max_backoff,
+        }
+    }
+
+    /// True for errors worth retrying: transport failures (status 0), 429
+    /// (rate-limited), and 5xx (server error). 4xx and `Decode` (schema change)
+    /// are not retryable.
+    fn default_should_retry(e: &Error) -> bool {
+        match e {
+            Error::Upstream { status, .. } => {
+                *status == 0 || *status == 429 || (500..600).contains(status)
+            }
+            Error::Io(_) => true,
+            // Decode = upstream reachable but shape changed; retrying won't help.
+            // BadRequest/NotFound/Unauthorized/UnknownSource/Config/Internal = caller bugs.
+            _ => false,
+        }
+    }
+
+    /// Run `f` with retries. The closure is re-invoked on retryable failures.
+    pub async fn run<F, T, Fut>(&self, origin: &'static str, f: F) -> Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let mut last_err: Option<Error> = None;
+        for attempt in 1..=self.max_attempts {
+            if attempt > 1 {
+                let backoff = self.backoff_for(attempt);
+                tracing::debug!(
+                    origin,
+                    attempt,
+                    backoff_ms = backoff.as_millis() as u64,
+                    "retrying after backoff"
+                );
+                tokio::time::sleep(backoff).await;
+            }
+            match f().await {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    let retryable = Self::default_should_retry(&e);
+                    tracing::debug!(origin, attempt, retryable, error = %e, "attempt failed");
+                    if !retryable || attempt >= self.max_attempts {
+                        return Err(e);
+                    }
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| Error::Upstream {
+            origin,
+            status: 0,
+            detail: "exhausted retries".into(),
+        }))
+    }
+
+    /// Exponential backoff for a given attempt number, capped, with jitter.
+    fn backoff_for(&self, attempt: u32) -> Duration {
+        // attempt >= 2 here (attempt 1 is the first try, no backoff).
+        let exp = attempt.saturating_sub(2).min(31);
+        let shift = 1u32.checked_shl(exp).unwrap_or(u32::MAX);
+        let raw = self.base.saturating_mul(shift);
+        let capped = raw.min(self.max_backoff);
+        // ±25% jitter, derived from the system clock so no extra RNG crate is
+        // needed. This is a politeness jitter, not a security nonce.
+        let jitter_range = capped / 4;
+        if jitter_range.is_zero() {
+            return capped;
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let offset = Duration::from_nanos((nanos % (jitter_range.as_nanos().max(1) as u32)) as u64);
+        capped - jitter_range + offset
+    }
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        // 3 attempts, 200ms base, 8s cap — matches HKMA's prior private policy
+        // so behavior is unchanged for the one connector that already retried.
+        Self::new(3, Duration::from_millis(200), Duration::from_secs(8))
+    }
+}
 
 /// Simple token-bucket limiter. `capacity` tokens, refilled at
 /// `tokens_per_sec`. `acquire()` blocks until a token is available.
@@ -238,5 +351,78 @@ mod tests {
         // are rejected until the probe resolves.
         assert_eq!(cb.state_label(), "half-open");
         assert!(cb.before_call().is_err());
+    }
+
+    // ---- RetryPolicy tests (ARCH-CON-01) ----
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn retry_succeeds_after_transient_failure() {
+        let policy = RetryPolicy::new(3, Duration::from_millis(1), Duration::from_millis(5));
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls2 = calls.clone();
+        let r = policy
+            .run("test", move || {
+                let c = calls2.clone();
+                async move {
+                    let n = c.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n < 3 {
+                        Err(Error::Upstream {
+                            origin: "test",
+                            status: 503,
+                            detail: "transient".into(),
+                        })
+                    } else {
+                        Ok("ok")
+                    }
+                }
+            })
+            .await;
+        assert_eq!(r.unwrap(), "ok");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_does_not_retry_non_retryable_error() {
+        // A 404 (NotFound mapped) must NOT be retried — it won't fix itself.
+        let policy = RetryPolicy::new(3, Duration::from_millis(1), Duration::from_millis(5));
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls2 = calls.clone();
+        let r: Result<&str, _> = policy
+            .run("test", move || {
+                let c = calls2.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Err(Error::NotFound("gone".into()))
+                }
+            })
+            .await;
+        assert!(matches!(r, Err(Error::NotFound(_))));
+        // Only one attempt — non-retryable.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_exhausts_then_returns_last_error() {
+        let policy = RetryPolicy::new(2, Duration::from_millis(1), Duration::from_millis(5));
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls2 = calls.clone();
+        let r: Result<&str, _> = policy
+            .run("test", move || {
+                let c = calls2.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Err(Error::Upstream {
+                        origin: "test",
+                        status: 502,
+                        detail: "down".into(),
+                    })
+                }
+            })
+            .await;
+        assert!(matches!(r, Err(Error::Upstream { status: 502, .. })));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

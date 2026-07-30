@@ -4,7 +4,7 @@
 //! per-source rate limiter and circuit breaker before delegating to the real
 //! connector. This is the v2 resilience layer (ROADMAP item).
 
-use crate::resilience::{CircuitBreaker, RateLimiter};
+use crate::resilience::{CircuitBreaker, RateLimiter, RetryPolicy};
 use crate::{
     aaproperty::AaPropertyConnector, chungsen::ChungSenConnector, datagovhk::DataGovHkConnector,
     hkma::HkmaConnector, hkp::HkpConnector, immigration::ImmigrationConnector,
@@ -15,12 +15,16 @@ use async_trait::async_trait;
 use hkgov_common::{DataSource, NormalizedRecord, Result, Settings};
 use std::sync::Arc;
 
-/// Wraps a connector with rate limiting + circuit breaking. The wrapper is
-/// transparent: `source()`/`datasets()` delegate, only `fetch()` is guarded.
+/// Wraps a connector with rate limiting + circuit breaking + bounded retry.
+/// The wrapper is transparent: `source()`/`datasets()` delegate, only `fetch()`
+/// is guarded.
 pub struct ResilientConnector {
     inner: Arc<dyn Connector>,
     limiter: Arc<RateLimiter>,
     breaker: Arc<CircuitBreaker>,
+    /// Optional retry policy. `None` means the inner connector owns its own
+    /// retry (HKMA does) and the wrapper must not double-retry.
+    retry: Option<RetryPolicy>,
 }
 
 impl ResilientConnector {
@@ -33,6 +37,24 @@ impl ResilientConnector {
             inner,
             limiter,
             breaker,
+            // Default on: most connectors don't retry internally, so the wrapper
+            // gives them bounded exponential backoff for free (ARCH-CON-01).
+            retry: Some(RetryPolicy::default()),
+        }
+    }
+
+    /// Construct without the wrapper-level retry — for connectors (HKMA) that
+    /// already own a retry loop internally, so the wrapper doesn't double-retry.
+    pub fn without_retry(
+        inner: Arc<dyn Connector>,
+        limiter: Arc<RateLimiter>,
+        breaker: Arc<CircuitBreaker>,
+    ) -> Self {
+        Self {
+            inner,
+            limiter,
+            breaker,
+            retry: None,
         }
     }
 
@@ -64,16 +86,66 @@ impl Connector for ResilientConnector {
             });
         }
         self.limiter.acquire().await;
-        match self.inner.fetch(dataset).await {
+        let source = self.inner.source();
+        let inner = self.inner.clone();
+        // Apply the retry policy if present (ARCH-CON-01): bounded exponential
+        // backoff + jitter on transport/429/5xx errors. Only retryable errors
+        // loop; a final failure still counts against the breaker below.
+        let outcome = if let Some(policy) = &self.retry {
+            let ds = dataset.to_string();
+            policy
+                .run(source.as_str(), move || {
+                    let inner = inner.clone();
+                    let ds = ds.clone();
+                    async move { inner.fetch(&ds).await }
+                })
+                .await
+        } else {
+            self.inner.fetch(dataset).await
+        };
+        match outcome {
             Ok(r) => {
                 self.breaker.on_success();
                 Ok(r)
             }
             Err(e) => {
-                self.breaker.on_failure();
+                // RES-CON-02: only count retryable failures against the breaker.
+                // A `Decode` error means the upstream is reachable but its shape
+                // changed (a schema regression) — tripping the breaker on that
+                // would take the source dark even though the endpoint is healthy,
+                // masking a data-shape bug as an outage. Count only transport /
+                // 429 / 5xx, matching the retry policy's notion of retryable.
+                if is_breaker_worthy(&e) {
+                    self.breaker.on_failure();
+                } else {
+                    // Non-retryable but reachable: a schema change. Log it
+                    // distinctly so operators can spot data-shape regressions
+                    // without them being buried as generic "upstream" failures.
+                    tracing::warn!(
+                        source = %self.inner.source(),
+                        dataset,
+                        error = %e,
+                        "fetch failed with a non-retryable error — circuit NOT tripped (reachable upstream with a decode/schema problem?)"
+                    );
+                }
                 Err(e)
             }
         }
+    }
+}
+
+/// Whether an error should count against the circuit breaker. Mirrors the
+/// retry policy's `should_retry`: transport / 429 / 5xx are breaker-worthy;
+/// `Decode` (schema change) and 4xx (caller bug) are not — the endpoint is
+/// healthy, so darkening the source would hide the real problem.
+fn is_breaker_worthy(e: &hkgov_common::Error) -> bool {
+    use hkgov_common::Error;
+    match e {
+        Error::Upstream { status, .. } => {
+            *status == 0 || *status == 429 || (500..600).contains(status)
+        }
+        Error::Io(_) => true,
+        _ => false,
     }
 }
 
@@ -89,7 +161,9 @@ impl Registry {
         let mut by_source: Vec<(DataSource, Arc<ResilientConnector>)> = Vec::new();
 
         let hkma: Arc<dyn Connector> = Arc::new(HkmaConnector::new(&settings.upstream)?);
-        by_source.push(wrap(
+        // HKMA owns its own retry loop (get_with_retry), so the wrapper must not
+        // add a second retry layer on top — use wrap_no_retry.
+        by_source.push(wrap_no_retry(
             hkma,
             settings.upstream.hkma_rate_per_sec as f64,
             5,
@@ -285,6 +359,27 @@ fn wrap(
     (
         source,
         Arc::new(ResilientConnector::new(inner, limiter, breaker)),
+    )
+}
+
+/// Like `wrap`, but for a connector that owns its own internal retry loop
+/// (HKMA's `get_with_retry`). The wrapper must NOT add a second retry layer on
+/// top — that would compound backoff and mask the inner policy's intent.
+fn wrap_no_retry(
+    inner: Arc<dyn Connector>,
+    rate_per_sec: f64,
+    failure_threshold: u64,
+    cooldown: std::time::Duration,
+) -> (DataSource, Arc<ResilientConnector>) {
+    let source = inner.source();
+    let limiter = Arc::new(RateLimiter::new(
+        rate_per_sec.ceil().max(1.0) as u64,
+        rate_per_sec,
+    ));
+    let breaker = Arc::new(CircuitBreaker::new(failure_threshold, cooldown));
+    (
+        source,
+        Arc::new(ResilientConnector::without_retry(inner, limiter, breaker)),
     )
 }
 

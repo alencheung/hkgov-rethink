@@ -26,9 +26,16 @@ pub mod hkma;
 /// The verified HKMA dataset table (internal — used by `hkma`).
 mod hkma_datasets;
 pub mod hkp;
+/// Version-stable synthetic record-id derivation (shared FNV-1a). Used by any
+/// connector whose upstream exposes no natural primary key, so persisted ids
+/// stay stable across Rust/compiler versions.
+pub mod ids;
 pub mod immigration;
 pub mod landregistry;
 pub mod landsd;
+/// Size-limited response reads — bounds peak memory regardless of upstream
+/// behavior (PERF-CON-01). Every connector should read bodies through here.
+pub mod limited;
 pub mod midland;
 pub mod press;
 pub mod property_canon;
@@ -49,6 +56,62 @@ pub(crate) fn strip_bom(s: &str) -> &str {
     s.strip_prefix('\u{feff}').unwrap_or(s)
 }
 
+/// Per-hop deadline for a single Worker-proxy round-trip. Sized to sit *on top
+/// of* the reqwest client's own timeout so a hung upstream can't pin a Worker
+/// connection indefinitely (RES-CON-01).
+const WORKER_HOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Reject `upstream_url` values that are not public http(s) endpoints. This is
+/// client-side defense-in-depth against SSRF: the Worker enforces a host
+/// allow-list too, but validating here means a future config-driven or
+/// user-influenced URL can never turn the proxy hop into an internal relay
+/// (SEC-CON-02). Blocks loopback, private (RFC1918), and link-local addresses.
+pub(crate) fn assert_public_upstream(upstream_url: &str) -> Result<()> {
+    let parsed = url::Url::parse(upstream_url)
+        .map_err(|e| Error::BadRequest(format!("invalid upstream url: {e}")))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(Error::BadRequest(format!(
+                "upstream url must be http(s), got {other}"
+            )))
+        }
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| Error::BadRequest("upstream url has no host".into()))?;
+    // IP-literal hosts get a direct address check; named hosts are left to DNS
+    // resolution (the Worker allow-list is the hard boundary for names).
+    if let Some(ip) = parsed.host().and_then(|h| match h {
+        url::Host::Ipv4(v4) => Some(std::net::IpAddr::V4(v4)),
+        url::Host::Ipv6(v6) => Some(std::net::IpAddr::V6(v6)),
+        _ => None,
+    }) {
+        if ip.is_loopback() || ip.is_unspecified() || is_private_or_link_local(&ip) {
+            return Err(Error::BadRequest(format!(
+                "refusing non-public upstream host {host}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// True for RFC1918 / shared / link-local IPv4, and unique-local / link-local
+/// IPv6. (std doesn't expose `is_private`/`is_link_local` on both families
+/// uniformly across versions, so check explicitly.)
+fn is_private_or_link_local(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_private() || v4.is_link_local() || v4.is_broadcast() || v4.is_documentation()
+        }
+        std::net::IpAddr::V6(v6) => {
+            // fc00::/7 unique-local, fe80::/10 link-local.
+            let seg0 = v6.segments()[0];
+            (seg0 & 0xfe00) == 0xfc00 || (seg0 & 0xffc0) == 0xfe80
+        }
+    }
+}
+
 /// Fetch one URL through the `hkgov-proxy` Cloudflare Worker (fronting the
 /// geo-blocked commercial portals). Shared by the Hkp + Midland connectors.
 ///
@@ -62,9 +125,17 @@ pub(crate) fn strip_bom(s: &str) -> &str {
 /// upstream status preserved in the `Error`'s `detail` field — callers
 /// typically handle this as a soft-fail (circuit-breaker counts it).
 ///
-/// `extra_headers` carries optional per-host request headers forwarded through
-/// the Worker as `?header_<name>=<value>` query params. Midland's API needs
-/// `Authorization: Bearer <BUILD_TOKEN>`; HKP's data API needs the same shape.
+/// `extra_headers` carries optional per-host request headers to forward to the
+/// upstream target. These travel as the value of a single `X-Upstream-Auth`
+/// request header on the Worker hop — **never** as query parameters. Placing
+/// bearer JWTs (Midland's `BUILD_TOKEN`, HKP's `userToken`) in the query string
+/// leaks them into edge/access logs, browser history, and the `Referer` header
+/// (SEC-CON-01); headers do not. The Worker reads `X-Upstream-Auth` and
+/// forwards it upstream as `Authorization`.
+///
+/// Only the first `extra_headers` entry is forwarded (callers today pass exactly
+/// one `Authorization` value); a second entry is a programmer error and is
+/// ignored with a debug log.
 pub(crate) async fn worker_fetch(
     client: &reqwest::Client,
     settings: &UpstreamSettings,
@@ -78,23 +149,27 @@ pub(crate) async fn worker_fetch(
                 .into(),
         )
     })?;
-    // Build the Worker URL: <proxy>/fetch?url=<encoded>&header_<name>=<val>&...
-    // Build the query string out-of-line so the `url::UrlQuery` borrow is
-    // dropped before the .await — holding it across the await makes the
-    // resulting future !Send, which breaks the Connector trait's `Send` bound.
-    let mut query: Vec<(String, String)> = Vec::with_capacity(1 + extra_headers.len());
-    query.push(("url".to_string(), upstream_url.to_string()));
-    for (name, value) in extra_headers {
-        query.push((format!("header_{name}"), (*value).to_string()));
-    }
+    // Defense-in-depth against SSRF: reject non-http(s) schemes and non-public
+    // (loopback / private / link-local) hosts before handing the URL to the
+    // Worker. The Worker ALSO enforces an allow-list, but validating client-side
+    // means a future caller-config-driven URL can never turn this into an open
+    // proxy (SEC-CON-02).
+    assert_public_upstream(upstream_url)?;
+
+    // Build the Worker URL: <proxy>/fetch?url=<encoded>. No secrets in the
+    // query string — auth travels in the `X-Upstream-Auth` header below.
     let worker_url = format!(
-        "{}/fetch?{}",
+        "{}/fetch?url={}",
         proxy_url.trim_end_matches('/'),
-        url::form_urlencoded::Serializer::new(String::new())
-            .extend_pairs(query.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .finish()
+        url::form_urlencoded::byte_serialize(upstream_url.as_bytes()).collect::<String>()
     );
-    let resp = client
+    // The first extra header is the Authorization value for the upstream target.
+    // We forward it via X-Upstream-Auth so it stays out of logs.
+    let upstream_auth = extra_headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .map(|(_, value)| value.to_string());
+    let mut req = client
         .get(&worker_url)
         .header(
             "CF-Access-Client-Id",
@@ -106,9 +181,19 @@ pub(crate) async fn worker_fetch(
                 .proxy_cf_access_client_secret
                 .as_deref()
                 .unwrap_or(""),
-        )
-        .send()
+        );
+    if let Some(auth) = upstream_auth {
+        req = req.header("X-Upstream-Auth", auth);
+    }
+    // Per-hop deadline on top of the client's overall timeout: a hung upstream
+    // must not pin a Worker connection indefinitely (RES-CON-01).
+    let resp = tokio::time::timeout(WORKER_HOP_TIMEOUT, req.send())
         .await
+        .map_err(|_| Error::Upstream {
+            origin: "worker",
+            status: 0,
+            detail: "worker hop timed out".into(),
+        })?
         .map_err(|e| Error::Upstream {
             origin: "worker",
             status: 0,
@@ -117,19 +202,22 @@ pub(crate) async fn worker_fetch(
     let status = resp.status().as_u16();
     if status >= 400 {
         // Worker itself returned an error (e.g. 403 host-not-allowed, 502
-        // upstream network error). Map it cleanly.
-        let body = resp.text().await.unwrap_or_default();
+        // upstream network error). Map it cleanly. Cap the error body so a
+        // pathological Worker error page can't OOM us.
+        let body =
+            crate::limited::read_text_limited(resp, "worker", crate::limited::MAX_ERROR_BYTES)
+                .await
+                .unwrap_or_default();
         return Err(Error::Upstream {
             origin: "worker",
             status,
             detail: body,
         });
     }
-    let env_json = resp.text().await.map_err(|e| Error::Upstream {
-        origin: "worker",
-        status: 0,
-        detail: format!("body read: {e}"),
-    })?;
+    // Cap the Worker envelope body — it carries the full upstream payload, so
+    // without a cap a runaway upstream would OOM the process here (PERF-CON-01).
+    let env_json =
+        crate::limited::read_text_limited(resp, "worker", crate::limited::MAX_DATA_BYTES).await?;
     let env: WorkerEnvelope = serde_json::from_str(&env_json).map_err(|e| Error::Decode {
         origin: "worker",
         backtrace: serde::de::Error::custom(format!("envelope decode: {e}")),

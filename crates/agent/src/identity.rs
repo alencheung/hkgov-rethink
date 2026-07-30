@@ -715,19 +715,33 @@ mod tests {
 /// logic.
 #[async_trait]
 pub trait MagicLinkDelivery: Send + Sync + 'static {
-    /// Deliver a magic-link token. `redeem_url` is the fully-formed URL the user
-    /// clicks (e.g. `https://app.example.com/auth/redeem?token=...`). The
-    /// delivery sink is responsible for rendering the email body.
-    async fn deliver(&self, email: &str, redeem_url: &str, expires_at: DateTime<Utc>)
-        -> Result<()>;
+    /// Deliver a one-time magic-link `token` to `email`.
+    ///
+    /// `redeem_base_path` is the URL path/origin fragment the sink should use to
+    /// build the user-facing link (e.g. `https://app.example.com/auth/redeem` or
+    /// `/auth/redeem`). The **token is passed as a discrete parameter**, not
+    /// pre-interpolated into a URL string — this is deliberate (SEC-API-02): a
+    /// pre-built `…?token=<secret>` URL is exactly the shape that leaks into
+    /// access logs, reverse-proxy logs, browser history, and the `Referer`
+    /// header. By handing the sink the token separately, a sink can render the
+    /// link for the user-facing channel (email body) while never logging the
+    /// credential verbatim.
+    async fn deliver(
+        &self,
+        email: &str,
+        token: &str,
+        redeem_base_path: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<()>;
 
     /// Human-readable name for logging.
     fn name(&self) -> &'static str;
 }
 
 /// A no-op delivery sink that logs the delivery event. The default for dev/CI —
-/// the token is never logged (it's a credential), but the structured event lets
-/// an external log-based pipeline (or the test harness) observe it.
+/// the token is NEVER logged (it's a credential). Only the email + expiry are
+/// emitted as a structured event so an external log-based pipeline (or the test
+/// harness) can observe that delivery occurred.
 pub struct LogMagicLinkDelivery;
 
 #[async_trait]
@@ -735,12 +749,20 @@ impl MagicLinkDelivery for LogMagicLinkDelivery {
     async fn deliver(
         &self,
         email: &str,
-        _redeem_url: &str,
+        token: &str,
+        redeem_base_path: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<()> {
+        // SEC-API-02: do NOT interpolate the token into any logged string. The
+        // redeem URL is only assembled for the operator's convenience in a
+        // dev/CI hint line — and even there we show only the path, not the
+        // token, so the structured log (which log shippers index verbatim)
+        // never carries the credential.
+        let _ = token; // explicitly unused — never logged
         tracing::info!(
             target: "hkgov::identity::magic_link_delivered",
             email = %email,
+            redeem_base_path = %redeem_base_path,
             expires_at = %expires_at,
             "magic-link token delivered (log sink); configure an HTTP email gateway for production delivery"
         );
@@ -765,6 +787,7 @@ pub struct HttpMagicLinkDelivery {
     api_url: String,
     token: String,
     from: String,
+    redeem_base_url: String,
     client: reqwest::Client,
 }
 
@@ -774,18 +797,20 @@ impl HttpMagicLinkDelivery {
         api_url: String,
         token: String,
         from: String,
-        _redeem_base_url: String,
+        redeem_base_url: String,
         client: reqwest::Client,
     ) -> Self {
-        // Note: `_redeem_base_url` is accepted for API symmetry with the
-        // config-driven construction in main.rs (HKGOV_MAGIC_LINK__REDEEM_BASE_URL),
-        // but the redeem URL is built by the route handler which knows the
-        // request context. The delivery sink just transports whatever URL it's
-        // given via `deliver(email, redeem_url, expires_at)`.
+        // `redeem_base_url` is the public origin the email link must point at
+        // (HKGOV_MAGIC_LINK__REDEEM_BASE_URL). It is intentionally NOT the API's
+        // internal api_prefix — the user clicks the link in an email, so it must
+        // resolve to the real public origin. The token is appended here, inside
+        // the delivery sink, so it never flows through the route handler or any
+        // generic logging path as a pre-built URL (SEC-API-02).
         Self {
             api_url,
             token,
             from,
+            redeem_base_url,
             client,
         }
     }
@@ -797,9 +822,17 @@ impl MagicLinkDelivery for HttpMagicLinkDelivery {
     async fn deliver(
         &self,
         email: &str,
-        redeem_url: &str,
+        token: &str,
+        redeem_base_path: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<()> {
+        // Build the redeem link from the configured public origin + the path.
+        // The token is the user-facing credential — embedding it in the email
+        // link is the intended delivery channel (the user clicks it). It is NOT
+        // logged anywhere in this sink.
+        let base = self.redeem_base_url.trim_end_matches('/');
+        let path = redeem_base_path.trim_matches('/');
+        let redeem_url = format!("{base}/{path}?token={token}");
         let subject = "Your HK City Pulse sign-in link";
         let text = format!(
             "Click the link below to sign in. The link expires at {expires_at} and can only be used once.\n\n{redeem_url}"
@@ -854,7 +887,8 @@ mod delivery_tests {
         let result = sink
             .deliver(
                 "alice@example.com",
-                "https://app.example.com/auth/redeem?token=abc",
+                "one-time-secret-token",
+                "/auth/redeem",
                 Utc::now() + Duration::minutes(15),
             )
             .await;

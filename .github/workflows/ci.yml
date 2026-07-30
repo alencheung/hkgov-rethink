@@ -88,12 +88,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      # OPS-CI-01: pin the scanner tool VERSIONS (not just --locked, which only
+      # pins the tool's own dependency lockfile). An unpinned `cargo install`
+      # floats to latest on every run, so a yanked/compromised version could
+      # silently skip the security scan or fail nondeterministically. taiki-e's
+      # installer fetches a specific release by tag. Bump these explicitly when
+      # upgrading.
+      #
+      # cargo-audit MUST be >= 0.22.0: the RustSec advisory DB now carries CVSS
+      # 4.0 vectors, which 0.21.x cannot parse (the scan errors out instead of
+      # running). 0.22.2 is the current stable with CVSS 4 support.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - name: Run cargo-audit
         run: cargo audit
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
       - name: Run cargo-deny
         run: cargo deny check
 
