@@ -43,6 +43,18 @@
     // value for any category not in the known taxonomy.
     function catLabel(cat){ const k='cat_'+(cat||'other'); const v=t(k); return v===k?(cat||'other'):v; }
     function catBadge(cat){ return `<span class="cat-badge" style="background:var(--${catColorClass(cat)})">${escapeHtml(catLabel(cat))}</span>`; }
+    // Render a raw `source` slug (e.g. `hkma`, `landregistry`) as a human
+    // institution/portal name. The source dropdowns previously showed the raw
+    // enum tag; this translates via the `src_<slug>` i18n namespace and falls
+    // back to a humanized form (replace `_`/`-` with spaces, capitalized) for
+    // any source not yet in the dictionary.
+    function sourceLabel(src){
+      if(!src) return '';
+      const k='src_'+String(src).toLowerCase();
+      const v=t(k);
+      if(v!==k) return v;
+      return String(src).replace(/[-_]/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+    }
     // Translate a cadence value (daily/weekly/monthly/...); falls back to raw.
     function cadenceLabel(cad){ if(!cad) return '—'; const k='cad_'+cad.toLowerCase(); const v=t(k); return v===k?cad:v; }
     // Render a raw record field key (e.g. `hibor_overnight`) as a human label.
