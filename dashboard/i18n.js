@@ -125,6 +125,14 @@
         cat_monetary:'monetary', cat_fiscal:'fiscal', cat_property:'property', cat_trade:'trade', cat_population:'population', cat_livability:'livability', cat_government:'government', cat_other:'other',
         // cadence values
         cad_daily:'daily', cad_weekly:'weekly', cad_monthly:'monthly', cad_quarterly:'quarterly', cad_annual:'annual', cad_yoy:'year-over-year', cad_unknown:'unknown',
+        // record field keys (HKMA/data.gov.hk) — used by the timeline field
+        // dropdown so it shows descriptions, not raw snake_case tags. Unknown
+        // keys fall through to prettyField()'s humanize path.
+        field_hibor_overnight:'HIBOR overnight', field_hibor_1_week:'HIBOR 1-week', field_hibor_1_month:'HIBOR 1-month', field_hibor_3_months:'HIBOR 3-month', field_hibor_6_months:'HIBOR 6-month', field_hibor_12_months:'HIBOR 12-month',
+        field_closing_balance:'closing balance', field_opening_balance:'opening balance',
+        field_end_of_month:'end of month', field_end_of_date:'end of date', field_end_of_quarter:'end of quarter',
+        field_turnover:'turnover', field_total_turnover:'total turnover',
+        field_total_reserves:'total reserves', field_reserves:'reserves',
         // keyboard hint
         kbd_hint:'{kbd} command palette · {g} then a tab letter to jump · type {slash} in chat to start an investigation',
         // silence index dynamic strings
@@ -304,6 +312,12 @@
         cat_monetary:'貨幣', cat_fiscal:'財政', cat_property:'物業', cat_trade:'貿易', cat_population:'人口', cat_livability:'宜居', cat_government:'政府', cat_other:'其他',
         // cadence values
         cad_daily:'每日', cad_weekly:'每週', cad_monthly:'每月', cad_quarterly:'每季', cad_annual:'每年', cad_yoy:'按年比較', cad_unknown:'未知',
+        // record field keys — 中文描述 (timeline field dropdown)
+        field_hibor_overnight:'隔夜 HIBOR', field_hibor_1_week:'1 週 HIBOR', field_hibor_1_month:'1 個月 HIBOR', field_hibor_3_months:'3 個月 HIBOR', field_hibor_6_months:'6 個月 HIBOR', field_hibor_12_months:'12 個月 HIBOR',
+        field_closing_balance:'期末結餘', field_opening_balance:'期初結餘',
+        field_end_of_month:'月末', field_end_of_date:'期末日', field_end_of_quarter:'季末',
+        field_turnover:'成交額', field_total_turnover:'總成交額',
+        field_total_reserves:'總儲備', field_reserves:'儲備',
         // keyboard hint
         kbd_hint:'{kbd} 指令面板 · 按 {g} 後再按分頁字母以跳轉 · 於對話框輸入 {slash} 開始調查',
         // silence index dynamic strings

@@ -45,6 +45,26 @@
     function catBadge(cat){ return `<span class="cat-badge" style="background:var(--${catColorClass(cat)})">${escapeHtml(catLabel(cat))}</span>`; }
     // Translate a cadence value (daily/weekly/monthly/...); falls back to raw.
     function cadenceLabel(cad){ if(!cad) return '—'; const k='cad_'+cad.toLowerCase(); const v=t(k); return v===k?cad:v; }
+    // Render a raw record field key (e.g. `hibor_overnight`) as a human label.
+    // HKMA/data.gov.hk field keys are machine names with no description column
+    // from the API, so the timeline field dropdown showed raw snake_case tags.
+    // This translates known fields via the `field_*` i18n namespace, then falls
+    // back to a humanized form: underscores → spaces, capitalized words, and
+    // common acronyms (hibor, hkma, …) expanded/cased. Pass the raw key.
+    const FIELD_ACRONYMS={ hibor:'HIBOR', hkma:'HKMA', hkd:'HKD', usd:'USD', gbp:'GBP', rmb:'RMB', cny:'CNY', lb:'LB', ais:'AIS', rlb:'RLB', cds:'CDS', cpi:'CPI', gdp:'GDP', m0:'M0', m1:'M1', m2:'M2', m3:'M3' };
+    function prettyField(key){
+      if(!key) return '';
+      // Prefer an explicit translation if one exists (covers zh-HK too).
+      const k='field_'+key.toLowerCase();
+      const tr=t(k);
+      if(tr!==k) return tr;
+      // Fall back: humanize snake_case, preserving recognized acronyms.
+      return key.split('_').filter(Boolean).map(w=>{
+        const up=w.toLowerCase();
+        if(FIELD_ACRONYMS[up]) return FIELD_ACRONYMS[up];
+        return w.charAt(0).toUpperCase()+w.slice(1);
+      }).join(' ');
+    }
     function valNum(v){ const n=typeof v==='number'?v:parseFloat(v); return isFinite(n)?n:null; }
 
 
