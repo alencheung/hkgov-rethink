@@ -42,7 +42,7 @@ pub struct ReportInsight {
 pub struct TransparencyReport {
     pub report_version: &'static str,
     pub publisher: String,
-    pub methodology_version: &'static str,
+    pub methodology_version: String,
     pub cite_version: &'static str,
     pub source: DataSource,
     pub source_label: String,

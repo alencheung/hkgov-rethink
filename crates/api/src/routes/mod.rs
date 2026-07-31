@@ -2064,7 +2064,14 @@ mod tests {
         // `&'static str` field). Assert on the raw JSON payload — the wire
         // shape is unchanged.
         let idx = silence_index(State(state), Query(q)).await.unwrap().0;
-        assert_eq!(idx["methodology_version"], "1.0");
+        // CLAIM H: version is now "1.0.<fingerprint>" — assert the human prefix
+        // rather than the exact string, since the fingerprint depends on the
+        // current weights (and changes when they change, by design).
+        let mv = idx["methodology_version"].as_str().unwrap_or("");
+        assert!(
+            mv.starts_with("1.0."),
+            "methodology_version should start with '1.0.', got {mv}"
+        );
         assert!(
             idx["label"].as_str().unwrap_or("").contains("HKMA"),
             "label: {}",

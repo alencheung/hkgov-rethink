@@ -76,8 +76,8 @@ pub use signal::{
 };
 pub use silence::{
     build_index as build_silence_index,
-    build_index_from_insights as build_silence_index_from_insights, SilenceIndex, SilenceSignal,
-    SilenceSignalKind, METHODOLOGY_VERSION as SILENCE_METHODOLOGY_VERSION,
+    build_index_from_insights as build_silence_index_from_insights, methodology_version,
+    SilenceIndex, SilenceSignal, SilenceSignalKind,
 };
 pub use tools::{FindingDto, Tool, ToolBelt};
 pub use transparency::{
