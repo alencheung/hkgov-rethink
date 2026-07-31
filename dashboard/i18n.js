@@ -123,6 +123,9 @@
         kind_unattributed:'unattributed move', kind_press_no_data:'press with no data',
         // dataset categories (the 8 Category taxonomy values)
         cat_monetary:'monetary', cat_fiscal:'fiscal', cat_property:'property', cat_trade:'trade', cat_population:'population', cat_livability:'livability', cat_government:'government', cat_other:'other',
+        // data source slugs (institution/portal names) — used by the source
+        // dropdowns so they show names, not the raw enum tag.
+        src_hkma:'HKMA', src_datagovhk:'data.gov.hk', src_press:'HKMA Press', src_landsd:'LandsD / CSDI', src_immigration:'Immigration Department', src_landregistry:'Land Registry', src_rvd:'Rating & Valuation Dept', src_chungsen:'Chung Sen', src_aaproperty:'AA Property', src_hkp:'HK Property (HKP)', src_midland:'Midland',
         // cadence values
         cad_daily:'daily', cad_weekly:'weekly', cad_monthly:'monthly', cad_quarterly:'quarterly', cad_annual:'annual', cad_yoy:'year-over-year', cad_unknown:'unknown',
         // record field keys (HKMA/data.gov.hk) — used by the timeline field
@@ -310,6 +313,8 @@
         kind_unattributed:'未解釋變動', kind_press_no_data:'有新聞稿但無數據',
         // dataset categories (the 8 Category taxonomy values)
         cat_monetary:'貨幣', cat_fiscal:'財政', cat_property:'物業', cat_trade:'貿易', cat_population:'人口', cat_livability:'宜居', cat_government:'政府', cat_other:'其他',
+        // data source slugs — 機構/平台名稱 (source dropdowns)
+        src_hkma:'金管局', src_datagovhk:'資料一線通', src_press:'金管局新聞公報', src_landsd:'地政總署／空間數據', src_immigration:'入境事務處', src_landregistry:'土地註冊處', src_rvd:'差餉物業估價處', src_chungsen:'中誠地產', src_aaproperty:'環亞物業拍賣', src_hkp:'香港置業', src_midland:'美聯物業',
         // cadence values
         cad_daily:'每日', cad_weekly:'每週', cad_monthly:'每月', cad_quarterly:'每季', cad_annual:'每年', cad_yoy:'按年比較', cad_unknown:'未知',
         // record field keys — 中文描述 (timeline field dropdown)
