@@ -321,7 +321,13 @@
       const extreme=u.is_unprecedented;
       const lo=u.band.low, hi=u.band.high, min=u.hist_min??lo, max=u.hist_max??hi, val=u.value;
       const span=Math.max(max-min, Math.abs(hi-lo), 1e-9);
-      const normL=((lo-min)/span)*100, normW=((hi-lo)/span)*100;
+      // Clamp the normal-range band + marker so they never extend past the
+      // bar's right edge (the colored body was overflowing the card border when
+      // the band high equalled the historical max). Keep every position inside
+      // [0,100]; cap the band's right edge (left+width) at 100%.
+      let normL=Math.max(0,Math.min(100,((lo-min)/span)*100));
+      let normW=Math.max(0,Math.min(100,((hi-lo)/span)*100));
+      normW=Math.min(normW, 100-normL); // right edge can't exceed the track
       const markerPos=Math.max(0,Math.min(100,((val-min)/span)*100));
       const pctile=u.percentile!=null?Math.round(u.percentile):null;
       const safeSrc=escapeHtml(source||''), safeDs=escapeHtml(dataset||''), safeFld=escapeHtml(field||'');
@@ -329,7 +335,7 @@
         <div class="unprec-label"><span><i class="ri-bar-chart-2-line"></i> ${t('unprec_label')}</span>${extreme?`<span class="chip">${pctile!=null?t('unprec_top_pct',{n:Math.max(1,100-pctile)}):t('unprec_extreme')}${u.one_in_n?t('unprec_one_in_n',{n:u.one_in_n}):''}</span>`:`<span style="color:var(--ok)">${t('unprec_in_range')}</span>`}</div>
         <div class="unprec-bar">
           <div class="unprec-normal" style="left:${normL}%;width:${Math.max(2,normW)}%"></div>
-          <div class="unprec-marker ${extreme?'extreme':''}" style="left:calc(${markerPos}% - 1.5px)" title="${t('unprec_current_value',{v:escapeHtml(String(val))})}"></div>
+          <div class="unprec-marker ${extreme?'extreme':''}" style="left:${markerPos}%" title="${t('unprec_current_value',{v:escapeHtml(String(val))})}"></div>
         </div>
         <div class="unprec-foot">
           <span>${t('unprec_normal_range',{lo:escapeHtml(lo.toFixed(3)),hi:escapeHtml(hi.toFixed(3))})}</span>
