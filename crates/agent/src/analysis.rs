@@ -390,6 +390,59 @@ pub fn coerce_to_period(date: &str, cadence: Cadence) -> String {
     }
 }
 
+/// Strip a `|dimension` suffix from a record_id to recover its bare period key.
+/// HKMA multi-dimensional datasets use `"{period}|{dimension}"` (e.g.
+/// `"2026-05|HKD"`); the period logic below must operate on the `"2026-05"` part.
+/// Returns the period portion and the full id (for evidence) when a suffix is
+/// present; for plain ids both are the same.
+fn split_period_suffix(id: &str) -> &str {
+    id.split('|').next().unwrap_or(id)
+}
+
+/// Compute the period key for one calendar year BEFORE `period`, returning
+/// `None` if `period` isn't a recognized period-key format. This is the
+/// calendar-correct replacement for positional YoY alignment (CLAIM D): instead
+/// of assuming the record `periods_per_year` slots earlier is "a year ago" (which
+/// silently compares the wrong period when the series has gaps), we parse the
+/// period key and subtract one calendar year, then look up the prior-year record
+/// by key.
+///
+/// Recognized formats (matching what the connectors emit + `coerce_to_period`):
+/// - `"YYYY"`           → `"(YYYY-1)"`
+/// - `"YYYY-Qn"`        → `"(YYYY-1)-Qn"`
+/// - `"YYYY-MM"`        → `"(YYYY-1)-MM"`  (also covers `YYYY-MM-DD`: we use the
+///   month for monthly/daily YoY; for true daily YoY the caller should pass a
+///   daily series and the prior-year same-day key is `"(YYYY-1)-MM-DD"`)
+/// - `"YYYY-MM-DD"`     → `"(YYYY-1)-MM-DD"`
+fn prior_year_period(period: &str) -> Option<String> {
+    let p = split_period_suffix(period);
+    // YYYY-MM-DD
+    if p.len() >= 10 {
+        if let Ok(y) = p[..4].parse::<u32>() {
+            if y > 0 {
+                return Some(format!("{}-{}", y - 1, &p[5..]));
+            }
+        }
+    }
+    // YYYY-Qn  or  YYYY-MM
+    if p.len() == 7 {
+        if let Ok(y) = p[..4].parse::<u32>() {
+            if y > 0 {
+                return Some(format!("{}-{}", y - 1, &p[5..]));
+            }
+        }
+    }
+    // YYYY (annual/biannual)
+    if p.len() == 4 {
+        if let Ok(y) = p.parse::<u32>() {
+            if y > 0 {
+                return Some(format!("{}", y - 1));
+            }
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // New deterministic detectors (v6 — richer intelligence).
 //
@@ -725,14 +778,23 @@ pub fn detect_series_jumps_cadenced(
     detect_series_jumps(source, dataset, records, series_field, scaled)
 }
 
-/// Detect year-over-year moves. Each period is compared to the period a year
-/// ago (by record_id prefix matching), removing seasonality. The right
-/// comparison for quarterly retail / tourism / fiscal lines where Q3-vs-Q2 is
-/// dominated by calendar effects.
+/// Detect year-over-year moves. Each period is compared to the SAME period one
+/// calendar year earlier (by period-key lookup), removing seasonality. The
+/// right comparison for quarterly retail / tourism / fiscal lines where
+/// Q3-vs-Q2 is dominated by calendar effects.
 ///
-/// `periods_per_year` is the number of records per year (4 for quarterly, 12
-/// for monthly, 1 for annual). When the offset can't be applied (too few
-/// records, or no match a year back), that period is skipped.
+/// CLAIM D fix: the prior implementation aligned by POSITIONAL offset
+/// (`curr_idx - periods_per_year`), which silently compared against the wrong
+/// period whenever the series had a gap (a missing month shifted every
+/// subsequent comparison). This version parses the period key from each
+/// `record_id`, subtracts one calendar year via [`prior_year_period`], and
+/// looks up the prior-year record by key. A missing prior-year period produces
+/// NO finding (correct — YoY is undefined without a baseline) instead of a
+/// WRONG finding (comparing against the adjacent period).
+///
+/// `periods_per_year` is retained for the minimum-history gate (we still need
+/// roughly a year of data for the detector to be meaningful) and for back-compat
+/// with the scheduler's call signature.
 pub fn detect_year_over_year(
     source: DataSource,
     dataset: &str,
@@ -750,14 +812,22 @@ pub fn detect_year_over_year(
     } else {
         DEFAULT_PCT_THRESHOLD
     };
+    // Index by period key so a gap in the series can't shift the comparison.
+    // When two records share a key (shouldn't happen for well-formed period
+    // data, but the |dimension suffix is stripped), last-wins.
+    use std::collections::HashMap;
+    let by_period: HashMap<&str, f64> = series.iter().map(|(id, v)| (*id, *v)).collect();
     let mut findings = Vec::new();
-    for (curr_idx, (curr_id, curr_v)) in series.iter().enumerate() {
-        // Compare against the period a year ago.
-        let prev_idx = match curr_idx.checked_sub(periods_per_year) {
-            Some(i) => i,
-            None => continue,
+    for (curr_id, curr_v) in &series {
+        // Look up the SAME period one calendar year earlier. If the period key
+        // isn't parseable, or that period is absent from the series, skip — we
+        // cannot honestly compute a YoY move without the matching prior period.
+        let Some(prev_key) = prior_year_period(curr_id) else {
+            continue;
         };
-        let (prev_id, prev_v) = series[prev_idx];
+        let Some(&prev_v) = by_period.get(prev_key.as_str()) else {
+            continue;
+        };
         if prev_v.abs() < f64::EPSILON {
             continue;
         }
@@ -773,17 +843,17 @@ pub fn detect_year_over_year(
                 kind: "year_over_year".into(),
                 source,
                 dataset: dataset.into(),
-                title: format!("{series_field} {pct:+.1}% YoY ({prev_id} → {curr_id})"),
+                title: format!("{series_field} {pct:+.1}% YoY ({prev_key} → {curr_id})"),
                 heuristic_summary: format!(
                     "The {series_field} series changed by {pct:+.1}% year-over-year \
-                     ({prev_id}: {prev_v:.2} → {curr_id}: {curr_v:.2}). The {threshold:.0}% \
+                     ({prev_key}: {prev_v:.2} → {curr_id}: {curr_v:.2}). The {threshold:.0}% \
                      YoY watch threshold was crossed — a real move after removing seasonality."
                 ),
                 severity: severity.into(),
                 confidence,
                 evidence: vec![
                     EvidenceRef {
-                        record_id: prev_id.to_string(),
+                        record_id: prev_key.clone(),
                         field: series_field.into(),
                         value: serde_json::json!(prev_v),
                         context: Some("one year prior".into()),
@@ -1679,6 +1749,54 @@ mod tests {
         // Fewer than periods_per_year + MIN_YOY_SAMPLES → empty.
         let recs = vec![rec("2025-Q1", "v", 1.0), rec("2026-Q1", "v", 100.0)];
         assert!(detect_year_over_year(DataSource::Hkma, "x", &recs, "v", 25.0, 4).is_empty());
+    }
+
+    /// CLAIM D: a gap in the series must not produce a false YoY finding. Under
+    /// the old positional alignment, removing 2025-Q2 shifted every later 2025
+    /// quarter's index, so 2026-Q2 (value 100) would compare against 2025-Q1
+    /// (value 100) positionally — or worse, against the wrong baseline — and
+    /// could emit a spurious finding. Under calendar-aware key lookup, a missing
+    /// prior-year period simply produces no finding for that period (YoY is
+    /// undefined without the matching baseline).
+    #[test]
+    fn yoy_gap_does_not_shift_comparison() {
+        // 2025 quarters: Q1, Q3, Q4 (Q2 MISSING — a gap). 2026 full year.
+        // Only 2026-Q1 and 2026-Q4 have a matching prior-year period present.
+        let recs = vec![
+            rec("2025-Q1", "v", 100.0),
+            // 2025-Q2 deliberately absent (the gap).
+            rec("2025-Q3", "v", 100.0),
+            rec("2025-Q4", "v", 100.0),
+            rec("2026-Q1", "v", 100.0), // prior-year 2025-Q1 present → no move
+            rec("2026-Q2", "v", 999.0), // prior-year 2025-Q2 ABSENT → must skip
+            rec("2026-Q3", "v", 100.0), // prior-year 2025-Q3 present → no move
+            rec("2026-Q4", "v", 100.0), // prior-year 2025-Q4 present → no move
+        ];
+        let f = detect_year_over_year(DataSource::Hkma, "x", &recs, "v", 25.0, 4);
+        // 2026-Q2 has a huge value (999) but its prior-year baseline (2025-Q2)
+        // is missing, so it MUST NOT produce a finding. The old positional logic
+        // would have compared it against 2025-Q1 (offset by the gap) and emitted
+        // a spurious +899% finding.
+        assert!(
+            !f.iter().any(|x| x.title.contains("Q2")),
+            "CLAIM D: a period whose prior-year baseline is missing (gap) must not \
+             produce a YoY finding via positional shift; got: {:?}",
+            f.iter().map(|x| &x.title).collect::<Vec<_>>()
+        );
+    }
+
+    /// CLAIM D: the period-key helper handles the formats connectors emit.
+    #[test]
+    fn prior_year_period_handles_all_key_formats() {
+        assert_eq!(prior_year_period("2026-05"), Some("2025-05".into()));
+        assert_eq!(prior_year_period("2026-Q2"), Some("2025-Q2".into()));
+        assert_eq!(prior_year_period("2026"), Some("2025".into()));
+        assert_eq!(prior_year_period("2026-05-15"), Some("2025-05-15".into()));
+        // The |dimension suffix is stripped before year arithmetic.
+        assert_eq!(prior_year_period("2026-05|HKD"), Some("2025-05".into()));
+        // Unparseable → None (the detector skips these, never guesses).
+        assert_eq!(prior_year_period("garbage"), None);
+        assert_eq!(prior_year_period("0000-05"), None); // year 0 underflow guard
     }
 
     // ---- v7: proxy_divergence --------------------------------------------

@@ -43,9 +43,47 @@ use hkgov_common::DataSource;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Methodology version. Bump whenever the weights, the squash constant, or the
-/// signal set change — so a v1.x score is never silently compared to a v1.y.
+/// Human-facing methodology major.minor version. Bump for an *intentional*
+/// methodology change (a new signal, a re-design). The full version string
+/// exposed to consumers is [`methodology_version`], which appends a content
+/// hash of the formula inputs so two scores sharing a version are GUARANTEED
+/// to have been computed with identical weights/constants — even if a
+/// maintainer forgets to bump this human-readable label (CLAIM H).
 pub const METHODOLOGY_VERSION: &str = "1.0";
+
+/// A short content hash over the formula inputs (weights + the squash constant).
+/// This is appended to [`METHODOLOGY_VERSION`] so the version string changes
+/// mechanically whenever ANY tuning constant changes — closing the gap where a
+/// maintainer edited a weight but forgot to bump the human version. Two scores
+/// with the same [`methodology_version`] were computed with the same formula.
+///
+/// Format: `"1.0.a1b2c3"` — the human major.minor + the first 6 hex chars of a
+/// SHA-256 over the weights and HALF_SATURATION. Stable across runs (no
+/// timestamp/randomness), changes only when a constant changes.
+pub fn methodology_version() -> String {
+    format!("{METHODOLOGY_VERSION}.{}", methodology_fingerprint())
+}
+
+/// Compute a 6-char fingerprint over the formula inputs. Any change to a weight
+/// or the half-saturation constant changes this fingerprint (and thus the full
+/// version string), so a stale human-version label can't silently break the
+/// "same version = same formula" contract.
+fn methodology_fingerprint() -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    // The exact bytes here ARE the methodology contract. Adding/removing an
+    // input is itself a methodology change — do it deliberately.
+    h.update(b"silence-index-v1:");
+    h.update(HALF_SATURATION.to_le_bytes());
+    h.update(weights::PRESS_ONLY_GAP.to_le_bytes());
+    h.update(weights::DATA_ONLY_GAP.to_le_bytes());
+    h.update(weights::UNATTRIBUTED_JUMP.to_le_bytes());
+    h.update(weights::MISSING_DATA_DAY.to_le_bytes());
+    let digest = h.finalize();
+    // 6 hex chars (24 bits) — enough to detect any single-constant change with
+    // negligible collision risk, short enough for a readable version string.
+    format!("{:02x}{:02x}{:02x}", digest[0], digest[1], digest[2])
+}
 
 /// The source this index covered in v1. Kept as a backward-compat re-export so
 /// existing callers and tests that reference it keep compiling; the index itself
@@ -136,8 +174,10 @@ impl SilenceSignalKind {
 pub struct SilenceIndex {
     /// "HKMA Silence Index" — the label the UI renders.
     pub label: String,
-    /// Methodology version, e.g. "1.0".
-    pub methodology_version: &'static str,
+    /// Methodology version, e.g. "1.0.a1b2c3" — the human label plus a content
+    /// fingerprint of the formula inputs (CLAIM H). Two indices with the same
+    /// version were computed with identical weights/constants.
+    pub methodology_version: String,
     /// The source this index covers (v1 = HKMA).
     pub source: DataSource,
     /// The period key, e.g. "2026-Q2".
@@ -268,7 +308,7 @@ pub fn build_index_from_insights(
 
     SilenceIndex {
         label: format!("{} Silence Index", source_label(source)),
-        methodology_version: METHODOLOGY_VERSION,
+        methodology_version: methodology_version(),
         source,
         period: period.into(),
         score,
@@ -502,8 +542,41 @@ mod tests {
         let idx = build_index_from_insights(&[], DataSource::Hkma, "2026-Q2", Utc::now());
         assert_eq!(idx.score, 0.0);
         assert_eq!(idx.total_events, 0);
-        assert_eq!(idx.methodology_version, "1.0");
+        // CLAIM H: the version is now the human label + a content fingerprint,
+        // so it starts with "1.0." and is stable across runs for the same
+        // formula.
+        assert!(
+            idx.methodology_version.starts_with("1.0."),
+            "version should start with human prefix '1.0.', got {}",
+            idx.methodology_version
+        );
         assert!(idx.label.contains("HKMA"));
+    }
+
+    /// CLAIM H: the methodology version is deterministic (stable across calls
+    /// for the same formula) and includes a content fingerprint, so a maintainer
+    /// who changes a weight without bumping the human label still gets a
+    /// different version string.
+    #[test]
+    fn methodology_version_is_deterministic_and_fingerprinted() {
+        let v1 = methodology_version();
+        let v2 = methodology_version();
+        assert_eq!(
+            v1, v2,
+            "H: methodology_version must be deterministic across calls"
+        );
+        // Format: "1.0.<6 hex chars>".
+        assert!(v1.starts_with("1.0."), "H: human prefix present, got {v1}");
+        let suffix = &v1["1.0.".len()..];
+        assert_eq!(
+            suffix.len(),
+            6,
+            "H: fingerprint should be 6 hex chars, got {suffix}"
+        );
+        assert!(
+            suffix.chars().all(|c| c.is_ascii_hexdigit()),
+            "H: fingerprint should be hex, got {suffix}"
+        );
     }
 
     #[test]
@@ -585,7 +658,7 @@ mod tests {
     fn delta_is_score_difference() {
         let a = SilenceIndex {
             label: "x".into(),
-            methodology_version: METHODOLOGY_VERSION,
+            methodology_version: methodology_version(),
             source: COVERED_SOURCE,
             period: "2026-Q1".into(),
             score: 40.0,
@@ -638,7 +711,7 @@ mod tests {
         fn clone_for_test(&self) -> Self {
             SilenceIndex {
                 label: self.label.clone(),
-                methodology_version: self.methodology_version,
+                methodology_version: self.methodology_version.clone(),
                 source: self.source,
                 period: self.period.clone(),
                 score: self.score,

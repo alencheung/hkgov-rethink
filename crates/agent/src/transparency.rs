@@ -26,7 +26,7 @@
 //! registering one impl, not editing a `match` arm.
 
 use crate::insight::{Insight, InsightStore};
-use crate::silence::{squash, SilenceIndex, SilenceSignal, SilenceSignalKind, METHODOLOGY_VERSION};
+use crate::silence::{methodology_version, squash, SilenceIndex, SilenceSignal, SilenceSignalKind};
 use chrono::{DateTime, Utc};
 use hkgov_common::DataSource;
 use std::collections::HashMap;
@@ -304,7 +304,7 @@ pub fn build_index_from_registry(
 
     SilenceIndex {
         label: format!("{} Silence Index", source_label(source)),
-        methodology_version: METHODOLOGY_VERSION,
+        methodology_version: methodology_version(),
         source,
         period: period.into(),
         score,
@@ -369,7 +369,7 @@ pub struct CompositeTransparencyIndex {
     pub sources: Vec<SourceBreakdown>,
     pub period: String,
     pub computed_at: DateTime<Utc>,
-    pub methodology_version: &'static str,
+    pub methodology_version: String,
 }
 
 /// One source's contribution to the composite index.
@@ -428,7 +428,7 @@ pub async fn build_composite_index(
         sources: breakdowns,
         period: period.into(),
         computed_at: now,
-        methodology_version: METHODOLOGY_VERSION,
+        methodology_version: methodology_version(),
     }
 }
 
