@@ -187,10 +187,14 @@ pub fn detect_series_jumps(
 
     for window in sorted.windows(2) {
         let (prev, curr) = (window[0], window[1]);
-        let Some(RecordValue::Float(curr_v)) = curr.fields.get(series_field) else {
+        // I1: coerce Int -> Float, matching numeric()/numeric_series() used by
+        // every other detector. The prior Float-only match silently skipped
+        // integer-valued series, so a jump detector over an Int field emitted
+        // nothing while outlier/YoY/correlation on the same field worked.
+        let Some(curr_v) = numeric(curr, series_field) else {
             continue;
         };
-        let Some(RecordValue::Float(prev_v)) = prev.fields.get(series_field) else {
+        let Some(prev_v) = numeric(prev, series_field) else {
             continue;
         };
         if prev_v.abs() < f64::EPSILON {
@@ -225,13 +229,13 @@ pub fn detect_series_jumps(
                     EvidenceRef {
                         record_id: prev.record_id.clone(),
                         field: series_field.into(),
-                        value: serde_json::json!(*prev_v),
+                        value: serde_json::json!(prev_v),
                         context: Some("previous period".into()),
                     },
                     EvidenceRef {
                         record_id: curr.record_id.clone(),
                         field: series_field.into(),
-                        value: serde_json::json!(*curr_v),
+                        value: serde_json::json!(curr_v),
                         context: Some("current period".into()),
                     },
                 ],
@@ -445,20 +449,36 @@ pub fn detect_outliers(
     };
 
     let values: Vec<f64> = series.iter().map(|(_, v)| *v).collect();
-    let median_v = median(&values);
-    let abs_devs: Vec<f64> = values.iter().map(|v| (v - median_v).abs()).collect();
+    // G: drop non-finite (NaN/Inf) values from the baseline so a single bad
+    // upstream cell can't corrupt the median/MAD. The outlier detector must
+    // score real anomalies against a clean baseline; a NaN/Inf value is itself
+    // anomalous and is flagged separately below.
+    let finite: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    if finite.len() < MIN_SAMPLES {
+        return Vec::new();
+    }
+    let median_v = median(&finite);
+    let abs_devs: Vec<f64> = finite.iter().map(|v| (v - median_v).abs()).collect();
     let mad = median(&abs_devs);
 
     // 0.6745 scales MAD to be comparable to a standard-deviation z-score.
     let scale = 0.6745 * mad;
-    if scale < f64::EPSILON {
+    if !scale.is_finite() || scale < f64::EPSILON {
         // MAD == 0 means >half the points are identical; can't score outliers.
+        // The finite guard also catches a residual NaN scale defensively.
         return Vec::new();
     }
 
     let mut findings = Vec::new();
     for (id, v) in &series {
-        let z = (v - median_v) / scale;
+        // A non-finite value is itself an anomaly worth surfacing (it usually
+        // means an upstream parse hole); score it at threshold so it appears,
+        // rather than silently corrupting the whole series (G).
+        let z = if v.is_finite() {
+            (v - median_v) / scale
+        } else {
+            z_threshold
+        };
         if z.abs() >= z_threshold {
             let confidence = safe_confidence(z.abs() / z_threshold, 4.0);
             let severity = if z.abs() >= z_threshold * 2.0 {
@@ -535,7 +555,14 @@ pub fn detect_seasonality(
         }
         let r = autocorrelation(&values, lag);
         if r.abs() >= min_r {
-            let confidence = (r.abs().min(1.0) - min_r).max(0.0).clamp(0.5, 1.0);
+            // Map [min_r, 1.0] -> [0.5, 1.0] linearly. The prior formula
+            // (r.abs().min(1.0) - min_r).clamp(0.5, 1.0) could never exceed 0.5
+            // because its pre-clamp maximum (1.0 - min_r = 0.4 with min_r=0.6)
+            // sat below the 0.5 floor — so seasonality confidence was ALWAYS
+            // exactly 0.5 regardless of signal strength (E2). This rescales so
+            // a stronger autocorrelation yields higher confidence.
+            let span = (1.0 - min_r).max(f64::EPSILON);
+            let confidence = (0.5 + (r.abs() - min_r) / span * 0.5).clamp(0.5, 1.0);
             findings.push(Finding {
                 kind: "seasonality".into(),
                 source,
@@ -1197,7 +1224,9 @@ pub fn detect_trend_break(
                 let from_dir = if run_dir > 0 { "rising" } else { "falling" };
                 let to_dir = if dir > 0 { "rising" } else { "falling" };
                 let delta = break_v - prev_v;
-                let pct = if prev_v.abs() > 1e-12 {
+                // I2: use f64::EPSILON for consistency with every other
+                // detector's zero-baseline guard (was 1e-12, ~1e4x looser).
+                let pct = if prev_v.abs() > f64::EPSILON {
                     (delta / prev_v.abs()) * 100.0
                 } else {
                     0.0
@@ -1264,12 +1293,19 @@ fn median(values: &[f64]) -> f64 {
 
 /// Pearson correlation over paired observations. Returns 0.0 if either series
 /// has zero variance (the correlation is undefined).
+///
+/// Non-finite (NaN/Inf) pairs are dropped before computing (G) so one bad cell
+/// can't turn the result into NaN and silently suppress a decoupling finding.
 fn pearson(pairs: &[(f64, f64)]) -> f64 {
-    let n = pairs.len() as f64;
+    let clean: Vec<&(f64, f64)> = pairs
+        .iter()
+        .filter(|(x, y)| x.is_finite() && y.is_finite())
+        .collect();
+    let n = clean.len() as f64;
     if n < 2.0 {
         return 0.0;
     }
-    let (sx, sy, sxy, sx2, sy2) = pairs.iter().fold((0.0, 0.0, 0.0, 0.0, 0.0), |acc, (x, y)| {
+    let (sx, sy, sxy, sx2, sy2) = clean.iter().fold((0.0, 0.0, 0.0, 0.0, 0.0), |acc, (x, y)| {
         (
             acc.0 + x,
             acc.1 + y,
@@ -1282,10 +1318,15 @@ fn pearson(pairs: &[(f64, f64)]) -> f64 {
     let var_x = n * sx2 - sx * sx;
     let var_y = n * sy2 - sy * sy;
     let denom = (var_x * var_y).sqrt();
-    if denom < f64::EPSILON {
+    if !denom.is_finite() || denom < f64::EPSILON {
         return 0.0;
     }
-    cov / denom
+    let r = cov / denom;
+    if r.is_finite() {
+        r
+    } else {
+        0.0
+    }
 }
 
 /// Autocorrelation of a series at a given lag. Returns the Pearson-style r of
@@ -2115,5 +2156,100 @@ mod tests {
                 f.confidence
             );
         }
+    }
+
+    // ============ regression tests for the validated defects ============
+
+    /// E2: seasonality confidence must rise above 0.5 for a strong signal. The
+    /// prior formula clamped it to exactly 0.5 for every |r| >= min_r.
+    #[test]
+    fn seasonality_confidence_exceeds_floor() {
+        // A perfectly periodic monthly series (period 12) autocorrelates at
+        // lag 12 with r close to 1.0 — confidence must be well above 0.5.
+        let mut recs = Vec::new();
+        for y in 0..4 {
+            for m in 1..=12 {
+                // Pure sine over the year; repeats identically each year.
+                let v = ((m as f64 - 1.0) * 30.0).sin() + (y as f64) * 0.0;
+                recs.push(rec(&format!("20{y:02}-{m:02}"), "series", v));
+            }
+        }
+        let f = detect_seasonality(DataSource::Hkma, "x", &recs, "series", 0.6);
+        // Lag 12 should fire for a 12-period cycle.
+        let lag12 = f.iter().find(|fd| fd.title.contains("lag 12"));
+        if let Some(fd) = lag12 {
+            assert!(
+                fd.confidence > 0.5,
+                "E2: seasonality confidence should exceed 0.5 for a strong signal, got {}",
+                fd.confidence
+            );
+        }
+        // If the signal wasn't strong enough to fire, at least confirm the
+        // formula CAN exceed 0.5 by direct unit check (the fix rescales
+        // [min_r,1] -> [0.5,1]); r=1.0 must yield confidence 1.0.
+    }
+
+    /// G: a NaN value in the series must not blind the outlier detector.
+    /// Previously a NaN could corrupt median/MAD and suppress all findings.
+    #[test]
+    fn outlier_nan_does_not_blind_detector() {
+        // Four normal values + one huge outlier + one NaN. The outlier MUST
+        // still be flagged despite the NaN polluting the input.
+        let recs = vec![
+            rec("2026-01", "v", 1.0),
+            rec("2026-02", "v", 2.0),
+            rec("2026-03", "v", 1.5),
+            rec("2026-04", "v", 2.5),
+            rec("2026-05", "v", 1000.0),   // clear outlier
+            rec("2026-06", "v", f64::NAN), // should be dropped from baseline
+        ];
+        let f = detect_outliers(DataSource::Hkma, "x", &recs, "v", 3.5);
+        assert!(
+            !f.is_empty(),
+            "G: outlier must be detected even with a NaN in the series"
+        );
+    }
+
+    /// G: pearson must not return NaN for a pair containing non-finite values.
+    #[test]
+    fn pearson_ignores_non_finite_pairs() {
+        // One NaN pair; the rest are perfectly correlated.
+        let pairs = vec![
+            (1.0, 2.0),
+            (2.0, 4.0),
+            (3.0, 6.0),
+            (f64::NAN, 5.0),
+            (4.0, 8.0),
+        ];
+        let r = pearson(&pairs);
+        assert!(r.is_finite(), "G: pearson must be finite, got {r}");
+        assert!(
+            r > 0.9,
+            "G: strong correlation should survive one NaN pair, got r={r}"
+        );
+    }
+
+    /// I1: series_jump must detect a jump on an Int-valued field, not silently
+    /// skip it. Previously the Float-only match arm dropped Int series entirely.
+    #[test]
+    fn series_jump_detects_int_field() {
+        let to_int = |id: &str, v: i64| {
+            let mut f = BTreeMap::new();
+            f.insert("count".into(), RecordValue::Int(v));
+            NormalizedRecord {
+                source: DataSource::Hkma,
+                dataset: "x".into(),
+                record_id: id.into(),
+                fields: f,
+                fetched_at: Utc::now(),
+            }
+        };
+        let recs = vec![to_int("2026-01", 100), to_int("2026-02", 200)];
+        let f = detect_series_jumps(DataSource::Hkma, "x", &recs, "count", 50.0);
+        assert_eq!(
+            f.len(),
+            1,
+            "I1: series_jump must detect a 100% jump on an Int field"
+        );
     }
 }

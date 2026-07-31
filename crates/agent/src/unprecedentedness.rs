@@ -142,15 +142,27 @@ pub fn normal_range(history: &[f64], k: f64) -> Option<NormalRange> {
 /// the proportion of history at-or-beyond this value's deviation from the
 /// median, then converts to a return period. Returns `None` when undefined.
 pub fn one_in_n(history: &[f64], value: f64) -> Option<u64> {
-    let med = median(history);
+    // J: empty history is the one case where "1-in-N" is genuinely undefined.
+    // The prior code called median([]) (which returns 0.0) and then returned
+    // Some(0 + 1) = Some(1) — a spurious "1-in-1 event". Return None instead.
+    if history.is_empty() {
+        return None;
+    }
+    // G: non-finite values would corrupt the median / deviation comparison;
+    // drop them before computing so a single NaN can't blind the score.
+    let finite: Vec<f64> = history.iter().copied().filter(|v| v.is_finite()).collect();
+    if finite.is_empty() {
+        return None;
+    }
+    let med = median(&finite);
     let dev = (value - med).abs();
-    let at_or_beyond = history.iter().filter(|&&v| (v - med).abs() >= dev).count();
+    let at_or_beyond = finite.iter().filter(|&&v| (v - med).abs() >= dev).count();
     if at_or_beyond == 0 {
         // More extreme than anything in history — at least 1-in-(n+1).
-        return Some(history.len() as u64 + 1);
+        return Some(finite.len() as u64 + 1);
     }
     // at_least_one: avoid divide-by-zero (guarded above).
-    let rate = at_or_beyond as f64 / history.len() as f64;
+    let rate = at_or_beyond as f64 / finite.len() as f64;
     let n = (1.0 / rate).round() as u64;
     if n == 0 {
         Some(1)
@@ -457,5 +469,21 @@ mod tests {
         let sa = serde_json::to_string(&a).unwrap();
         let sb = serde_json::to_string(&b).unwrap();
         assert_eq!(sa, sb);
+    }
+
+    /// J: empty history must return None (was Some(1), a spurious "1-in-1").
+    #[test]
+    fn one_in_n_empty_history_returns_none() {
+        assert_eq!(one_in_n(&[], 5.0), None);
+    }
+
+    /// G: a NaN in history must not produce a spurious return period.
+    #[test]
+    fn one_in_n_ignores_non_finite_history() {
+        // One real value + NaNs. The NaNs must be dropped; with one finite
+        // point at 5.0 and value 5.0, the rate is 1/1 → 1-in-1.
+        let n = one_in_n(&[5.0, f64::NAN, f64::INFINITY], 5.0);
+        assert!(n.is_some(), "G: finite-only history should still score");
+        assert_eq!(n, Some(1));
     }
 }

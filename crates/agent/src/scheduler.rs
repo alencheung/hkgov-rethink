@@ -235,8 +235,8 @@ async fn run_pass(
         // M3: capture the determinism flag before the finding is consumed by
         // into_insight_experimental. The flag is set only inside analysis.rs
         // (the LLM framing path never touches it), so this is the typed,
-        // checkable form of the determinism guarantee.
-        let deterministic = finding.deterministic;
+        // checkable form of the detection-origin guarantee.
+        let detection_is_deterministic = finding.deterministic;
         match llm.frame(&finding).await {
             Ok(framing) => {
                 let insight = finding.into_insight_experimental(
@@ -245,15 +245,26 @@ async fn run_pass(
                     llm.name(),
                     experimental,
                 );
-                // M3: record provenance alongside the upsert so every insight
-                // carries an audit trail (detector, threshold, evidence hash,
-                // producer, deterministic flag).
+                // M3 + CLAIM A: record provenance alongside the upsert so every
+                // insight carries an audit trail. The `deterministic` flag in
+                // the attestation means "the insight as stored (summary +
+                // confidence + evidence) reproduces byte-for-byte." That is
+                // TRUE only when the heuristic client framed it (it echoes the
+                // detector's own summary/confidence verbatim). An LLM client
+                // frames at temperature 0.2 — non-deterministic by construction
+                // — so even though DETECTION originated in pure Rust, the
+                // insight's framing does NOT reproduce. Attesting deterministic
+                // for an LLM-framed insight would make the "byte-for-byte" claim
+                // in build_attestation false. The detection provenance is still
+                // fully captured by detector/detector_version/input_sha256.
+                let framing_is_deterministic = llm.name() == "heuristic";
+                let attested_deterministic = detection_is_deterministic && framing_is_deterministic;
                 if let Some(pstore) = provenance {
                     let producer = crate::provenance::Producer::from_name(llm.name());
                     let rec = crate::provenance::ProvenanceRecord::for_insight(
                         &insight,
                         producer,
-                        deterministic,
+                        attested_deterministic,
                     );
                     pstore.record(rec).await;
                 }
@@ -1318,5 +1329,78 @@ mod tests {
 
         run_pass(&store, &insights, llm.as_ref(), &settings, None, None).await;
         assert_eq!(insights.count().await, 1);
+    }
+
+    /// CLAIM A: when a non-heuristic (LLM) client frames the finding, the
+    /// attested `deterministic` flag must be `false` — the framing won't
+    /// reproduce byte-for-byte. The heuristic client must still attest `true`.
+    #[tokio::test]
+    async fn llm_framed_finding_attests_non_deterministic() {
+        let scan = vec![ScanTarget {
+            source: "hkma".into(),
+            dataset: "daily-interbank-liquidity".into(),
+            detector: "series_jump".into(),
+            field: Some("hibor_overnight".into()),
+            threshold: Some(50.0),
+            ..Default::default()
+        }];
+        let settings = settings_with_scan(scan);
+        let store = Arc::new(MemoryStore::new(100, 60));
+        seed(
+            &store,
+            vec![
+                rec("2026-01", "hibor_overnight", 2.0),
+                rec("2026-02", "hibor_overnight", 6.0), // +200% → flagged
+            ],
+        )
+        .await;
+        let pstore = crate::provenance::ProvenanceStore::new();
+
+        // --- LLM (non-heuristic) client: must attest deterministic=false ---
+        let insights = Arc::new(InsightStore::new());
+        let llm = Arc::new(CountingClient {
+            frames: std::sync::atomic::AtomicUsize::new(0),
+        });
+        run_pass(
+            &store,
+            &insights,
+            llm.as_ref(),
+            &settings,
+            None,
+            Some(&pstore),
+        )
+        .await;
+        let list = insights.list(10).await;
+        assert_eq!(list.len(), 1);
+        let prov = pstore.get(&list[0].id).await.expect("provenance recorded");
+        assert!(
+            !prov.deterministic,
+            "CLAIM A: an LLM-framed finding must NOT be attested deterministic \
+             (framing won't reproduce byte-for-byte), got deterministic=true"
+        );
+
+        // --- Heuristic client: must still attest deterministic=true ---
+        let insights2 = Arc::new(InsightStore::new());
+        let pstore2 = crate::provenance::ProvenanceStore::new();
+        let h = Arc::new(HeuristicClient::new());
+        run_pass(
+            &store,
+            &insights2,
+            h.as_ref(),
+            &settings,
+            None,
+            Some(&pstore2),
+        )
+        .await;
+        let list2 = insights2.list(10).await;
+        assert_eq!(list2.len(), 1);
+        let prov2 = pstore2
+            .get(&list2[0].id)
+            .await
+            .expect("provenance recorded");
+        assert!(
+            prov2.deterministic,
+            "CLAIM A: a heuristic-framed finding SHOULD be attested deterministic"
+        );
     }
 }

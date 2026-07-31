@@ -169,12 +169,13 @@ impl TransparencySignal for DataOnlyGapSignal {
         !PressOnlyGapSignal.includes(insight, _all)
     }
     fn missing_data_days(&self, insights: &[&Insight]) -> usize {
-        // Mirrors v1 `missing_data_day_count`: sum evidence.len().min(30) over
-        // data-only gap insights, capped at 30 per finding.
-        insights
-            .iter()
-            .map(|i| i.evidence.len().min(30))
-            .sum::<usize>()
+        // CLAIM B: count distinct data-only gap findings, NOT the sum of their
+        // evidence rows. The prior form double-counted the same data_only set
+        // (already feeding DataOnlyGap) and let a single verbose finding (30
+        // evidence rows) contribute 60.0 to the raw score — 1.5x the
+        // half-saturation point — so detector verbosity dominated the index.
+        // Each gap finding is now one missing-data signal.
+        insights.len()
     }
 }
 
@@ -260,12 +261,10 @@ pub fn build_index_from_registry(
         data_only.len(),
         &data_only,
     ));
-    // Missing-data days derived from the data-only partition (v1 approximation:
-    // sum evidence counts, capped at 30 per finding).
-    let missing = data_only
-        .iter()
-        .map(|i| i.evidence.len().min(30))
-        .sum::<usize>();
+    // Missing-data days: count distinct data-only gap findings (CLAIM B — was
+    // sum of evidence.len().min(30), which double-counted the same data_only
+    // set already feeding DataOnlyGap and let one verbose finding dominate).
+    let missing = data_only.len();
     signals.push(make_signal_with_weight(
         SilenceSignalKind::MissingDataDay,
         missing,
