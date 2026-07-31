@@ -225,10 +225,15 @@ pub fn build_index_from_insights(
         }
     }
 
-    // Missing-data days are derived from cross_source_gap evidence that names
-    // missing dates; approximate via the data-only gap count for v1 (each
-    // data-only gap finding represents a cluster of missing days, capped).
-    let missing_days = missing_data_day_count(&data_only);
+    // Missing-data days are derived from data-only gap findings. CLAIM B: the
+    // prior `missing_data_day_count` summed evidence.len().min(30) per finding,
+    // which double-counted the same data_only set already feeding DataOnlyGap —
+    // and a single verbose finding (30 evidence rows) contributed 60.0 to the
+    // raw score (1.5x the half-saturation point), letting detector verbosity
+    // dominate the index. Each data-only gap is now counted once (its finding
+    // count), so DataOnlyGap and MissingDataDay remain distinct signals but a
+    // finding's evidence verbosity can no longer inflate the score.
+    let missing_days = data_only.len();
 
     let signals = vec![
         make_signal(
@@ -411,15 +416,6 @@ pub(crate) fn has_same_period_press(jump: &Insight, all: &[Insight]) -> bool {
                     .any(|jd| same_period(jd, e.record_id.as_str()))
             })
     })
-}
-
-/// Approximate missing-data days from data-only gap findings for v1. Each
-/// data-only gap finding represents a cluster; cap the contribution so a single
-/// noisy finding can't dominate.
-fn missing_data_day_count(data_only: &[&Insight]) -> usize {
-    // Each data-only gap finding represents up to N missing press-coverage days.
-    // Sum the evidence counts, capped at 30 per finding to avoid a runaway.
-    data_only.iter().map(|i| i.evidence.len().min(30)).sum()
 }
 
 #[cfg(test)]
@@ -658,5 +654,29 @@ mod tests {
     #[test]
     fn _btreemap_unused_guard() {
         let _m: BTreeMap<&str, i32> = BTreeMap::new();
+    }
+
+    /// CLAIM B: a single data-only gap finding with many evidence rows must NOT
+    /// dominate the index. Previously it contributed 1*1.0 (DataOnlyGap) +
+    /// 30*2.0 (MissingDataDay) = 61.0 raw, pinning the score near the half-
+    /// saturation point. Now each gap finding is counted once per signal, so
+    /// one finding contributes 1*1.0 + 1*2.0 = 3.0 raw.
+    #[test]
+    fn one_verbose_gap_finding_does_not_dominate() {
+        let dates: Vec<&str> = (0..30).map(|_| "2026-01-01").collect();
+        let insights = vec![gap_insight("g1", &dates, false)];
+        let idx =
+            build_index_from_insights(&insights, DataSource::Hkma, "2026-Q1", chrono::Utc::now());
+        // raw should be 3.0 (not 61.0); score should be modest (not ~60).
+        assert!(
+            idx.raw_score <= 5.0,
+            "CLAIM B: one finding should not dominate; raw_score={}, expected <=5.0",
+            idx.raw_score
+        );
+        assert!(
+            idx.score < 15.0,
+            "CLAIM B: one finding should not pin the score high; score={}, expected <15.0",
+            idx.score
+        );
     }
 }
