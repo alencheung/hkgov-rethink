@@ -118,7 +118,7 @@
       const sel=document.getElementById('dvDs'+sid); sel.innerHTML='';
       const srcs=await getJSON('/v1/sources?source='+encodeURIComponent(src));
       if(!srcs||srcs.__error) return;
-      for(const s of srcs){ const o=document.createElement('option'); o.value=s.dataset; o.textContent=s.dataset+' ('+s.record_count+')'; sel.appendChild(o); }
+      for(const s of srcs){ const o=document.createElement('option'); o.value=s.dataset; o.textContent=(s.title||s.dataset)+' ('+s.record_count+')'; sel.appendChild(o); }
       // sensible defaults
       if(sid==='1' && [...sel.options].some(o=>o.value==='daily-figures-interbank-liquidity')) sel.value='daily-figures-interbank-liquidity';
       if(sid==='2' && [...sel.options].some(o=>o.value==='hk-interbank-ir-daily')) sel.value='hk-interbank-ir-daily';
@@ -132,7 +132,7 @@
       if(![...document.getElementById('dvDs'+sid).options].some(o=>o.value===ds)){ await dvFillDatasets(sid); return; }
       const fld=document.getElementById('dvFld'+sid); fld.innerHTML='';
       const recs=await getJSON('/v1/datasets/'+encodeURIComponent(src)+'/'+encodeURIComponent(ds)+'/records?limit=20');
-      if(recs&&!recs.__error&&recs.records&&recs.records[0]){ const fields=Object.keys(recs.records[0].fields||{}).sort(); for(const f of fields){ const o=document.createElement('option'); o.value=f; o.textContent=f; fld.appendChild(o); } }
+      if(recs&&!recs.__error&&recs.records&&recs.records[0]){ const fields=Object.keys(recs.records[0].fields||{}).sort(); for(const f of fields){ const o=document.createElement('option'); o.value=f; o.textContent=prettyField(f); fld.appendChild(o); } }
       if([...fld.options].some(o=>o.value==='hibor_overnight')) fld.value='hibor_overnight';
     }
     function dvPreset(kind){
@@ -183,7 +183,7 @@
       const sel=document.getElementById('tlDataset');
       if(!sel.options.length){
         const srcs=await getJSON('/v1/sources?source=hkma');
-        if(srcs&&!srcs.__error){ for(const s of srcs){ const o=document.createElement('option'); o.value=s.dataset; o.textContent=s.dataset+' ('+s.record_count+')'; if(s.dataset==='daily-interbank-liquidity')o.selected=true; sel.appendChild(o); } }
+        if(srcs&&!srcs.__error){ for(const s of srcs){ const o=document.createElement('option'); o.value=s.dataset; o.textContent=(s.title||s.dataset)+' ('+s.record_count+')'; if(s.dataset==='daily-interbank-liquidity')o.selected=true; sel.appendChild(o); } }
       }
       const dataset=sel.value; if(!dataset) return;
       const recs=await getJSON('/v1/datasets/hkma/'+encodeURIComponent(dataset)+'/records?limit=500');
@@ -195,7 +195,7 @@
       const fsel=document.getElementById('tlField');
       const cur=fsel.value;
       fsel.innerHTML='';
-      for(const f of Object.keys(fieldSet).sort()){ const o=document.createElement('option'); o.value=f; o.textContent=f; fsel.appendChild(o); }
+      for(const f of Object.keys(fieldSet).sort()){ const o=document.createElement('option'); o.value=f; o.textContent=prettyField(f); fsel.appendChild(o); }
       if(cur&&fieldSet[cur]) fsel.value=cur; else if(fieldSet['hibor_overnight']) fsel.value='hibor_overnight';
       tlData={ records: recs.records, press: (press&&!press.__error&&press.records)?press.records:[] };
       renderTimeline();
@@ -203,7 +203,7 @@
     function renderTimeline(){
       const host=document.getElementById('tlChart'); host.innerHTML='';
       if(!tlData){ host.innerHTML='<div class="tl-empty">'+t('tl_no_data')+'</div>'; document.getElementById('tlGaps').innerHTML=''; return; }
-      const field=document.getElementById('tlField').value; const showPress=document.getElementById('tlShowPress').checked;
+      const field=document.getElementById('tlField').value; const fieldLabel=prettyField(field); const showPress=document.getElementById('tlShowPress').checked;
       if(!field){ host.innerHTML='<div class="tl-empty">'+t('tl_pick_field')+'</div>'; return; }
       // data points
       const pts=tlData.records.map(r=>({ date:r.record_id, v:valNum(r.fields&&r.fields[field]) })).filter(p=>p.v!==null&&p.date);
@@ -228,7 +228,7 @@
         if(tlChart){ tlChart.destroy&&tlChart.destroy(); tlChart=null; }
         const opts={ width:host.clientWidth||800, height:220, series:[
           {},
-          { label:field, stroke:'var(--data)'.includes('var')?'#58a6ff':'#58a6ff', width:2, points:{show:false}, spanGaps:true },
+          { label:fieldLabel, stroke:'var(--data)'.includes('var')?'#58a6ff':'#58a6ff', width:2, points:{show:false}, spanGaps:true },
           { label:'press release', paths:()=>null, points:{show:true, size:6, fill:'#f778ba'}, spanGaps:true }
         ], axes:[ {grid:{stroke:'#30363d'},stroke:'#8b949e'}, {grid:{stroke:'#30363d'},stroke:'#8b949e'} ], scales:{ x:{time:true}, y:{auto:true} }, cursor:{x:false,y:false} };
         tlChart=new uPlot(opts, [ts, vals, pressMarks], host);
@@ -236,7 +236,7 @@
       // gap list
       const gl=document.getElementById('tlGaps');
       gl.innerHTML = gaps.length? '<div style="font-size:11px;color:var(--muted);margin-top:12px;margin-bottom:6px;">'+t('tl_gaps_header')+' ('+gaps.length+'):</div>' : '';
-      gl.innerHTML += gaps.slice(0,8).map(g=>{ const kindStr=t(g.kindKey); return `<div class="tl-gap-row ${g.cls}" data-action="explain-and-ask" data-kind="${escapeHtml(kindStr)}" data-date="${escapeHtml(g.date)}" role="button" tabindex="0"><span class="date">${escapeHtml(g.date)}</span><span class="desc">${escapeHtml(kindStr)}${g.val!==undefined?` · ${field} = <b>${escapeHtml(g.val.toFixed(4))}</b> (${(g.pct*100).toFixed(0)}% move)`:''}</span><span class="kind">${escapeHtml(kindStr.split(' ')[0])}</span></div>`; }).join('');
+      gl.innerHTML += gaps.slice(0,8).map(g=>{ const kindStr=t(g.kindKey); return `<div class="tl-gap-row ${g.cls}" data-action="explain-and-ask" data-kind="${escapeHtml(kindStr)}" data-date="${escapeHtml(g.date)}" role="button" tabindex="0"><span class="date">${escapeHtml(g.date)}</span><span class="desc">${escapeHtml(kindStr)}${g.val!==undefined?` · ${escapeHtml(fieldLabel)} = <b>${escapeHtml(g.val.toFixed(4))}</b> (${(g.pct*100).toFixed(0)}% move)`:''}</span><span class="kind">${escapeHtml(kindStr.split(' ')[0])}</span></div>`; }).join('');
     }
 
     // ============ Silence Index + drill-down ============
@@ -603,7 +603,7 @@
 
     // ============ signals ============
     async function sigSourceFill(){ const sel=document.getElementById('sigSource'); if(sel.options.length) return; const srcs=await getJSON('/v1/sources'); if(!srcs||srcs.__error) return; const seen={}; for(const s of srcs) if(!seen[s.source]){ seen[s.source]=true; const o=document.createElement('option'); o.value=s.source; o.textContent=s.source; sel.appendChild(o); } sel.value='hkma'; sigDatasetFill(); }
-    async function sigDatasetFill(){ const src=document.getElementById('sigSource').value; const sel=document.getElementById('sigDataset'); const field=(document.getElementById('sigField').value||'').trim(); sel.innerHTML=''; const srcs=await getJSON('/v1/sources?source='+encodeURIComponent(src)); if(!srcs||srcs.__error) return; for(const s of srcs){ const o=document.createElement('option'); o.value=s.dataset; o.textContent=s.dataset+' ('+s.record_count+')'; sel.appendChild(o); } if(field){ const preferred=src==='hkma'&&field==='hibor_overnight'?'daily-figures-interbank-liquidity':null; let chosen=null; if(preferred&&[...sel.options].some(o=>o.value===preferred)) chosen=preferred; else { for(const s of srcs.slice(0,12)){ try { const r=await getJSON('/v1/datasets/'+encodeURIComponent(s.source)+'/'+encodeURIComponent(s.dataset)+'/records?limit=1'); if(r&&!r.__error&&r.records&&r.records[0]&&(field in (r.records[0].fields||{}))){ chosen=s.dataset; break; } } catch(e){} } } if(chosen) sel.value=chosen; } }
+    async function sigDatasetFill(){ const src=document.getElementById('sigSource').value; const sel=document.getElementById('sigDataset'); const field=(document.getElementById('sigField').value||'').trim(); sel.innerHTML=''; const srcs=await getJSON('/v1/sources?source='+encodeURIComponent(src)); if(!srcs||srcs.__error) return; for(const s of srcs){ const o=document.createElement('option'); o.value=s.dataset; o.textContent=(s.title||s.dataset)+' ('+s.record_count+')'; sel.appendChild(o); } if(field){ const preferred=src==='hkma'&&field==='hibor_overnight'?'daily-figures-interbank-liquidity':null; let chosen=null; if(preferred&&[...sel.options].some(o=>o.value===preferred)) chosen=preferred; else { for(const s of srcs.slice(0,12)){ try { const r=await getJSON('/v1/datasets/'+encodeURIComponent(s.source)+'/'+encodeURIComponent(s.dataset)+'/records?limit=1'); if(r&&!r.__error&&r.records&&r.records[0]&&(field in (r.records[0].fields||{}))){ chosen=s.dataset; break; } } catch(e){} } } if(chosen) sel.value=chosen; } }
     function buildScanTarget(){ return { source:document.getElementById('sigSource').value, dataset:document.getElementById('sigDataset').value, detector:document.getElementById('sigDetector').value, field:document.getElementById('sigField').value||null, threshold:parseFloat(document.getElementById('sigThreshold').value)||null, comparison:'period_over_period', cadence:document.getElementById('sigCadence').value||'daily', direction:document.getElementById('sigDirection').value }; }
     async function previewSignal(){ const box=document.getElementById('sigPreview'); box.textContent=t('sig_previewing'); const compiled=buildScanTarget(); const p=await postJSON('/v1/signals/preview',{compiled, window_days:90}); if(!p||p.__error){ box.innerHTML='<span style="color:var(--crit)">'+t('sig_preview_err',{detail:escapeHtml((p&&p.__text)||('HTTP '+(p&&p.__error)))})+'</span>'; return; } const n=p.count==null?(p.findings||[]).length:p.count; // D-032: when the records cache was cold the detector saw nothing — say so
       // instead of a misleading "0 findings" that looks like the signal never fires.
