@@ -126,6 +126,18 @@
         // data source slugs (institution/portal names) — used by the source
         // dropdowns so they show names, not the raw enum tag.
         src_hkma:'HKMA', src_datagovhk:'data.gov.hk', src_press:'HKMA Press', src_landsd:'LandsD / CSDI', src_immigration:'Immigration Department', src_landregistry:'Land Registry', src_rvd:'Rating & Valuation Dept', src_chungsen:'Chung Sen', src_aaproperty:'AA Property', src_hkp:'HK Property (HKP)', src_midland:'Midland',
+        // dataset tag chips (cross-cutting concerns on /sources) — used by
+        // tagLabel() so chips show a friendly name, not the raw tag slug.
+        // Source-slug tags reuse the src_* translations via tagLabel()'s
+        // fallback chain, so only the topic-specific tags need explicit entries.
+        tag_hibor:'HIBOR', 'tag_interest-rate':'interest rate', tag_property:'property', 'tag_price-index':'price index',
+        tag_transactions:'transactions', tag_auction:'auction', tag_foreclosure:'foreclosure', 'tag_bank-owned':'bank-owned',
+        'tag_land-registry':'Land Registry', 'tag_transaction-volume':'transaction volume', 'tag_by-class':'by class',
+        'tag_rental-index':'rental index', tag_domestic:'domestic', 'tag_passenger-traffic':'passenger traffic',
+        'tag_border-crossing':'border crossing', 'tag_control-point':'control point', tag_totals:'totals',
+        tag_geospatial:'geospatial', tag_catalog:'catalog', 'tag_economic-indicators':'economic indicators',
+        tag_affordability:'affordability', 'tag_mortgage-rate':'mortgage rate', 'tag_recent-sales':'recent sales',
+        tag_session:'session', tag_schedule:'schedule', 'tag_中文':'中文', tag_english:'English',
         // cadence values
         cad_daily:'daily', cad_weekly:'weekly', cad_monthly:'monthly', cad_quarterly:'quarterly', cad_annual:'annual', cad_yoy:'year-over-year', cad_unknown:'unknown',
         // record field keys (HKMA/data.gov.hk) — used by the timeline field
@@ -315,6 +327,15 @@
         cat_monetary:'貨幣', cat_fiscal:'財政', cat_property:'物業', cat_trade:'貿易', cat_population:'人口', cat_livability:'宜居', cat_government:'政府', cat_other:'其他',
         // data source slugs — 機構/平台名稱 (source dropdowns)
         src_hkma:'金管局', src_datagovhk:'資料一線通', src_press:'金管局新聞公報', src_landsd:'地政總署／空間數據', src_immigration:'入境事務處', src_landregistry:'土地註冊處', src_rvd:'差餉物業估價處', src_chungsen:'中誠地產', src_aaproperty:'環亞物業拍賣', src_hkp:'香港置業', src_midland:'美聯物業',
+        // 標籤 (tag chips)
+        tag_hibor:'港元拆息', 'tag_interest-rate':'利率', tag_property:'物業', 'tag_price-index':'樓價指數',
+        tag_transactions:'成交', tag_auction:'拍賣', tag_foreclosure:'銀主盤', 'tag_bank-owned':'銀主盤',
+        'tag_land-registry':'土地註冊處', 'tag_transaction-volume':'成交量', 'tag_by-class':'按類別',
+        'tag_rental-index':'租金指數', tag_domestic:'私人住宅', 'tag_passenger-traffic':'客流',
+        'tag_border-crossing':'口岸', 'tag_control-point':'管制站', tag_totals:'合計',
+        tag_geospatial:'地理空間', tag_catalog:'目錄', 'tag_economic-indicators':'經濟指標',
+        tag_affordability:'負擔能力', 'tag_mortgage-rate':'按揭利率', 'tag_recent-sales':'近期成交',
+        tag_session:'場次', tag_schedule:'時間表', 'tag_中文':'中文', tag_english:'English',
         // cadence values
         cad_daily:'每日', cad_weekly:'每週', cad_monthly:'每月', cad_quarterly:'每季', cad_annual:'每年', cad_yoy:'按年比較', cad_unknown:'未知',
         // record field keys — 中文描述 (timeline field dropdown)
