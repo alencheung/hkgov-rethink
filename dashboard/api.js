@@ -55,6 +55,26 @@
       if(v!==k) return v;
       return String(src).replace(/[-_]/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
     }
+    // Translate a raw dataset tag slug (e.g. `chungsen`, `foreclosure`,
+    // `二手樓價指數`) as a friendly chip label. Falls back to the source
+    // label (so a `midland` tag renders as "Midland"/"美聯物業"), then to
+    // a humanized form, then to the raw tag (preserving CJK tags verbatim,
+    // which are already human-readable and need no translation).
+    function tagLabel(tag){
+      if(!tag) return '';
+      // 1. explicit tag_<slug> translation
+      const k='tag_'+String(tag).toLowerCase();
+      const v=t(k);
+      if(v!==k) return v;
+      // 2. reuse the src_<slug> translation when the tag IS a source name
+      //    (chungsen / hkp / midland / aaproperty / hkma / ...)
+      const sv=t('src_'+String(tag).toLowerCase());
+      if(sv!=='src_'+String(tag).toLowerCase()) return sv;
+      // 3. CJK / non-ASCII tags are already human-readable — return as-is
+      if(/[^\x00-\x7F]/.test(tag)) return tag;
+      // 4. humanize ascii slugs (e.g. `bank-owned` → `Bank Owned`)
+      return String(tag).replace(/[-_]/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+    }
     // Translate a cadence value (daily/weekly/monthly/...); falls back to raw.
     function cadenceLabel(cad){ if(!cad) return '—'; const k='cad_'+cad.toLowerCase(); const v=t(k); return v===k?cad:v; }
     // Render a raw record field key (e.g. `hibor_overnight`) as a human label.
