@@ -125,7 +125,10 @@ impl LandRegistryConnector {
     /// the current month's file isn't published yet).
     async fn fetch_all_instruments(&self) -> Result<Vec<serde_json::Value>> {
         let now = Utc::now();
-        // Try the current month, then fall back to the prior month.
+        // Try the current month, then fall back to the prior month. The
+        // prior-month fallback exists because the current-month file is
+        // published mid-month, so early in a month it may not yet exist (404).
+        let mut last_status: u16 = 0;
         for offset in [0, 1] {
             let d = now
                 .checked_sub_signed(chrono::Duration::days(offset * 31))
@@ -143,6 +146,16 @@ impl LandRegistryConnector {
                     detail: format!("transport: {e}"),
                 })?;
             if !resp.status().is_success() {
+                // Record the status so we can build a meaningful error if BOTH
+                // months fail. A 404 on the current month is expected early in
+                // the month (file not published yet) → fall through to the
+                // prior-month attempt. But if the prior month ALSO fails, we
+                // must NOT return Ok(empty) — that would make the ingest
+                // supervisor call put_dataset([]), atomically REPLACING the
+                // live dataset with nothing (silent data wipe). Return Err so
+                // the supervisor skips the put and preserves prior data
+                // (D-037 / C-2).
+                last_status = resp.status().as_u16();
                 continue;
             }
             // Cap the instruments body before parsing (PERF-CON-01).
@@ -161,7 +174,17 @@ impl LandRegistryConnector {
                 })?;
             return Ok(parsed.as_array().cloned().unwrap_or_default());
         }
-        Ok(Vec::new())
+        // Both months failed (e.g. upstream 5xx, or the file moved). Returning
+        // an error here — rather than Ok(empty) — ensures the ingest supervisor
+        // logs "fetch failed" and leaves the cached dataset intact, instead of
+        // silently replacing it with zero records.
+        Err(Error::Upstream {
+            origin: "landregistry",
+            status: last_status,
+            detail: format!(
+                "all-instruments file unavailable for both current and prior month (last status {last_status})"
+            ),
+        })
     }
 }
 

@@ -128,7 +128,17 @@ fn fingerprint(ev: &[EvidenceRef]) -> String {
     for e in ev {
         e.record_id.hash(&mut h);
         e.field.hash(&mut h);
-        e.value.to_string().hash(&mut h);
+        // D-041 (F-004): use the cite module's canonical JSON serialization,
+        // not plain `value.to_string()`. The prior form (a) serialized NaN and
+        // ±Inf all as JSON `null`, so three distinct evidence values collided
+        // into one fingerprint — a finding whose evidence drifted from a finite
+        // value to NaN kept the SAME insight id and was silently deduped as
+        // "unchanged" instead of being re-surfaced; and (b) was sensitive to
+        // object-key insertion order, so the same logical evidence with
+        // differently-ordered keys fingerprinted differently. The canonical
+        // form sorts keys recursively and tags non-finite values distinctly
+        // (the same treatment A-007 applied to the cite reproducibility hash).
+        crate::cite::canonical_json_string(&e.value).hash(&mut h);
     }
     format!("{:016x}", h.finish())
 }

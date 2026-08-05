@@ -1361,16 +1361,35 @@ async fn unprecedentedness(
 ) -> Result<Json<hkgov_agent::Unprecedentedness>, ApiError> {
     let source = parse_source(&q.source)?;
     let id = DatasetId::new(source, q.dataset.clone());
-    // Pull the full history (cap at the page size the store supports; the
-    // 90-day default window is well inside it).
-    let page = state.store.get_page(&id, 0, 500).await?;
+    // Pull the FULL history, not just the first 500 rows. The prior single
+    // `get_page(&id, 0, 500)` silently truncated any dataset larger than 500
+    // records — a daily feed with >500 rows (~17 months) was scored against its
+    // oldest 500 rows only, so the band edges, percentile, and "last exceeded"
+    // date were all computed over a truncated sample (F-001 / D-020 class).
+    // This is the same pagination pattern `scheduler::collect_all_records` and
+    // `signal::preview_signal` use, so the comparator sees the same baseline the
+    // detectors do.
+    let mut records: Vec<hkgov_common::NormalizedRecord> = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let page = state.store.get_page(&id, offset, 500).await?;
+        if page.records.is_empty() {
+            break;
+        }
+        let len = page.records.len();
+        records.extend(page.records);
+        if len < 500 {
+            break;
+        }
+        offset += len;
+    }
     // D-031: if the records cache is cold (refresh in flight / LRU eviction),
     // `get_page` now returns an empty page rather than 502. But scoring a value
     // against zero history would silently produce a misleading "no historical
     // data" result. Detect that case via the registry's persisted count and
     // surface a retryable 503 instead, so the comparator UI can tell the user
     // "data temporarily unavailable, retry" rather than showing a false band.
-    if page.records.is_empty() {
+    if records.is_empty() {
         if let Some(meta) = state.store.meta(&id).await? {
             if meta.record_count > 0 {
                 return Err(ApiError(hkgov_common::Error::StoreUnavailable(format!(
@@ -1398,8 +1417,7 @@ async fn unprecedentedness(
         }
     }
     // History = all field values in chronological order.
-    let history: Vec<f64> = page
-        .records
+    let history: Vec<f64> = records
         .iter()
         .filter_map(|r| match r.fields.get(&q.field)? {
             hkgov_common::RecordValue::Float(f) => Some(*f),
@@ -1407,7 +1425,6 @@ async fn unprecedentedness(
             _ => None,
         })
         .collect();
-    let records = page.records;
     let read = hkgov_agent::score_unprecedentedness(q.value, &history, &records, &q.field, k);
     Ok(Json(read))
 }

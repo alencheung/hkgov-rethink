@@ -150,11 +150,20 @@ where
         let armed = self.armed.clone();
         tokio::spawn(async move {
             tokio::time::sleep(debounce).await;
-            armed.store(false, std::sync::atomic::Ordering::SeqCst);
+            // D-038 (F-005): clear the armed flag AFTER the snapshot write
+            // completes, not before. Clearing it before the read/write window
+            // let a concurrent schedule() compare_exchange successfully and spawn
+            // a second writer targeting the same tmp path — breaking the
+            // coalescing guarantee (one write per debounce window) and, on
+            // Windows, risking a transient rename collision when two writers
+            // race the tmp→final rename. Holding the flag for the whole write
+            // means a burst of triggers within one write window coalesces to a
+            // single on-disk snapshot.
             let snapshot = data.read().await.clone();
             if let Err(e) = snapshot_to_file(&path, &snapshot).await {
                 tracing::warn!(path = %path.display(), error = %e, "debounced snapshot failed");
             }
+            armed.store(false, std::sync::atomic::Ordering::SeqCst);
         });
     }
 }
