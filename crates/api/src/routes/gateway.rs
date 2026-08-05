@@ -109,12 +109,21 @@ pub(super) async fn register_dataset(
         )
         .await;
 
+    // SEC-API-08 (F-5): validate the caller-supplied `upstream_url` before
+    // persisting it into the lineage record. The value is later re-emitted
+    // verbatim by GET /v1/datasets/{source}/{dataset}/lineage and GET /v1/lineage,
+    // so an unvalidated string (javascript:, data:, embedded CRLF/HTML) is a
+    // stored content-injection vector against any downstream consumer that
+    // renders the lineage as a clickable link. This mirrors the SEC-API-07
+    // sanitize_base_url check applied to the citation base_url.
+    let upstream_url = sanitize_upstream_url(&req.upstream_url)?;
+
     // Seed lineage. No records yet → empty-input hash + zero count. The first
     // connector refresh (or a manual `put_dataset`) will overwrite this with
     // the real content hash.
     let lineage = hkgov_store::lineage_from(
         &id,
-        &req.upstream_url,
+        &upstream_url,
         upstream_format,
         &req.schema_version,
         &[],
@@ -186,4 +195,34 @@ fn parse_upstream_format(s: Option<&str>) -> UpstreamFormat {
         Some("feed") => UpstreamFormat::Feed,
         _ => UpstreamFormat::Unknown,
     }
+}
+
+/// SEC-API-08 (F-5): validate a caller-supplied `upstream_url` before it is
+/// persisted into a `DatasetLineage` and later re-emitted verbatim by the
+/// lineage read endpoints. Rejects non-http(s) schemes (`javascript:`, `data:`,
+/// …) and any control / HTML metacharacters (CRLF, `<`, `>`, quotes) that would
+/// enable stored content-injection into a downstream renderer. Mirrors the
+/// SEC-API-07 `sanitize_base_url` check on the citation `base_url`.
+fn sanitize_upstream_url(raw: &str) -> Result<String, ApiError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError(hkgov_common::Error::BadRequest(
+            "upstream_url must not be empty".into(),
+        )));
+    }
+    if trimmed
+        .chars()
+        .any(|c| c.is_control() || c == '<' || c == '>' || c == '"' || c == '\'')
+    {
+        return Err(ApiError(hkgov_common::Error::BadRequest(
+            "upstream_url contains illegal characters".into(),
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err(ApiError(hkgov_common::Error::BadRequest(
+            "upstream_url must be an absolute http(s) URL".into(),
+        )));
+    }
+    Ok(trimmed.to_string())
 }

@@ -347,7 +347,7 @@ fn evidence_hash(evidence: &[EvidenceRef], records: &[hkgov_common::NormalizedRe
 
 /// Canonical JSON serialization of a serde_json::Value (sorted object keys),
 /// so two semantically-equal values hash identically regardless of key order.
-fn canonical_json_string(value: &serde_json::Value) -> String {
+pub(crate) fn canonical_json_string(value: &serde_json::Value) -> String {
     let canonical = canonicalize(value);
     // serde_json::to_string is stable for our canonicalized (sorted-key) form
     // for finite numbers. Non-finite f64 (NaN/+inf/-inf) would serialize as

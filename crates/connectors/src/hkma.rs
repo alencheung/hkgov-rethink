@@ -415,13 +415,16 @@ fn record_id_for(dataset: &str, fields: &BTreeMap<String, RecordValue>) -> Strin
     }
 
     if let Some(date) = date_base {
-        // D-013: multi-dimensional datasets (keyed by period + a dimension such
-        // as currency, sector, country, …) previously all collapsed onto the
-        // bare date as their record_id. Two rows sharing a date but differing
-        // on the dimension got the SAME id, which silently overwrote each
-        // other in PgStore (PK collision) and muddied dedup in MemoryStore.
-        // Append the first non-empty dimension value found so each row is
-        // uniquely identifiable.
+        // D-013 / D-036 (C-3): multi-dimensional datasets (keyed by period + one
+        // or more dimensions such as currency, sector, country, …) previously
+        // collapsed onto the bare date as their record_id. The D-013 fix appended
+        // only the FIRST non-empty dimension — but HKMA tables are routinely keyed
+        // by two or more (e.g. end_of_month × currency × sector). Two rows sharing
+        // a date AND the first dimension but differing on the second still got the
+        // SAME id, silently overwriting each other in PgStore (PK collision) and
+        // corrupting the cite evidence hash in MemoryStore. Collect EVERY present
+        // dimension value, in a stable (field-declaration) order, so the composite
+        // key is unique per row while remaining deterministic across refreshes.
         const DIMENSION_FIELDS: &[&str] = &[
             "currency",
             "sector",
@@ -436,14 +439,18 @@ fn record_id_for(dataset: &str, fields: &BTreeMap<String, RecordValue>) -> Strin
             "sub_type",
             "breakdown",
         ];
+        let mut dims: Vec<&str> = Vec::new();
         for key in DIMENSION_FIELDS {
             if let Some(RecordValue::Str(s)) = fields.get(*key) {
                 if !s.is_empty() {
-                    return format!("{date}|{s}");
+                    dims.push(s.as_str());
                 }
             }
         }
-        return date;
+        if dims.is_empty() {
+            return date;
+        }
+        return format!("{date}|{}", dims.join("|"));
     }
 
     // Deterministic fallback when no date/period field is present. Delegates to
@@ -559,6 +566,31 @@ mod tests {
         let id = record_id_for("banks-branch-locator", &fields);
         assert!(id.starts_with("id-"), "no date field -> hash id, got: {id}");
         assert!(id.len() > "id-".len(), "hash id must carry a digest");
+    }
+
+    #[test]
+    fn record_id_disambiguates_multi_dimensional_rows() {
+        // D-036 (C-3): two rows sharing a date AND the first dimension
+        // (currency) but differing on a second dimension (sector) MUST get
+        // distinct record_ids. The D-013 fix only appended the first dimension,
+        // so these two rows collided and silently overwrote each other.
+        let mut base = BTreeMap::new();
+        base.insert("end_of_month".into(), RecordValue::Str("2026-05".into()));
+        base.insert("currency".into(), RecordValue::Str("USD".into()));
+        base.insert("sector".into(), RecordValue::Str("banking".into()));
+        let id_a = record_id_for("monetary-statistics", &base);
+
+        let mut row_b = base.clone();
+        row_b.insert("sector".into(), RecordValue::Str("corporate".into()));
+        let id_b = record_id_for("monetary-statistics", &row_b);
+
+        assert_ne!(
+            id_a, id_b,
+            "rows differing on a second dimension must not collide: {id_a} vs {id_b}"
+        );
+        // Both must carry the date + both dimensions in declaration order.
+        assert_eq!(id_a, "2026-05|USD|banking");
+        assert_eq!(id_b, "2026-05|USD|corporate");
     }
 
     #[test]

@@ -170,6 +170,18 @@ impl TrafficRow {
         if self.date_iso.is_empty() {
             return None;
         }
+        // D-035 (C-1): the tidy dataset is one row per checkpoint × direction
+        // × day (~28 rows/day). The bare `date_iso` made all rows for a day
+        // share one record_id — in PgStore the PK collision collapsed them to
+        // a single survivor (silent ~96% data loss), and in MemoryStore the
+        // cite `get_by_ids(record_id)` returned all colliding rows, bloating
+        // + non-determinizing the reproducibility hash. Disambiguate with the
+        // two natural sub-day keys, mirroring the D-023 fix applied to signals.
+        // Built before the field moves below borrow `control_point`/`direction`.
+        let record_id = format!(
+            "{}|{}|{}",
+            self.date_iso, self.control_point, self.direction
+        );
         let mut fields = BTreeMap::new();
         fields.insert("control_point".into(), RecordValue::Str(self.control_point));
         fields.insert("direction".into(), RecordValue::Str(self.direction));
@@ -186,7 +198,7 @@ impl TrafficRow {
         Some(NormalizedRecord {
             source: DataSource::Immigration,
             dataset: "daily-passenger-traffic".into(),
-            record_id: self.date_iso,
+            record_id,
             fields,
             fetched_at: now,
         })
@@ -362,6 +374,40 @@ mod tests {
         assert_eq!(rows[0].total, 1700);
         assert_eq!(rows[1].control_point, "Lo Wu");
         assert_eq!(rows[1].mainland_visitors, 8000);
+    }
+
+    #[test]
+    fn tidy_record_ids_disambiguate_same_day_by_checkpoint_and_direction() {
+        // D-035 (C-1): two tidy rows for the same day but different control
+        // point / direction must get DISTINCT record_ids. Previously the bare
+        // date made them collide — collapsing 28 rows/day to 1 in PgStore and
+        // corrupting the cite evidence hash in MemoryStore.
+        let rows = parse_csv(
+            "Date,Control Point,Arrival / Departure,Hong Kong Residents,Mainland Visitors,Other Visitors,Total,\n\
+             30-06-2026,Airport,Arrival,1000,500,200,1700,\n\
+             30-06-2026,Airport,Departure,900,400,150,1450,\n\
+             30-06-2026,Lo Wu,Arrival,2000,8000,100,10100,\n",
+        )
+        .unwrap();
+        let now = Utc::now();
+        let ids: Vec<String> = rows
+            .into_iter()
+            .filter_map(|r| r.into_record(now))
+            .map(|r| r.record_id)
+            .collect();
+        // All three ids must be distinct.
+        let unique: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+        assert_eq!(ids.len(), 3, "three tidy rows");
+        assert_eq!(
+            unique.len(),
+            3,
+            "all same-day rows must have distinct record_ids, got {ids:?}"
+        );
+        // And the date is still the leading segment (preserves date-prefix joins).
+        assert!(
+            ids.iter().all(|id| id.starts_with("2026-06-30|")),
+            "date remains the leading segment: {ids:?}"
+        );
     }
 
     #[test]

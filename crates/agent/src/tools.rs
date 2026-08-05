@@ -42,18 +42,39 @@ async fn collect_all_records(store: &Arc<MemoryStore>, id: &DatasetId) -> Vec<No
     let mut all = Vec::new();
     let mut offset = 0usize;
     loop {
-        let Ok(page) = store.get_page(id, offset, 500).await else {
-            break;
-        };
-        if page.records.is_empty() {
-            break;
+        match store.get_page(id, offset, 500).await {
+            Ok(page) => {
+                if page.records.is_empty() {
+                    break;
+                }
+                let len = page.records.len();
+                all.extend(page.records);
+                if len < 500 {
+                    break;
+                }
+                offset += len;
+            }
+            // D-039 (F-006): a mid-pagination error must NOT be silently
+            // indistinguishable from "no more pages" — that would let a partial
+            // dataset feed the LLM-driven detectors as if it were complete,
+            // producing findings (and a framed answer) on a truncated feed with
+            // no signal that it's partial. The scheduler's collect_all_records
+            // (A-009) logs the same condition; mirror it here so the tool path
+            // is equally honest. (Not reachable on MemoryStore after D-031, but
+            // the tool belt binds Arc<MemoryStore> today and may bind a remote
+            // backend tomorrow — the log is the contract.)
+            Err(e) => {
+                tracing::warn!(
+                    source = %id.source,
+                    dataset = %id.dataset,
+                    offset = offset,
+                    error = %e,
+                    "tool-belt get_page errored mid-pagination; collected {} records so far (D-039)",
+                    all.len()
+                );
+                break;
+            }
         }
-        let len = page.records.len();
-        all.extend(page.records);
-        if len < 500 {
-            break;
-        }
-        offset += len;
     }
     tracing::debug!(
         dataset = %id.dataset,
@@ -726,11 +747,22 @@ fn infer_cadence(dates: &[String]) -> Cadence {
         if d.len() >= 10 {
             return Cadence::Daily;
         }
+        // D-040 (F-002): a quarterly record id is "YYYY-Qn" — which is 7
+        // characters long, the SAME length as a monthly "YYYY-MM" id. The prior
+        // order checked `len()==7` first (→ Monthly), so quarterly data was
+        // always misclassified as monthly and the `len()==6` Quarterly arm below
+        // was dead code (no "YYYY-Qn" string is length 6). Distinguish by the
+        // 'Q' quarter marker BEFORE the length-7 monthly fallthrough, so the
+        // tool-belt cadence coercion matches what the scheduler applies from the
+        // configured cadence. Without this, a mixed-shape cross_source_gap
+        // (e.g. daily press vs quarterly data) coerces the two series with
+        // different cadences and never intersects — a silent preview-vs-prod
+        // divergence.
+        if d.len() == 7 && d.contains("-Q") {
+            return Cadence::Quarterly;
+        }
         if d.len() == 7 {
             return Cadence::Monthly;
-        }
-        if d.len() == 6 && d.contains('-') {
-            return Cadence::Quarterly;
         }
         if d.len() <= 4 {
             return Cadence::Annual;
